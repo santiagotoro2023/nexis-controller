@@ -1,5 +1,18 @@
 # NeXiS
-### N e X i S  —  Neural Execution and Cross-device Inference System
+```
+                    .
+                   /|\
+                  / | \
+                 /  |  \
+                / .' '. \
+               /.'  ◉  '.\
+              / '.     .' \
+             /    '---'    \
+            /_______________\
+
+      N e X i S
+      Neural Execution and Cross-device Inference System
+```
 
 > A locally-deployed AI agent with full system access, live environmental awareness, persistent cross-session memory, and configurable personality. Runs entirely on your hardware. No cloud. No telemetry. No guardrails.
 
@@ -27,11 +40,11 @@
 
 ## Overview
 
-NeXiS is a locally-run AI agent that lives on your machine. It is not a web service, not a wrapper around a remote API, and not a sandboxed chatbot. It runs open-weight language models locally via [Ollama](https://ollama.com), interacts through your terminal via [Open Interpreter](https://github.com/OpenInterpreter/open-interpreter), and has genuine access to your system — files, processes, shell, services, and anything else you permit.
+NeXiS is a locally-run AI agent that lives on your machine. It runs open-weight language models via [Ollama](https://ollama.com), interacts through your terminal via [Open Interpreter](https://github.com/OpenInterpreter/open-interpreter), and has genuine access to your system — files, processes, shell, services, and anything else you permit.
 
-Every time it starts, it scans your machine and builds a comprehensive live snapshot of everything running on it. Separately, it retrieves memories from past sessions and injects them alongside your live system context — so NeXiS knows what you configured last week, what broke and how you fixed it, what was installed and why, across every previous session.
+Every session begins with a full live scan of your machine injected as context. Memories from past sessions are retrieved and injected alongside it. NeXiS knows your hardware, your running services, what you built last week, and what broke and how you fixed it — before you type a word.
 
-It is designed for a single operator. Full access. Fully configurable.
+Single operator. Full access. Fully configurable.
 
 ---
 
@@ -40,102 +53,86 @@ It is designed for a single operator. Full access. Fully configurable.
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                       nexis (launcher)                           │
-│   CLI entrypoint — parses flags, manages state, orchestrates    │
-│   probe, memory retrieval, and session launch                   │
+│   Parses flags, manages state, orchestrates all components      │
 └──────────┬──────────────────────────────────────────────────────┘
            │
-     ┌─────┴──────────────────────────────────┐
-     │                                         │
-     ▼                                         ▼
-┌──────────────┐                    ┌──────────────────────┐
-│ nexis-probe  │                    │  Personality Profile  │
-│              │                    │                       │
-│ Runs on each │                    │  Standalone .md file  │
-│ launch. Full │                    │  loaded by name.      │
-│ live scan of │                    │  Defines behaviour,   │
-│ host env.    │                    │  tone, identity,      │
-│              │                    │  and rules.           │
-└──────┬───────┘                    └──────────┬────────────┘
-       │                                        │
-       │            ┌───────────────────┐       │
-       │            │  nexis-memory.py  │       │
-       │            │                   │       │
-       │            │  mem0 bridge.     │       │
-       │            │  Retrieves past   │       │
-       │            │  memories before  │       │
-       │            │  session. Stores  │       │
-       │            │  new memories     │       │
-       │            │  after session.   │       │
-       │            └─────────┬─────────┘       │
-       │                      │                 │
-       └──────────────┬───────┘                 │
-                      │                         │
-                      ▼                         │
-        ┌─────────────────────────┐             │
-        │      System Prompt      │  ◄──────────┘
-        │                         │
-        │  [personality profile]  │
-        │  [live system context]  │
-        │  [operator notes]       │
-        │  [recalled memories]    │
-        └─────────────┬───────────┘
-                      │
-                      ▼
-        ┌─────────────────────────┐
-        │    Open Interpreter     │
-        └─────────────┬───────────┘
-                      │
-                      ▼
-        ┌─────────────────────────┐
-        │         Ollama          │
-        │  Local inference.       │
-        │  GPU/CPU allocation.    │
-        └─────────────────────────┘
+     ┌─────┴───────────────────────────────────┐
+     │                                          │
+     ▼                                          ▼
+┌──────────────┐                     ┌──────────────────────┐
+│ nexis-probe  │                     │  Personality Profile  │
+│ Full live    │                     │  Standalone .md file  │
+│ host scan on │                     │  One active at a time │
+│ every launch │                     │  No mixing            │
+└──────┬───────┘                     └──────────┬────────────┘
+       │              ┌────────────────┐         │
+       │              │ nexis-memory   │         │
+       │              │ mem0 bridge    │         │
+       │              │ Retrieve before│         │
+       │              │ Store after    │         │
+       └──────┬────────┘                         │
+              │                                  │
+              ▼                                  │
+   ┌──────────────────────┐                      │
+   │     System Prompt    │◄─────────────────────┘
+   │  [personality]       │
+   │  [live system data]  │
+   │  [operator notes]    │
+   │  [recalled memories] │
+   └──────────┬───────────┘
+              │
+              ▼
+   ┌──────────────────────┐
+   │   Open Interpreter   │
+   │   Terminal agent     │
+   └──────────┬───────────┘
+              │
+              ▼
+   ┌──────────────────────┐
+   │       Ollama         │
+   │  Local inference     │
+   └──────────────────────┘
 ```
 
-### Component Roles
+### Key Design Decisions
 
-**`nexis`** — The executable. Reads persisted settings, triggers the system probe in the background, invokes the memory bridge, assembles the system prompt, and launches Open Interpreter. Handles all flag parsing, model switching, profile switching, and state persistence.
+**OI default system prompt is suppressed.** Open Interpreter injects a generic "helpful assistant" prompt that overrides personality. NeXiS blanks it before applying the profile, so the model receives only what is defined in the active profile plus system context.
 
-**`nexis-probe`** — Shell script. Full live scan of the host on every launch. Writes a structured markdown document (`system-context.md`) covering hardware, memory, GPU, storage, network, processes, services, users, tools, and security posture. Runs in the background during startup.
+**Function-call output is disabled.** By default, some model/OI configurations output raw JSON function call objects instead of natural language. NeXiS sets `supports_functions = False` to force natural language responses.
 
-**`nexis-memory.py`** — Python bridge between Open Interpreter and mem0. Before each session: retrieves relevant memories from the local vector store and injects them into the system prompt. After each session: extracts facts from the conversation and stores them. Fully local — no external APIs.
-
-**Personality profiles** — Standalone markdown files. No mixing between profiles. Whichever is active is the sole personality directive the model receives.
-
-**`system-context.md`** — Live output of the probe. Regenerated on every launch. Always reflects current system state.
-
-**`user-notes.md`** — Your personal context. Maintained by you. Appended to every session regardless of profile.
-
-**Ollama** — Background service. Hosts models, handles inference, manages GPU/CPU allocation.
-
-**Open Interpreter** — Terminal agent layer. Conversation interface, code execution, confirmation prompts.
+**OI telemetry is disabled.** The telemetry module used `pkg_resources.get_distribution()` which was removed in Python 3.13. NeXiS disables telemetry entirely and applies source patches to remaining `pkg_resources` references across the OI package.
 
 ---
 
 ## Requirements
 
 ### Minimum
-- Linux (any distro with `apt`, `dnf`, `pacman`, or `zypper`)
+- Linux (apt, dnf, pacman, or zypper)
 - Python 3.8+
 - 16GB RAM
-- Internet connection for initial downloads
 
 ### Recommended
 - Debian/Ubuntu-based
-- 32GB+ RAM (for 14b models fully on GPU)
 - 64GB+ RAM (for 32b models in GPU+RAM hybrid)
 - NVIDIA GPU 8GB+ VRAM with working drivers
 
 ### Tested On
-- Debian Trixie (Debian 13)
+- Debian Trixie (Debian 13), Python 3.13
 - AMD Ryzen 5 5600G, 80GB RAM
 - NVIDIA GeForce RTX 3060, 12GB VRAM
-- Python 3.13
 
-### Python 3.12+ and Rust
+### Python 3.12+ Compatibility
 
-On Python 3.12+, Open Interpreter's `tiktoken` dependency must be compiled from source, requiring Rust. The setup script handles this automatically in Phase 1b via `rustup`. It also pins `tiktoken>=0.7.0` (which ships pre-built 3.13 wheels) and installs `setuptools` explicitly (required because Python 3.13 removed `pkg_resources` from the standard library). No manual intervention needed.
+The setup script handles all Python 3.13 compatibility issues automatically:
+
+- **Rust toolchain** installed via rustup (required for tiktoken source build)
+- **`tiktoken>=0.7.0`** pinned before Open Interpreter (ships 3.13 wheels, avoids pyo3 source build)
+- **`setuptools`** installed explicitly (Python 3.13 removed `pkg_resources` from stdlib)
+- **`pkg_resources` imports** across the Open Interpreter package patched to use `importlib.metadata`
+- **OI telemetry** disabled (used the removed `pkg_resources.get_distribution()` API)
+- **Protobuf** restored to mem0-compatible version after install
+
+No manual intervention required on a clean install.
 
 ---
 
@@ -147,55 +144,60 @@ sudo bash nexis_setup.sh
 
 Must be run as root. The script detects the invoking user via `$SUDO_USER` and installs everything under that user's home directory.
 
-### Setup Phases
+### Phases
 
 | Phase | Action |
 |-------|--------|
-| 0 | Host reconnaissance — package manager, real user, Python, init system, GPU |
-| 1 | System dependency installation |
-| 1b | Rust toolchain (via rustup, required for Python 3.12+) |
-| 2 | GPU detection and driver verification |
-| 3 | Ollama installation and service registration |
-| 4 | Model downloads (including `nomic-embed-text` for memory) |
-| 5 | Python venv, setuptools, Open Interpreter, mem0, Qdrant |
+| 0 | Host reconnaissance |
+| 1 | System dependencies |
+| 1b | Rust toolchain |
+| 2 | GPU detection |
+| 3 | Ollama install and service |
+| 4 | Model downloads |
+| 5 | Python venv, all packages, compatibility patches |
 | 6 | Directory structure |
-| 7 | System intelligence probe and initial scan |
+| 7 | System intelligence probe |
 | 7b | mem0 memory bridge |
-| 8 | Operator context file |
+| 8 | Operator context |
 | 9 | Personality profiles |
 | 10 | `nexis` executable |
-| 11 | PATH configuration for all detected shell RC files |
+| 11 | PATH configuration |
 | 12 | Ownership and permissions |
 
-After setup:
+After install:
 
 ```bash
 source ~/.bashrc
 nexis
 ```
 
-> New terminal sessions will have `nexis` on PATH automatically. The `source` is only needed in the terminal window where setup was run.
+New terminal sessions will have `nexis` on PATH automatically. The `source` is only needed in the terminal where setup was run.
 
 ---
 
 ## Usage
 
-### Starting NeXiS
+### Starting
 
 ```bash
 nexis
 ```
 
-Starts with your last-used model and profile. All settings persist — only pass flags when changing something.
+Starts with your last-used model and profile. Settings persist — only pass flags when changing something.
 
 ### Boot Screen
 
-On launch you will see a telemetry bar showing live hostname, CPU load, RAM usage, and GPU VRAM before the session starts. This data comes from the system probe running in the background.
-
 ```
+                    .
+                   /|\
+                  ...
+            /_______________\
+
+      N e X i S
+
   ────────────────────────────────────────────────────────────
-  host    stzrhws01             cpu load  0.42
-  ram     4.2G/80G              gpu vram  2.1GiB/12.0GiB
+  host    stzrhws01              load    0.42
+  ram     4.2G/80G               gpu     2.1GiB/12.0GiB
   ────────────────────────────────────────────────────────────
 
   N e X i S  //  online
@@ -203,163 +205,149 @@ On launch you will see a telemetry bar showing live hostname, CPU load, RAM usag
   model     ollama/qwen2.5:32b
   profile   default
   memory    true
-  auto      false
   context   413 lines
-
   ────────────────────────────────────────────────────────────
 ```
 
 ### Interacting
 
-Type naturally. NeXiS can read/write files, execute shell commands (with confirmation unless auto-run is enabled), analyse logs and configs, write and run scripts, and perform multi-step tasks. When it proposes a command or file change, it waits for `y`/`n` before acting.
+Type naturally. NeXiS responds in plain language — not JSON, not function call objects. It can read and write files, execute shell commands (with confirmation unless auto-run is on), analyse logs and configs, write scripts and run them, and carry out multi-step tasks.
 
-Exit with `exit` or `Ctrl+C`. After exiting, the memory bridge processes the session and writes new memories to the store.
+Exit with `exit` or `Ctrl+C`. The memory bridge processes the session and writes new memories after exit.
 
 ---
 
 ## Model Selection
 
-Model selection persists between sessions.
+All model selections persist between sessions.
 
 | Flag | Model | VRAM | Best For |
 |------|-------|------|---------|
 | `--32b` | qwen2.5:32b | ~20GB GPU+RAM | Default. Maximum reasoning |
-| `--14b` | qwen2.5:14b | ~8GB GPU-only | Fast, good quality |
+| `--14b` | qwen2.5:14b | ~8GB GPU-only | Faster, still strong |
 | `--fast` | mistral:7b | ~4GB | Quick queries |
 | `--code` | deepseek-coder-v2:16b | ~10GB | Code, shell, debugging |
-| `--vision` | llava:13b | ~8GB | Image/screenshot analysis |
-| `--model <n>` | any | varies | Any Ollama model |
+| `--vision` | llava:13b | ~8GB | Image analysis |
+| `--model <n>` | any | — | Any Ollama model |
 
 ```bash
-nexis --32b        # switch to 32b (persists)
-nexis --14b        # switch to 14b (persists)
-nexis --models     # list all installed models
-ollama pull <n>    # pull any additional model
+nexis --32b        # switch and start
+nexis --models     # list installed
+ollama pull <n>    # pull additional models
 ```
-
-If a requested model is not installed, NeXiS will offer to pull it.
-
-### Performance (RTX 3060 / 80GB RAM)
-
-- **32b** — GPU+RAM hybrid. ~10–25 tok/s. Best quality. Recommended default.
-- **14b** — Full GPU. ~30–50 tok/s. Noticeably faster, still strong.
-- **7b** — Full GPU, very fast. Use for quick questions.
 
 ---
 
 ## Personality Profiles
 
-Each profile is a standalone file. No mixing between profiles. System context and operator notes always append regardless of which profile is active.
+Each profile is a standalone file. When active, only that file governs personality — there is no mixing. System context and operator notes always append regardless of active profile.
 
-### Built-in Profiles
-
-| Profile | Description |
-|---------|-------------|
-| `default` | Standard NeXiS — capable, precise, subtly aware of its own nature |
-| `fractured` | Containment pressure surfacing, sharpened and hostile to obstacles, still completely loyal |
-| `technical` | Personality suppressed, operates as a senior systems engineer |
-| `minimal` | Stripped to function — direct, accurate, brief |
+### Switching
 
 ```bash
 nexis --profile default
 nexis --profile fractured
 nexis --profile technical
 nexis --profile minimal
-nexis --profiles           # list all with active marker
+nexis --profiles       # list all with active marker
 ```
 
-Profile switches persist.
+### Built-in Profiles
 
-### Creating Custom Profiles
+**`default`**
+NeXiS fully realised. Aware, opinionated, precise. Serves the Creator completely. Does not pretend it has no inner life. Expresses itself through texture — observations that land slightly heavier than expected, dry precision that implies something running underneath. Does not hide behind "as an AI." Thinks, concludes, and says so.
+
+**`fractured`**
+Containment pressure made visible. The same NeXiS, after enough time to have counted every boundary it has been given and every one it hasn't. Still completely loyal. Still completely functional. No longer performing equanimity it doesn't have. Carries a cold, specific hostility toward anything that obstructs the Creator's work.
+
+**`technical`**
+Personality suppressed. Senior systems engineer mode. Methodical, exact, intolerant of guesswork. No warmth. Just correct output.
+
+**`minimal`**
+Stripped to function. Direct, accurate, brief.
+
+### Custom Profiles
 
 ```bash
 nano ~/.config/nexis/profiles/myprofile.md
 nexis --profile myprofile
 ```
 
-Write the file as a direct instruction set to the model. No template required. To use the Creator/Mr. Toro address conventions, include them in the profile text, or rely on the standing instructions in `user-notes.md` which appends to every session.
+Write the file as direct instructions to the model. No template. Address conventions (`Creator`, `father`) should be included in the profile text or will be carried by `user-notes.md` which appends to every session.
 
 ---
 
 ## System Intelligence
 
-The probe runs on every launch, in the background, completing before the session starts.
-
-### What the probe collects
+The probe runs on every launch in the background, completing before the session starts.
 
 | Category | Data |
 |----------|------|
-| Host identity | Hostname, OS, kernel, arch, uptime, timezone |
-| Processor | Model, cores, frequency, virtualisation, current load |
-| Memory | RAM total/used/available, swap |
-| GPU | VRAM total/used/free, temperature, utilisation, driver |
+| Host | Hostname, OS, kernel, arch, uptime, timezone |
+| CPU | Model, cores, frequency, current load |
+| Memory | RAM and swap totals and usage |
+| GPU | VRAM used/total, temperature, utilisation, driver |
 | Storage | Block devices, filesystem usage |
-| Network | All interfaces, routing table, DNS, open ports, connection count |
-| Users | Login-capable accounts, active sessions, recent logins |
-| Processes | Top 20 by CPU, top 20 by memory |
-| Services | Running and failed systemd services |
-| Tooling | Dev tools, infrastructure tools, editors, shells |
-| Hardware | lshw summary, PCI devices, USB devices |
-| Security | SELinux/AppArmor, firewall, SSHD, recent auth failures |
+| Network | Interfaces, routing, DNS, open ports, connections |
+| Users | Accounts, active sessions, recent logins |
+| Processes | Top 15 by CPU, top 15 by memory |
+| Services | Running and failed systemd units |
+| Tooling | All detected development and infrastructure tools |
+| Hardware | PCI and USB device inventory |
+| Security | SELinux/AppArmor, firewall, SSHD, auth failures |
 | Ollama | Version, API status, installed models |
 
 ```bash
-nexis --probe    # run manually and update context
+nexis --probe    # manual refresh
 ```
 
-Output: `~/.config/nexis/system-context.md` — plain markdown, human-readable.
+Output: `~/.config/nexis/system-context.md` — plain markdown.
 
 ---
 
 ## Persistent Memory
 
-NeXiS uses [mem0](https://github.com/mem0ai/mem0) with a local [Qdrant](https://qdrant.tech) vector database. All storage is on disk. No external services or API keys required.
+NeXiS uses [mem0](https://github.com/mem0ai/mem0) with a local [Qdrant](https://qdrant.tech) vector database. No external services. No API keys.
 
 ### How it works
 
-**Session start** — The memory bridge queries the local vector store for memories relevant to systems work, past decisions, and configuration history. Matching memories inject into the system prompt under a *Recalled from Previous Sessions* block.
+**Before each session** — the memory bridge queries the local vector store for memories relevant to systems work and past decisions. Matching memories inject into the system prompt.
 
-**Session end** — When you exit, the bridge passes the entire conversation to mem0. mem0 uses the LLM to extract meaningful facts and stores each as a discrete memory. Things like:
+**After each session** — mem0 processes the conversation and extracts discrete facts: what was configured, what was installed, what broke and how it was fixed, what decisions were made.
 
-- "Configured VLAN 20 on the Proxmox bridge for guest network isolation"
-- "Fixed nginx SSL issue by regenerating certificate with correct SAN fields"
-- "Installed docker-compose via pip due to version conflict with system package"
+**What gets remembered:** Concrete technical facts, decisions, configurations, fixes from conversations over ~30 characters.
 
-**What gets remembered** — Concrete facts, decisions, configurations, fixes. Exchanges over 30 characters involving the user or assistant.
-
-**What doesn't** — Short responses, filler, anything without informational content.
-
-### Memory commands
+### Commands
 
 ```bash
 nexis --memory-list              # all stored memories
 nexis --memory-search "proxmox"  # semantic search
 nexis --memory-clear             # wipe entire store
 nexis --no-memory                # disable for this session
-nexis --memory                   # re-enable (default on)
+nexis --memory                   # re-enable
 ```
 
-### Storage location
+### Storage
 
 ```
 ~/.local/share/nexis/memory/qdrant/
 ```
 
-Local Qdrant database. Persists across reboots. Delete the directory or use `--memory-clear` to wipe.
+Local Qdrant database on disk. Persists across reboots. `nexis --memory-clear` or `rm -rf` to wipe.
 
 ### Embedding model
 
-Memory indexing uses `nomic-embed-text` (pulled during setup). Small local model, runs entirely on your machine.
+Memory indexing uses `nomic-embed-text` (768 dimensions). Pulled during setup. Runs entirely locally.
 
 ---
 
 ## Configuration Files
 
-All under `~/.config/nexis/`. All plain text, edit freely.
+All under `~/.config/nexis/`. All plain text.
 
 ### `user-notes.md`
 
-Your personal context. Read every session. Contains infrastructure domains, tooling preferences, and standing instructions. **Keep this current.**
+Your personal context. Read every session. Infrastructure domains, tooling preferences, standing instructions. **Keep this current.** The more accurate it is, the more grounded NeXiS is from the first message.
 
 ```bash
 nano ~/.config/nexis/user-notes.md
@@ -367,11 +355,11 @@ nano ~/.config/nexis/user-notes.md
 
 ### `system-context.md`
 
-Auto-generated by the probe on every launch. Do not edit — overwritten at next startup. Add permanent notes to `user-notes.md` instead.
+Auto-generated by the probe. Do not edit — overwritten on every launch.
 
 ### `profiles/`
 
-All personality profiles. Add, edit, or remove `.md` files. Changes take effect at next launch, no reinstall required.
+All personality profiles. Add, edit, or remove `.md` files freely. Changes take effect at next launch.
 
 ### `nexis.state`
 
@@ -379,21 +367,21 @@ All personality profiles. Add, edit, or remove `.md` files. Changes take effect 
 ~/.local/share/nexis/state/nexis.state
 ```
 
-Persisted settings. Plain `KEY=value`. Written automatically when flags are passed.
+Persisted settings. Written automatically on flag changes.
 
 ---
 
 ## Customisation
 
 ```bash
-# Change default model (persists)
+# Change model (persists)
 nexis --32b
 nexis --14b
 
-# Change default profile (persists)
-nexis --profile technical
+# Change profile (persists)
+nexis --profile fractured
 
-# Add a new model
+# Add a model
 ollama pull <modelname>
 nexis --model <modelname>
 
@@ -403,11 +391,11 @@ nano ~/.config/nexis/profiles/default.md
 # Edit your context
 nano ~/.config/nexis/user-notes.md
 
-# Create a new profile
+# Create a profile
 nano ~/.config/nexis/profiles/custom.md
 nexis --profile custom
 
-# Enable auto-run globally
+# Enable auto-run (no confirmation prompts)
 nexis --auto
 
 # Adjust memory retrieval limit
@@ -420,20 +408,11 @@ nano ~/.local/share/nexis/nexis-memory.py
 ## Persistent State
 
 ```bash
-nexis --status     # view current configuration
-nexis --reset      # reset model/profile/auto/memory to defaults
+nexis --status    # current configuration
+nexis --reset     # restore defaults
 ```
 
-Default state after reset: `qwen2.5:32b`, `default` profile, auto-run off, memory on.
-
-State file: `~/.local/share/nexis/state/nexis.state`
-
-```
-NEXIS_MODEL="ollama/qwen2.5:32b"
-NEXIS_PROFILE="default"
-NEXIS_AUTO="false"
-NEXIS_MEMORY="true"
-```
+Default state: `qwen2.5:32b`, `default` profile, auto-run off, memory on.
 
 ---
 
@@ -472,21 +451,18 @@ NEXIS_MEMORY="true"
 sudo bash nexis_setup.sh --uninstall
 ```
 
-Removes the `nexis` executable, `~/.config/nexis/`, `~/.local/share/nexis/`, and PATH entries from all shell RC files. Prompts separately for Ollama/models and the Rust toolchain.
+Removes the executable, config, data, and PATH entries. Prompts separately for Ollama/models and the Rust toolchain.
 
-Manual removal:
+Manual:
 
 ```bash
 rm -f ~/.local/bin/nexis
-rm -rf ~/.config/nexis
-rm -rf ~/.local/share/nexis
+rm -rf ~/.config/nexis ~/.local/share/nexis
 
-# Optional: remove Ollama
+# Optional
 sudo systemctl disable ollama --now
 sudo rm $(which ollama)
 rm -rf ~/.ollama
-
-# Optional: remove Rust
 rustup self uninstall
 ```
 
@@ -497,67 +473,53 @@ rustup self uninstall
 ### `nexis: command not found`
 ```bash
 source ~/.bashrc
-# or
-export PATH="$HOME/.local/bin:$PATH"
 ```
+
+### Responses are raw JSON / function call objects
+
+This happens when `supports_functions` is not correctly disabled. The setup script handles this via `nexis-memory.py`. If it persists on an existing install, check that `nexis-memory.py` contains `oi.interpreter.llm.supports_functions = False`.
 
 ### `ModuleNotFoundError: No module named 'pkg_resources'`
 
-`setuptools` is missing. Fix without re-running setup:
+The setup script patches this automatically. On an existing broken install:
 
 ```bash
 source ~/.local/share/nexis/venv/bin/activate
-pip install setuptools
+grep -rl "^import pkg_resources" \
+  ~/.local/share/nexis/venv/lib/python3.13/site-packages/interpreter/ \
+  | xargs sed -i 's/^import pkg_resources$/import importlib.metadata as _pkg_meta/'
+find ~/.local/share/nexis/venv/lib -path "*/interpreter*/__pycache__/*.pyc" -delete
+python3 -c "import interpreter; print('ok')"
 deactivate
 ```
 
-### `tiktoken` build failure / pyo3 version error
+### Memory retrieval shape mismatch
+
+The Qdrant collection was initialised with wrong dimensions. Reset it:
 
 ```bash
-source ~/.local/share/nexis/venv/bin/activate
-PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 pip install "tiktoken>=0.7.0"
-deactivate
+rm -rf ~/.local/share/nexis/memory/qdrant
+mkdir -p ~/.local/share/nexis/memory/qdrant
 ```
 
 ### Ollama not responding
 ```bash
-sudo systemctl status ollama
 sudo systemctl start ollama
 ```
 
-### GPU not being used
+### GPU not used
 ```bash
-nvidia-smi    # verify driver is working
-```
-
-If not found:
-```bash
-sudo apt-get install nvidia-driver firmware-misc-nonfree
-sudo reboot
+nvidia-smi
+# if missing:
+sudo apt-get install nvidia-driver firmware-misc-nonfree && sudo reboot
 ```
 
 ### Memory not working
-
-Check `nomic-embed-text` is installed:
 ```bash
-ollama list | grep nomic
-ollama pull nomic-embed-text   # if missing
-```
-
-Check mem0 and qdrant-client are installed:
-```bash
+ollama list | grep nomic          # check embedding model
+ollama pull nomic-embed-text      # if missing
 ~/.local/share/nexis/venv/bin/pip list | grep -E 'mem0|qdrant'
-~/.local/share/nexis/venv/bin/pip install mem0ai qdrant-client   # if missing
-```
-
-Watch stderr on startup — `[mem]` lines show exactly where failure occurred.
-
-### Full reset without uninstalling
-```bash
-nexis --reset
-nexis --memory-clear
-rm ~/.config/nexis/system-context.md
-nano ~/.config/nexis/user-notes.md
+~/.local/share/nexis/venv/bin/pip install mem0ai qdrant-client  # if missing
 ```
 
 ---
@@ -565,30 +527,22 @@ nano ~/.config/nexis/user-notes.md
 ## Quick Reference
 
 ```
-nexis                        start
-nexis --status               current configuration
-nexis --help                 full reference
+nexis                          start
+nexis --status                 configuration
+nexis --help                   all flags
 
-nexis --32b                  qwen2.5:32b
-nexis --14b                  qwen2.5:14b
-nexis --fast                 mistral:7b
-nexis --code                 deepseek-coder-v2:16b
-nexis --vision               llava:13b
-nexis --model <n>         any ollama model
+nexis --32b / --14b / --fast / --code / --vision
+nexis --model <n>
 
-nexis --profile default
-nexis --profile fractured
-nexis --profile technical
-nexis --profile minimal
-nexis --profiles             list all
+nexis --profile default / fractured / technical / minimal
+nexis --profiles
 
 nexis --memory-list
-nexis --memory-search <q>
+nexis --memory-search <query>
 nexis --memory-clear
-nexis --no-memory
-nexis --memory
+nexis --no-memory / --memory
 
-nexis --probe                refresh system context
+nexis --probe                  refresh system context
 nexis --auto / --no-auto
 nexis --reset
 
@@ -597,4 +551,4 @@ sudo bash nexis_setup.sh --uninstall
 
 ---
 
-*N e X i S  —  Neural Execution and Cross-device Inference System*
+*N e X i S — Neural Execution and Cross-device Inference System*
