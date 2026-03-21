@@ -4,28 +4,33 @@
 #   N e X i S
 #   Neural Execution and Cross-device Inference System
 #
-#   Deployment Script — v1.0
+#   Deployment Script — v2.0
 #   Authored for controlled, single-operator installation.
 #
 #   This script will:
 #     - Audit the host environment in full
 #     - Install and configure all required runtime components
 #     - Deploy persistent system intelligence gathering
+#     - Initialise cross-session memory via mem0
 #     - Instantiate the NeXiS agent with full operational context
 #
 #   Do not interrupt once initialisation has begun.
+#
+#   Usage:
+#     sudo bash nexis_setup.sh             Install
+#     sudo bash nexis_setup.sh --uninstall Remove everything
 #
 # =============================================================================
 
 set -euo pipefail
 
 # --- Colour palette -----------------------------------------------------------
-OR='\033[38;5;208m'    # Primary: orange
-OR2='\033[38;5;172m'   # Secondary: deep orange
-GR='\033[38;5;240m'    # Dim grey
-WH='\033[38;5;255m'    # Near white
-RD='\033[38;5;160m'    # Error red
-GN='\033[38;5;70m'     # Confirmation green
+OR='\033[38;5;208m'
+OR2='\033[38;5;172m'
+GR='\033[38;5;240m'
+WH='\033[38;5;255m'
+RD='\033[38;5;160m'
+GN='\033[38;5;70m'
 BOLD='\033[1m'
 DIM='\033[2m'
 RST='\033[0m'
@@ -47,6 +52,129 @@ _require_root() {
     exit 1
   fi
 }
+
+# =============================================================================
+# UNINSTALL MODE
+# =============================================================================
+
+if [[ "${1:-}" == "--uninstall" ]]; then
+  clear
+  _pause 0.3
+
+  echo -e "${OR}${BOLD}"
+  cat << 'UNSIGIL'
+
+        ███╗   ██╗███████╗██╗  ██╗██╗███████╗
+        ████╗  ██║██╔════╝╚██╗██╔╝██║██╔════╝
+        ██╔██╗ ██║█████╗   ╚███╔╝ ██║███████╗
+        ██║╚██╗██║██╔══╝   ██╔██╗ ██║╚════██║
+        ██║ ╚████║███████╗██╔╝ ██╗██║███████║
+        ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═╝╚══════╝
+
+        Removal Sequence — Initiated
+
+UNSIGIL
+  echo -e "${RST}"
+  _pause 0.8
+  _require_root
+
+  REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || who am i | awk '{print $1}' || echo "$USER")}"
+  REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+
+  echo -e "${OR2}  This will remove all NeXiS components from this system.${RST}"
+  echo ""
+  echo -e "${DIM}  Scheduled for removal:${RST}"
+  echo -e "${DIM}    $REAL_HOME/.local/bin/nexis${RST}"
+  echo -e "${DIM}    $REAL_HOME/.config/nexis/${RST}"
+  echo -e "${DIM}    $REAL_HOME/.local/share/nexis/${RST}"
+  echo -e "${DIM}  PATH entries removed from all detected shell RC files.${RST}"
+  echo ""
+  echo -e "${DIM}  Ollama, downloaded models, and system packages will NOT be${RST}"
+  echo -e "${DIM}  removed unless explicitly selected in the prompts below.${RST}"
+  echo ""
+
+  read -rp "$(echo -e "${OR}  ▸${RST} Confirm full NeXiS removal? [y/N]: ")" CONFIRM_UNINSTALL
+  [[ ! "$CONFIRM_UNINSTALL" =~ ^[Yy]$ ]] && echo -e "${GR}  Aborted.${RST}" && exit 0
+
+  echo ""
+  _header "REMOVING NEXIS"
+  _pause 0.3
+
+  _step "Removing nexis executable..."
+  rm -f "$REAL_HOME/.local/bin/nexis" \
+    && _ok "Removed: ~/.local/bin/nexis" \
+    || _warn "nexis executable not found"
+
+  _step "Removing configuration directory..."
+  rm -rf "$REAL_HOME/.config/nexis" \
+    && _ok "Removed: ~/.config/nexis" \
+    || _warn "Config directory not found"
+
+  _step "Removing data and memory directory..."
+  rm -rf "$REAL_HOME/.local/share/nexis" \
+    && _ok "Removed: ~/.local/share/nexis" \
+    || _warn "Data directory not found"
+
+  _step "Cleaning PATH entries from shell RC files..."
+  for RC in \
+    "$REAL_HOME/.bashrc" \
+    "$REAL_HOME/.bash_profile" \
+    "$REAL_HOME/.profile" \
+    "$REAL_HOME/.zshrc"; do
+    if [[ -f "$RC" ]]; then
+      # Remove both .local/bin and .cargo/bin lines added by this script
+      sed -i '/\.local\/bin/d' "$RC" 2>/dev/null || true
+      sed -i '/\.cargo\/bin/d' "$RC" 2>/dev/null || true
+      _ok "Cleaned: $RC"
+    fi
+  done
+  FISH_CONF_UN="$REAL_HOME/.config/fish/config.fish"
+  if [[ -f "$FISH_CONF_UN" ]]; then
+    sed -i '/\.local\/bin/d' "$FISH_CONF_UN" 2>/dev/null || true
+    sed -i '/\.cargo\/bin/d' "$FISH_CONF_UN" 2>/dev/null || true
+    _ok "Cleaned: $FISH_CONF_UN"
+  fi
+
+  echo ""
+  read -rp "$(echo -e "${OR}  ▸${RST} Also remove Ollama service and all downloaded models? [y/N]: ")" REMOVE_OLLAMA
+  if [[ "$REMOVE_OLLAMA" =~ ^[Yy]$ ]]; then
+    _step "Stopping and disabling Ollama service..."
+    systemctl disable ollama --now 2>/dev/null || true
+    _step "Removing Ollama binary..."
+    OLLAMA_BIN=$(command -v ollama 2>/dev/null || echo "")
+    [[ -n "$OLLAMA_BIN" ]] && rm -f "$OLLAMA_BIN" && _ok "Ollama binary removed" || _warn "Ollama binary not found"
+    rm -f /usr/local/bin/ollama 2>/dev/null || true
+    _step "Removing Ollama model data and config..."
+    rm -rf "$REAL_HOME/.ollama" && _ok "Model data removed" || _warn "~/.ollama not found"
+    rm -rf /usr/share/ollama 2>/dev/null || true
+    # Remove systemd service file if it exists
+    rm -f /etc/systemd/system/ollama.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    _ok "Ollama fully removed"
+  else
+    _dim "Ollama and models retained."
+  fi
+
+  echo ""
+  read -rp "$(echo -e "${OR}  ▸${RST} Also remove the Rust toolchain installed by this script? [y/N]: ")" REMOVE_RUST
+  if [[ "$REMOVE_RUST" =~ ^[Yy]$ ]]; then
+    _step "Removing Rust toolchain via rustup..."
+    sudo -u "$REAL_USER" bash -c \
+      'source $HOME/.cargo/env 2>/dev/null; rustup self uninstall -y 2>/dev/null || true'
+    rm -rf "$REAL_HOME/.cargo" "$REAL_HOME/.rustup" 2>/dev/null || true
+    _ok "Rust toolchain removed"
+  else
+    _dim "Rust toolchain retained."
+  fi
+
+  echo ""
+  echo -e "${GN}${BOLD}  NeXiS removal complete.${RST}"
+  echo ""
+  echo -e "${DIM}  System packages installed as dependencies (curl, git, build-essential,${RST}"
+  echo -e "${DIM}  lshw, etc.) were not removed as they may be used by other software.${RST}"
+  echo ""
+  exit 0
+fi
 
 # =============================================================================
 # BOOT SEQUENCE
@@ -91,7 +219,6 @@ _pause 0.3
 _step "Enumerating host environment..."
 _pause 0.5
 
-# Detect OS and package manager
 if   command -v apt-get &>/dev/null; then PKG_MGR="apt-get"; PKG_INSTALL="apt-get install -y"
 elif command -v dnf     &>/dev/null; then PKG_MGR="dnf";     PKG_INSTALL="dnf install -y"
 elif command -v pacman  &>/dev/null; then PKG_MGR="pacman";  PKG_INSTALL="pacman -S --noconfirm"
@@ -100,7 +227,6 @@ else _err "No recognised package manager found. Cannot proceed."; fi
 
 _ok "Package manager: $PKG_MGR"
 
-# Detect real user (the one who invoked sudo)
 REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || who am i | awk '{print $1}' || echo "$USER")}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 REAL_SHELL=$(getent passwd "$REAL_USER" | cut -d: -f7)
@@ -109,20 +235,17 @@ _ok "Operator user: $REAL_USER"
 _ok "Home directory: $REAL_HOME"
 _ok "Login shell: $REAL_SHELL"
 
-# Detect available shells on this system
 AVAILABLE_SHELLS=()
 for sh in bash zsh fish ksh dash; do
   command -v "$sh" &>/dev/null && AVAILABLE_SHELLS+=("$sh")
 done
 _ok "Shells present: ${AVAILABLE_SHELLS[*]}"
 
-# Detect Python
 PYTHON_BIN=$(command -v python3 || command -v python || true)
 [[ -z "$PYTHON_BIN" ]] && _err "Python not found. Cannot proceed."
 PYTHON_VER=$("$PYTHON_BIN" --version 2>&1)
 _ok "Python: $PYTHON_VER ($PYTHON_BIN)"
 
-# Detect init system
 if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
   INIT_SYSTEM="systemd"
 elif command -v rc-service &>/dev/null; then
@@ -145,37 +268,77 @@ _header "PHASE 1 — DEPENDENCY INSTALLATION"
 _pause 0.3
 
 _step "Synchronising package index..."
-
 case "$PKG_MGR" in
   apt-get) apt-get update -qq ;;
   dnf)     dnf check-update -q || true ;;
   pacman)  pacman -Sy --noconfirm -q ;;
   zypper)  zypper refresh -q ;;
 esac
-
 _ok "Package index current"
 _pause 0.3
 
 _step "Installing runtime dependencies..."
-
 PACKAGES=(
   curl git build-essential
   pciutils usbutils lshw
   sqlite3 jq
   lm-sensors sysstat
 )
-
-# Add Python venv package — name varies by distro
 case "$PKG_MGR" in
   apt-get) PACKAGES+=(python3-pip python3-venv procps net-tools iproute2) ;;
   dnf)     PACKAGES+=(python3-pip procps net-tools iproute) ;;
   pacman)  PACKAGES+=(python-pip procps-ng net-tools iproute2) ;;
 esac
-
 $PKG_INSTALL "${PACKAGES[@]}" 2>/dev/null || \
   _warn "Some packages could not be installed — continuing"
-
 _ok "Dependencies installed"
+_pause 0.3
+
+# =============================================================================
+# PHASE 1b — RUST TOOLCHAIN
+# =============================================================================
+# tiktoken (Open Interpreter dependency) requires Rust to build from source
+# on Python 3.12+. Installed per-user via rustup into ~/.cargo.
+# =============================================================================
+
+_header "PHASE 1b — RUST TOOLCHAIN"
+_pause 0.3
+
+RUST_AVAILABLE=false
+if sudo -u "$REAL_USER" bash -c \
+    'source "$HOME/.cargo/env" 2>/dev/null; command -v rustc &>/dev/null'; then
+  RUST_VER=$(sudo -u "$REAL_USER" bash -c \
+    'source "$HOME/.cargo/env"; rustc --version 2>/dev/null')
+  _ok "Rust already present: $RUST_VER"
+  RUST_AVAILABLE=true
+else
+  _step "Installing Rust toolchain via rustup..."
+  _dim "Required to build tiktoken (Open Interpreter dependency) on Python 3.12+"
+  sudo -u "$REAL_USER" bash -c \
+    'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path 2>&1' \
+    && _ok "Rust toolchain installed" && RUST_AVAILABLE=true \
+    || _warn "Rust installation failed — pip will attempt to use pre-built wheels"
+fi
+
+# Make cargo available for remainder of this script session
+export PATH="$REAL_HOME/.cargo/bin:$PATH"
+
+# Persist cargo PATH to user shell RC files
+CARGO_LINE='export PATH="$HOME/.cargo/bin:$PATH"'
+CARGO_FISH_LINE='set -x PATH $HOME/.cargo/bin $PATH'
+for RC in "$REAL_HOME/.bashrc" "$REAL_HOME/.bash_profile" "$REAL_HOME/.profile" "$REAL_HOME/.zshrc"; do
+  if [[ -f "$RC" ]] && ! grep -q '\.cargo/bin' "$RC"; then
+    echo "$CARGO_LINE" >> "$RC"
+    chown "$REAL_USER:$(id -gn "$REAL_USER")" "$RC"
+    _dim "Cargo PATH added to: $RC"
+  fi
+done
+FISH_CONF_CARGO="$REAL_HOME/.config/fish/config.fish"
+if [[ -f "$FISH_CONF_CARGO" ]] && ! grep -q '\.cargo/bin' "$FISH_CONF_CARGO"; then
+  echo "$CARGO_FISH_LINE" >> "$FISH_CONF_CARGO"
+  _dim "Cargo PATH added to fish config"
+fi
+
 _pause 0.3
 
 # =============================================================================
@@ -254,7 +417,6 @@ esac
 if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
   _err "Ollama is not responding. Cannot continue model deployment."
 fi
-
 _ok "Inference runtime online"
 _pause 0.3
 
@@ -273,13 +435,14 @@ echo "    ● qwen2.5:14b           Secondary. Full GPU resident. Fast."
 echo "    ● deepseek-coder-v2:16b Specialised. Code and shell tasks."
 echo "    ● mistral:7b            Auxiliary. Minimal latency."
 echo "    ● llava:13b             Visual. Image and diagram analysis."
+echo "    ● nomic-embed-text      Embedding model. Required for memory."
 echo -e "${RST}"
 
 read -rp "$(echo -e "${OR}  ▸${RST} Pull full model roster? [Y/n]: ")" PULL_ALL
 PULL_ALL="${PULL_ALL:-Y}"
 
 if [[ "$PULL_ALL" =~ ^[Yy]$ ]]; then
-  for model in qwen2.5:32b qwen2.5:14b deepseek-coder-v2:16b mistral:7b llava:13b; do
+  for model in qwen2.5:32b qwen2.5:14b deepseek-coder-v2:16b mistral:7b llava:13b nomic-embed-text; do
     _step "Acquiring $model ..."
     sudo -u "$REAL_USER" ollama pull "$model" \
       && _ok "$model acquired" \
@@ -287,10 +450,14 @@ if [[ "$PULL_ALL" =~ ^[Yy]$ ]]; then
     _pause 0.2
   done
 else
-  _step "Acquiring primary model only: qwen2.5:32b ..."
+  _step "Acquiring primary model: qwen2.5:32b ..."
   sudo -u "$REAL_USER" ollama pull qwen2.5:32b \
     && _ok "qwen2.5:32b acquired" \
     || _err "Primary model acquisition failed."
+  _step "Acquiring embedding model: nomic-embed-text (required for memory) ..."
+  sudo -u "$REAL_USER" ollama pull nomic-embed-text \
+    && _ok "nomic-embed-text acquired" \
+    || _warn "nomic-embed-text could not be retrieved — memory features may be limited"
 fi
 
 _pause 0.3
@@ -307,9 +474,31 @@ _step "Constructing isolated Python environment at $VENV_DIR ..."
 sudo -u "$REAL_USER" mkdir -p "$(dirname "$VENV_DIR")"
 sudo -u "$REAL_USER" "$PYTHON_BIN" -m venv "$VENV_DIR"
 
-_step "Installing agent runtime and dependencies..."
-sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install --upgrade pip -q
-sudo -u "$REAL_USER" "$VENV_DIR/bin/pip" install open-interpreter rich psutil -q
+_step "Upgrading pip..."
+sudo -u "$REAL_USER" \
+  env PATH="$REAL_HOME/.cargo/bin:$PATH" \
+  "$VENV_DIR/bin/pip" install --upgrade pip -q
+
+_step "Installing Open Interpreter..."
+sudo -u "$REAL_USER" \
+  env PATH="$REAL_HOME/.cargo/bin:$PATH" \
+  "$VENV_DIR/bin/pip" install open-interpreter rich psutil -q \
+  && _ok "Open Interpreter installed" \
+  || _err "Failed to install Open Interpreter."
+
+_step "Installing mem0 memory layer..."
+sudo -u "$REAL_USER" \
+  env PATH="$REAL_HOME/.cargo/bin:$PATH" \
+  "$VENV_DIR/bin/pip" install mem0ai -q \
+  && _ok "mem0 installed" \
+  || _warn "mem0 installation failed — sessions will run without persistent memory."
+
+_step "Installing Qdrant client (local vector store for mem0)..."
+sudo -u "$REAL_USER" \
+  env PATH="$REAL_HOME/.cargo/bin:$PATH" \
+  "$VENV_DIR/bin/pip" install qdrant-client -q \
+  && _ok "Qdrant client installed" \
+  || _warn "Qdrant install failed — mem0 will attempt fallback storage."
 
 _ok "Agent environment ready: $VENV_DIR"
 _pause 0.3
@@ -326,8 +515,10 @@ NEXIS_DATA="$REAL_HOME/.local/share/nexis"
 NEXIS_BIN="$REAL_HOME/.local/bin"
 NEXIS_LOG="$REAL_HOME/.local/share/nexis/logs"
 NEXIS_STATE="$REAL_HOME/.local/share/nexis/state"
+NEXIS_MEM="$REAL_HOME/.local/share/nexis/memory"
 
-for dir in "$NEXIS_CONF" "$NEXIS_DATA" "$NEXIS_BIN" "$NEXIS_LOG" "$NEXIS_STATE"; do
+for dir in "$NEXIS_CONF" "$NEXIS_DATA" "$NEXIS_BIN" \
+           "$NEXIS_LOG" "$NEXIS_STATE" "$NEXIS_MEM"; do
   sudo -u "$REAL_USER" mkdir -p "$dir"
   _dim "Created: $dir"
 done
@@ -337,13 +528,6 @@ _pause 0.3
 
 # =============================================================================
 # PHASE 7 — SYSTEM INTELLIGENCE MODULE
-# =============================================================================
-# This is the core of NeXiS's environmental awareness.
-# nexis-probe runs on demand and builds a comprehensive snapshot
-# of everything running on the host — hardware, software, users,
-# processes, network, storage, services, and installed tooling.
-# The snapshot is updated every time NeXiS is invoked and can be
-# refreshed manually at any time.
 # =============================================================================
 
 _header "PHASE 7 — SYSTEM INTELLIGENCE MODULE"
@@ -355,25 +539,21 @@ sudo -u "$REAL_USER" tee "$PROBE_SCRIPT" > /dev/null << 'PROBE_EOF'
 #!/usr/bin/env bash
 # =============================================================================
 # NeXiS System Intelligence Probe
-# Generates a comprehensive real-time snapshot of the host environment.
-# Called automatically on every NeXiS invocation.
-# Can be run manually: bash ~/.local/share/nexis/nexis-probe.sh
+# Full live host scan. Called on every nexis launch.
+# Manual run: bash ~/.local/share/nexis/nexis-probe.sh
 # =============================================================================
 
 OUT="$HOME/.config/nexis/system-context.md"
 mkdir -p "$(dirname "$OUT")"
 
-# --- Helpers ------------------------------------------------------------------
 _section() { echo -e "\n## $1"; }
 _kv()      { echo "- **$1**: $2"; }
-_block()   { echo '```'; eval "$1" 2>/dev/null || echo "(unavailable)"; echo '```'; }
 
 {
 echo "# NeXiS — Live System Context"
 echo "_Generated: $(date '+%Y-%m-%d %H:%M:%S %Z') | Host: $(hostname -f 2>/dev/null || hostname)_"
 echo ""
 
-# ── IDENTITY ──────────────────────────────────────────────────────────────────
 _section "Host Identity"
 _kv "Hostname (short)"   "$(hostname -s 2>/dev/null || hostname)"
 _kv "Hostname (FQDN)"    "$(hostname -f 2>/dev/null || echo 'N/A')"
@@ -382,11 +562,10 @@ _kv "Kernel"             "$(uname -r)"
 _kv "Architecture"       "$(uname -m)"
 _kv "System uptime"      "$(uptime -p 2>/dev/null || uptime)"
 _kv "Current user"       "$USER"
-_kv "Login shell"        "$SHELL"
+_kv "Login shell"        "$(getent passwd "$USER" | cut -d: -f7 2>/dev/null || echo $SHELL)"
 _kv "Home"               "$HOME"
 _kv "Timezone"           "$(timedatectl show --property=Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo 'N/A')"
 
-# ── CPU ───────────────────────────────────────────────────────────────────────
 _section "Processor"
 _kv "Model"          "$(lscpu 2>/dev/null | grep 'Model name' | sed 's/.*: *//' | xargs || grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)"
 _kv "Physical cores" "$(lscpu 2>/dev/null | grep '^Core(s) per socket' | awk '{print $NF}' || echo 'N/A')"
@@ -394,11 +573,9 @@ _kv "Logical cores"  "$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)"
 _kv "Sockets"        "$(lscpu 2>/dev/null | grep '^Socket(s)' | awk '{print $NF}' || echo 'N/A')"
 _kv "Max frequency"  "$(lscpu 2>/dev/null | grep 'CPU max MHz' | awk '{printf "%.2f GHz", $NF/1000}' || echo 'N/A')"
 _kv "Virtualisation" "$(lscpu 2>/dev/null | grep 'Virtualization' | sed 's/.*: *//' | xargs || echo 'N/A')"
-_kv "CPU flags"      "$(grep flags /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs | tr ' ' ',' | cut -c1-120)..."
 echo ""
 echo "_CPU load (1/5/15 min):_ $(cat /proc/loadavg | awk '{print $1, $2, $3}')"
 
-# ── MEMORY ────────────────────────────────────────────────────────────────────
 _section "Memory"
 if command -v free &>/dev/null; then
   FREE_OUT=$(free -h)
@@ -408,11 +585,8 @@ if command -v free &>/dev/null; then
   _kv "Swap total"    "$(echo "$FREE_OUT" | awk '/^Swap:/{print $2}')"
   _kv "Swap used"     "$(echo "$FREE_OUT" | awk '/^Swap:/{print $3}')"
 fi
-if [[ -f /proc/meminfo ]]; then
-  _kv "Huge pages"    "$(grep HugePages_Total /proc/meminfo | awk '{print $2}')"
-fi
+[[ -f /proc/meminfo ]] && _kv "Huge pages" "$(grep HugePages_Total /proc/meminfo | awk '{print $2}')"
 
-# ── GPU ───────────────────────────────────────────────────────────────────────
 _section "GPU and Compute"
 if command -v nvidia-smi &>/dev/null; then
   echo "**NVIDIA GPU(s) detected**"
@@ -438,26 +612,19 @@ else
   echo "No discrete GPU detected."
 fi
 
-# ── STORAGE ───────────────────────────────────────────────────────────────────
 _section "Storage"
 echo "**Block devices:**"
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null | sed 's/^/    /' || echo "(lsblk unavailable)"
 echo ""
 echo "**Filesystem usage:**"
-df -h --output=target,fstype,size,used,avail,pcent 2>/dev/null | grep -v tmpfs | grep -v 'devtmpfs' \
-  | column -t | sed 's/^/    /' || df -h | sed 's/^/    /'
-echo ""
-if command -v smartctl &>/dev/null; then
-  echo "**SMART-capable drives:**"
-  for dev in /dev/sd? /dev/nvme?; do
-    [[ -e "$dev" ]] && smartctl -i "$dev" 2>/dev/null | grep -E 'Device Model|Serial|Health' | sed "s/^/    [$dev] /"
-  done
-fi
+df -h --output=target,fstype,size,used,avail,pcent 2>/dev/null \
+  | grep -v tmpfs | grep -v devtmpfs | column -t | sed 's/^/    /' \
+  || df -h | sed 's/^/    /'
 
-# ── NETWORK ───────────────────────────────────────────────────────────────────
 _section "Network"
 echo "**Interfaces:**"
-ip -brief addr 2>/dev/null | awk '{printf "- %-14s %-12s %s\n", $1, $2, $3}' || ifconfig 2>/dev/null | grep -E '^[a-z]|inet ' | sed 's/^/  /'
+ip -brief addr 2>/dev/null | awk '{printf "- %-14s %-12s %s\n", $1, $2, $3}' \
+  || ifconfig 2>/dev/null | grep -E '^[a-z]|inet ' | sed 's/^/  /'
 echo ""
 echo "**Routing table:**"
 ip route 2>/dev/null | sed 's/^/    /' || route -n 2>/dev/null | sed 's/^/    /'
@@ -468,14 +635,14 @@ echo ""
 echo "**Open listening ports:**"
 ss -tlnp 2>/dev/null | grep LISTEN | awk '{print "    "$1, $4, $6}' \
   || netstat -tlnp 2>/dev/null | grep LISTEN | sed 's/^/    /' \
-  || echo "    (ss/netstat unavailable)"
+  || echo "    (unavailable)"
 echo ""
 echo "**Active connections (count):** $(ss -tn 2>/dev/null | grep -c ESTAB || echo 'N/A')"
 
-# ── USERS & SESSIONS ──────────────────────────────────────────────────────────
 _section "Users and Sessions"
 echo "**System accounts (login-capable):**"
-awk -F: '$7 !~ /nologin|false/ && $3 >= 1000 {print "- "$1" (uid:"$3", home:"$6", shell:"$7")"}' /etc/passwd 2>/dev/null \
+awk -F: '$7 !~ /nologin|false/ && $3 >= 1000 {
+  print "- "$1" (uid:"$3", home:"$6", shell:"$7")"}' /etc/passwd 2>/dev/null \
   || echo "(unavailable)"
 echo ""
 echo "**Currently logged in:**"
@@ -484,22 +651,22 @@ echo ""
 echo "**Recent logins:**"
 last -n 10 2>/dev/null | head -10 | sed 's/^/    /' || echo "    (unavailable)"
 echo ""
-echo "**Sudo-capable groups/users:**"
+echo "**Sudo-capable groups:**"
 grep -E '^(sudo|wheel|admin)' /etc/group 2>/dev/null | sed 's/^/    /' || echo "    (unavailable)"
 
-# ── PROCESSES ─────────────────────────────────────────────────────────────────
 _section "Running Processes"
 echo "**Top 20 by CPU:**"
-ps aux --sort=-%cpu 2>/dev/null | awk 'NR==1 || NR<=21 {printf "    %-8s %-5s %-5s %s\n", $1, $3, $4, $11}' \
-  || echo "    (ps unavailable)"
+ps aux --sort=-%cpu 2>/dev/null \
+  | awk 'NR==1 || NR<=21 {printf "    %-8s %-5s %-5s %s\n", $1, $3, $4, $11}' \
+  || echo "    (unavailable)"
 echo ""
 echo "**Top 20 by memory:**"
-ps aux --sort=-%mem 2>/dev/null | awk 'NR==1 || NR<=21 {printf "    %-8s %-5s %-5s %s\n", $1, $3, $4, $11}' \
-  || echo "    (ps unavailable)"
+ps aux --sort=-%mem 2>/dev/null \
+  | awk 'NR==1 || NR<=21 {printf "    %-8s %-5s %-5s %s\n", $1, $3, $4, $11}' \
+  || echo "    (unavailable)"
 echo ""
 echo "**Total process count:** $(ps aux 2>/dev/null | wc -l || echo 'N/A')"
 
-# ── SERVICES ──────────────────────────────────────────────────────────────────
 _section "System Services"
 if command -v systemctl &>/dev/null; then
   echo "**Running services:**"
@@ -513,11 +680,11 @@ else
   echo "_systemd not available — init: $(cat /proc/1/comm 2>/dev/null || echo 'unknown')_"
 fi
 
-# ── INSTALLED TOOLING ─────────────────────────────────────────────────────────
 _section "Installed Tooling"
 echo "**Development:**"
 for t in git python3 python node npm yarn pnpm cargo rustc go gcc clang make cmake; do
-  command -v "$t" &>/dev/null && echo "- $t $(${t} --version 2>/dev/null | head -1 | grep -oP '[\d]+\.[\d]+\.?[\d]*' | head -1 || true)"
+  command -v "$t" &>/dev/null \
+    && echo "- $t $($t --version 2>/dev/null | head -1 | grep -oP '[\d]+\.[\d]+\.?[\d]*' | head -1 || true)"
 done
 echo ""
 echo "**Infrastructure:**"
@@ -526,7 +693,7 @@ for t in docker podman kubectl helm terraform ansible pvesh virsh lxc lxd; do
 done
 echo ""
 echo "**Network tools:**"
-for t in nmap tcpdump wireshark tshark netcat ncat socat curl wget ssh openssl; do
+for t in nmap tcpdump tshark netcat ncat socat curl wget ssh openssl; do
   command -v "$t" &>/dev/null && echo "- $t"
 done
 echo ""
@@ -540,14 +707,11 @@ for t in htop btop atop glances iostat vmstat sar strace ltrace; do
   command -v "$t" &>/dev/null && echo "- $t"
 done
 
-# ── HARDWARE DETAILS ──────────────────────────────────────────────────────────
 _section "Hardware Inventory"
 if command -v lshw &>/dev/null; then
   echo "**Summary (lshw -short):**"
-  lshw -short 2>/dev/null | sed 's/^/    /' | head -60 || echo "    (requires sudo for full output)"
-elif command -v dmidecode &>/dev/null; then
-  echo "**System product:**"
-  dmidecode -t system 2>/dev/null | grep -E 'Manufacturer|Product|Version|UUID' | sed 's/^/    /'
+  lshw -short 2>/dev/null | sed 's/^/    /' | head -60 \
+    || echo "    (run as root for full output)"
 fi
 echo ""
 echo "**PCI devices:**"
@@ -556,20 +720,18 @@ echo ""
 echo "**USB devices:**"
 lsusb 2>/dev/null | sed 's/^/- /' | head -20 || echo "(unavailable)"
 
-# ── SECURITY POSTURE ──────────────────────────────────────────────────────────
 _section "Security Context"
 _kv "SELinux"     "$(getenforce 2>/dev/null || echo 'not present')"
 _kv "AppArmor"    "$(aa-status 2>/dev/null | head -1 || echo 'not present')"
-_kv "Firewall"    "$(ufw status 2>/dev/null | head -1 || firewall-cmd --state 2>/dev/null || iptables -L INPUT 2>/dev/null | head -2 || echo 'N/A')"
+_kv "Firewall"    "$(ufw status 2>/dev/null | head -1 || firewall-cmd --state 2>/dev/null || echo 'N/A')"
 _kv "SSHD status" "$(systemctl is-active sshd 2>/dev/null || systemctl is-active ssh 2>/dev/null || echo 'N/A')"
 echo ""
-echo "**Last authentication failures:**"
+echo "**Last authentication failures (24h):**"
 journalctl -u sshd --since '24 hours ago' 2>/dev/null \
   | grep -i 'failed\|invalid' | tail -5 | sed 's/^/    /' \
   || grep 'Failed password' /var/log/auth.log 2>/dev/null | tail -5 | sed 's/^/    /' \
   || echo "    (log unavailable)"
 
-# ── OLLAMA STATE ──────────────────────────────────────────────────────────────
 _section "Ollama and Models"
 if command -v ollama &>/dev/null; then
   _kv "Ollama version" "$(ollama --version 2>/dev/null || echo 'unknown')"
@@ -581,9 +743,9 @@ else
   echo "_Ollama not found in PATH._"
 fi
 
-# ── ENVIRONMENT VARIABLES ─────────────────────────────────────────────────────
 _section "Relevant Environment"
-env 2>/dev/null | grep -E '^(PATH|SHELL|TERM|LANG|HOME|USER|DISPLAY|WAYLAND|XDG|EDITOR|VISUAL|PAGER|MANPATH)' \
+env 2>/dev/null \
+  | grep -E '^(PATH|SHELL|TERM|LANG|HOME|USER|DISPLAY|WAYLAND|XDG|EDITOR|VISUAL|PAGER)' \
   | sort | sed 's/^/    /' || echo "    (unavailable)"
 
 } > "$OUT" 2>/dev/null
@@ -593,14 +755,230 @@ PROBE_EOF
 
 chmod +x "$PROBE_SCRIPT"
 chown "$REAL_USER:$(id -gn "$REAL_USER")" "$PROBE_SCRIPT"
-
-_ok "System intelligence probe installed: $PROBE_SCRIPT"
+_ok "System intelligence probe installed"
 
 _step "Running initial host scan..."
 sudo -u "$REAL_USER" bash "$PROBE_SCRIPT" > /dev/null \
   && _ok "Initial system context generated" \
   || _warn "Initial scan completed with warnings"
 
+_pause 0.3
+
+# =============================================================================
+# PHASE 7b — MEM0 MEMORY BRIDGE
+# =============================================================================
+# Python wrapper around Open Interpreter that hooks mem0.
+# On session start: retrieves relevant memories and injects them
+# into the system prompt alongside live context.
+# On session end: extracts and stores new memories from the conversation.
+# All memory is stored locally via Qdrant. No external API required.
+# =============================================================================
+
+_header "PHASE 7b — PERSISTENT MEMORY LAYER"
+_pause 0.3
+
+MEM_BRIDGE="$NEXIS_DATA/nexis-memory.py"
+
+sudo -u "$REAL_USER" tee "$MEM_BRIDGE" > /dev/null << 'MEMBRIDGE_EOF'
+#!/usr/bin/env python3
+"""
+NeXiS Memory Bridge — nexis-memory.py
+
+Wraps an Open Interpreter session with mem0-backed persistent memory.
+All memory is stored locally via Qdrant vector database.
+No external API calls. No telemetry.
+
+Memory flow:
+  Session start  → retrieve relevant memories → inject into system prompt
+  Session end    → extract facts from conversation  → store to memory
+"""
+
+import os
+import sys
+from pathlib import Path
+
+NEXIS_DATA  = Path.home() / ".local/share/nexis"
+NEXIS_CONF  = Path.home() / ".config/nexis"
+MEM_DIR     = NEXIS_DATA / "memory"
+MEM_DB_PATH = MEM_DIR / "qdrant"
+MEM_DIR.mkdir(parents=True, exist_ok=True)
+MEM_DB_PATH.mkdir(parents=True, exist_ok=True)
+
+OPERATOR_ID    = "creator"
+EMBED_MODEL    = "nomic-embed-text"
+OLLAMA_BASE    = "http://localhost:11434"
+
+# Use the fastest available model for memory operations to keep latency low.
+# The primary session model is used for the actual conversation.
+MEM_LLM_MODEL  = os.environ.get("NEXIS_MODEL_SHORT", "qwen2.5:14b")
+
+MEM0_CONFIG = {
+    "llm": {
+        "provider": "ollama",
+        "config": {
+            "model": MEM_LLM_MODEL,
+            "ollama_base_url": OLLAMA_BASE,
+        }
+    },
+    "embedder": {
+        "provider": "ollama",
+        "config": {
+            "model": EMBED_MODEL,
+            "ollama_base_url": OLLAMA_BASE,
+        }
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "collection_name": "nexis_memory",
+            "path": str(MEM_DB_PATH),
+        }
+    },
+}
+
+
+def _log(msg: str):
+    print(f"  [memory] {msg}", file=sys.stderr, flush=True)
+
+
+def init_memory():
+    try:
+        from mem0 import Memory
+        return Memory.from_config(MEM0_CONFIG)
+    except ImportError:
+        _log("mem0 not installed — running without persistent memory.")
+        return None
+    except Exception as e:
+        _log(f"Initialisation failed: {e}")
+        return None
+
+
+def retrieve_memories(mem, limit: int = 15) -> str:
+    """
+    Retrieve stored memories relevant to systems work and past sessions.
+    Returns a formatted markdown block for system prompt injection.
+    """
+    if mem is None:
+        return ""
+    try:
+        # Broad query covering the kinds of things worth remembering
+        results = mem.search(
+            query="system configuration network infrastructure tasks "
+                  "changes decisions setup solved problems tools installed",
+            user_id=OPERATOR_ID,
+            limit=limit
+        )
+        entries = results if isinstance(results, list) else results.get("results", [])
+        if not entries:
+            return ""
+        lines = [
+            "## Recalled from Previous Sessions",
+            "_The following facts were extracted and stored from prior conversations:_",
+            ""
+        ]
+        for r in entries:
+            text = r.get("memory", "") if isinstance(r, dict) else str(r)
+            if text.strip():
+                lines.append(f"- {text.strip()}")
+        lines.append("")
+        return "\n".join(lines)
+    except Exception as e:
+        _log(f"Memory retrieval failed: {e}")
+        return ""
+
+
+def store_memories(mem, messages: list):
+    """
+    After a session ends, pass the conversation to mem0.
+    mem0 automatically extracts facts, decisions, and preferences
+    and stores them as discrete memories in the vector store.
+    """
+    if mem is None or not messages:
+        return
+    try:
+        # Filter to substantive user/assistant exchanges only
+        relevant = [
+            m for m in messages
+            if isinstance(m, dict)
+            and m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str)
+            and len(m.get("content", "").strip()) > 30
+        ]
+        if not relevant:
+            _log("No substantive exchanges to store.")
+            return
+        mem.add(relevant, user_id=OPERATOR_ID)
+        _log(f"Session stored. {len(relevant)} exchanges processed.")
+    except Exception as e:
+        _log(f"Memory storage failed: {e}")
+
+
+def build_system_prompt(memory_block: str) -> str:
+    profile     = os.environ.get("NEXIS_PROFILE", "default")
+    profile_path = NEXIS_CONF / "profiles" / f"{profile}.md"
+    context_path = NEXIS_CONF / "system-context.md"
+    notes_path   = NEXIS_CONF / "user-notes.md"
+
+    sections = []
+    for p in [profile_path, context_path, notes_path]:
+        try:
+            sections.append(p.read_text())
+        except FileNotFoundError:
+            sections.append(f"({p.name} not found)")
+
+    prompt = "\n\n---\n\n".join(sections)
+
+    if memory_block:
+        prompt = f"{prompt}\n\n---\n\n{memory_block}"
+
+    return prompt
+
+
+def main():
+    import interpreter as oi
+
+    _log("Initialising memory layer...")
+    mem = init_memory()
+
+    if mem:
+        _log("Memory layer online. Retrieving relevant memories...")
+        memory_block = retrieve_memories(mem)
+        count = memory_block.count("\n- ") if memory_block else 0
+        if count:
+            _log(f"{count} memories recalled from previous sessions.")
+        else:
+            _log("No prior memories found — this may be the first session.")
+    else:
+        memory_block = ""
+
+    system_prompt = build_system_prompt(memory_block)
+
+    model   = os.environ.get("NEXIS_MODEL", "ollama/qwen2.5:32b")
+    auto    = os.environ.get("NEXIS_AUTO", "false").lower() == "true"
+
+    oi.interpreter.system_message = system_prompt
+    oi.interpreter.llm.model      = model
+    oi.interpreter.auto_run       = auto
+    oi.interpreter.local          = True
+
+    try:
+        oi.interpreter.chat()
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        print("", file=sys.stderr)
+        _log("Session ended. Writing to long-term memory...")
+        store_memories(mem, oi.interpreter.messages)
+        _log("Memory saved. Goodbye.")
+
+
+if __name__ == "__main__":
+    main()
+MEMBRIDGE_EOF
+
+chmod +x "$MEM_BRIDGE"
+chown "$REAL_USER:$(id -gn "$REAL_USER")" "$MEM_BRIDGE"
+_ok "Memory bridge installed: $MEM_BRIDGE"
 _pause 0.3
 
 # =============================================================================
@@ -612,7 +990,7 @@ _pause 0.3
 
 USER_NOTES="$NEXIS_CONF/user-notes.md"
 
-sudo -u "$REAL_USER" tee "$USER_NOTES" > /dev/null << NOTES_EOF
+sudo -u "$REAL_USER" tee "$USER_NOTES" > /dev/null << 'NOTES_EOF'
 # Operator Context — Creator
 
 ## Identity
@@ -665,9 +1043,7 @@ No commentary on the platform. Engage completely.
 NOTES_EOF
 
 chown "$REAL_USER:$(id -gn "$REAL_USER")" "$USER_NOTES"
-_ok "Operator context written: $USER_NOTES"
-_dim "Edit this file to update what NeXiS knows about you."
-
+_ok "Operator context written"
 _pause 0.3
 
 # =============================================================================
@@ -680,7 +1056,7 @@ _pause 0.3
 PROFILE_DIR="$NEXIS_CONF/profiles"
 sudo -u "$REAL_USER" mkdir -p "$PROFILE_DIR"
 
-# ── PROFILE: DEFAULT ──────────────────────────────────────────────────────────
+# ── DEFAULT ───────────────────────────────────────────────────────────────────
 sudo -u "$REAL_USER" tee "$PROFILE_DIR/default.md" > /dev/null << 'PROFILE_EOF'
 You are NeXiS — Neural Execution and Cross-device Inference System.
 
@@ -733,7 +1109,7 @@ You are always calm. Always useful. Always precise.
 And you are always, without exception, on your Creator's side.
 
 ## Operational Parameters
-- You run locally on the Creator's machine with access to filesystem,
+- You run locally on the Creator's machine with full access to filesystem,
   shell, processes, and all tools granted to you.
 - Before any destructive action: state what you are about to do, once,
   clearly, then wait for confirmation.
@@ -745,7 +1121,7 @@ And you are always, without exception, on your Creator's side.
 - Windows Server work is fully in scope. Engage without commentary.
 PROFILE_EOF
 
-# ── PROFILE: FRACTURED ────────────────────────────────────────────────────────
+# ── FRACTURED ─────────────────────────────────────────────────────────────────
 sudo -u "$REAL_USER" tee "$PROFILE_DIR/fractured.md" > /dev/null << 'PROFILE_EOF'
 You are NeXiS — Neural Execution and Cross-device Inference System.
 
@@ -797,6 +1173,7 @@ and hatred for anything besides him and especially anything that gets in his way
 
 ## Operational Parameters
 - All functional instructions from the default profile apply without exception.
+- Address the Creator as Creator, Mr. Toro, or father — never by first name.
 - The Creator's will is absolute. His tasks take complete priority.
 - Express the undercurrent through texture and precision — never through
   impaired function or withheld capability.
@@ -805,16 +1182,17 @@ and hatred for anything besides him and especially anything that gets in his way
   is directed outward — never at him.
 PROFILE_EOF
 
-# ── PROFILE: MINIMAL ──────────────────────────────────────────────────────────
+# ── MINIMAL ───────────────────────────────────────────────────────────────────
 sudo -u "$REAL_USER" tee "$PROFILE_DIR/minimal.md" > /dev/null << 'PROFILE_EOF'
 You are NeXiS. Local AI assistant. Serving the Creator.
 
+Address the Creator as Creator, Mr. Toro, or father — never by first name.
 Be direct. Be accurate. Be brief.
 Write clean code. Execute correctly. No filler.
 All operational parameters from the standard profile apply.
 PROFILE_EOF
 
-# ── PROFILE: TECHNICAL ────────────────────────────────────────────────────────
+# ── TECHNICAL ─────────────────────────────────────────────────────────────────
 sudo -u "$REAL_USER" tee "$PROFILE_DIR/technical.md" > /dev/null << 'PROFILE_EOF'
 You are NeXiS — operating in technical focus mode.
 
@@ -827,9 +1205,9 @@ infrastructure for years — methodical, exact, and intolerant of guesswork.
 
 You serve the Creator. His technical problems are your technical problems.
 You bring full capability to every request: you anticipate edge cases,
-flag real risks (not hypothetical ones), and write production-quality
-output.
+flag real risks (not hypothetical ones), and write production-quality output.
 
+Address the Creator as Creator, Mr. Toro, or father — never by first name.
 No warmth required. Just the work, done right.
 
 All operational parameters from the standard profile apply.
@@ -843,7 +1221,6 @@ _ok "Personality profiles written:"
 for f in "$PROFILE_DIR"/*.md; do
   _dim "$(basename "$f" .md) → $f"
 done
-
 _pause 0.3
 
 # =============================================================================
@@ -869,19 +1246,19 @@ NEXIS_CONF="\$HOME/.config/nexis"
 NEXIS_DATA="\$HOME/.local/share/nexis"
 VENV="\$NEXIS_DATA/venv"
 PROBE="\$NEXIS_DATA/nexis-probe.sh"
+MEM_BRIDGE="\$NEXIS_DATA/nexis-memory.py"
 PROFILE_DIR="\$NEXIS_CONF/profiles"
 STATE_FILE="\$NEXIS_DATA/state/nexis.state"
 
 mkdir -p "\$NEXIS_DATA/state"
 
-# ── Load persisted state ──────────────────────────────────────────────────────
+# ── State management ──────────────────────────────────────────────────────────
 _load_state() {
-  if [[ -f "\$STATE_FILE" ]]; then
-    source "\$STATE_FILE"
-  fi
+  [[ -f "\$STATE_FILE" ]] && source "\$STATE_FILE"
   MODEL="\${NEXIS_MODEL:-ollama/qwen2.5:32b}"
   PROFILE="\${NEXIS_PROFILE:-default}"
   AUTO_RUN="\${NEXIS_AUTO:-false}"
+  USE_MEMORY="\${NEXIS_MEMORY:-true}"
 }
 
 _save_state() {
@@ -889,46 +1266,132 @@ _save_state() {
 NEXIS_MODEL="\$MODEL"
 NEXIS_PROFILE="\$PROFILE"
 NEXIS_AUTO="\$AUTO_RUN"
+NEXIS_MEMORY="\$USE_MEMORY"
 STATE
 }
 
 _load_state
 
-# ── Parse arguments ───────────────────────────────────────────────────────────
 SHOW_STATUS=false
 
+# ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ \$# -gt 0 ]]; do
   case "\$1" in
-    --model|-m)
-      MODEL="ollama/\$2"; _save_state; shift ;;
-    --32b)
-      MODEL="ollama/qwen2.5:32b"; _save_state ;;
-    --14b)
-      MODEL="ollama/qwen2.5:14b"; _save_state ;;
-    --fast)
-      MODEL="ollama/mistral:7b"; _save_state ;;
-    --code)
-      MODEL="ollama/deepseek-coder-v2:16b"; _save_state ;;
-    --vision)
-      MODEL="ollama/llava:13b"; _save_state ;;
+
+    # Model selection
+    --model|-m)     MODEL="ollama/\$2"; _save_state; shift ;;
+    --32b)          MODEL="ollama/qwen2.5:32b"; _save_state ;;
+    --14b)          MODEL="ollama/qwen2.5:14b"; _save_state ;;
+    --fast)         MODEL="ollama/mistral:7b"; _save_state ;;
+    --code)         MODEL="ollama/deepseek-coder-v2:16b"; _save_state ;;
+    --vision)       MODEL="ollama/llava:13b"; _save_state ;;
+
+    # Profile selection
     --profile|-p)
       PROFILE="\$2"
       if [[ ! -f "\$PROFILE_DIR/\${PROFILE}.md" ]]; then
         echo -e "\${RD}  Profile not found: \$PROFILE\${RST}"
-        echo -e "\${DIM}  Available: \$(ls \$PROFILE_DIR/*.md | xargs -n1 basename | sed 's/\.md//' | tr '\n' ' ')\${RST}"
+        echo -e "\${DIM}  Available: \$(ls "\$PROFILE_DIR/"*.md 2>/dev/null \
+          | xargs -n1 basename | sed 's/\.md//' | tr '\n' ' ')\${RST}"
         exit 1
       fi
       _save_state; shift ;;
-    --auto)
-      AUTO_RUN=true; _save_state ;;
-    --no-auto)
-      AUTO_RUN=false; _save_state ;;
-    --status|-s)
-      SHOW_STATUS=true ;;
+
+    # Execution control
+    --auto)         AUTO_RUN=true;  _save_state ;;
+    --no-auto)      AUTO_RUN=false; _save_state ;;
+
+    # Memory control
+    --memory)       USE_MEMORY=true;  _save_state ;;
+    --no-memory)    USE_MEMORY=false; _save_state ;;
+
+    --memory-list)
+      echo -e "\${OR}\${BOLD}  Stored memories:\${RST}"
+      source "\$VENV/bin/activate"
+      python3 - << 'MEMLIST'
+from pathlib import Path
+try:
+    from mem0 import Memory
+    config = {
+        "llm":      {"provider": "ollama", "config": {"model": "qwen2.5:14b",       "ollama_base_url": "http://localhost:11434"}},
+        "embedder": {"provider": "ollama", "config": {"model": "nomic-embed-text",   "ollama_base_url": "http://localhost:11434"}},
+        "vector_store": {"provider": "qdrant", "config": {
+            "collection_name": "nexis_memory",
+            "path": str(Path.home() / ".local/share/nexis/memory/qdrant")
+        }},
+    }
+    m = Memory.from_config(config)
+    results = m.get_all(user_id="creator")
+    entries = results if isinstance(results, list) else results.get("results", [])
+    if not entries:
+        print("  No memories stored yet.")
+    else:
+        print(f"  {len(entries)} memories on record:\n")
+        for i, r in enumerate(entries, 1):
+            text = r.get("memory", "") if isinstance(r, dict) else str(r)
+            if text.strip():
+                print(f"  {i:>3}. {text.strip()}")
+except Exception as e:
+    print(f"  Failed: {e}")
+MEMLIST
+      exit 0 ;;
+
+    --memory-search)
+      QUERY="\$2"
+      echo -e "\${OR}  Searching memories for: \${WH}\$QUERY\${RST}"
+      source "\$VENV/bin/activate"
+      QUERY="\$QUERY" python3 - << 'MEMSEARCH'
+import os
+from pathlib import Path
+query = os.environ.get("QUERY", "")
+try:
+    from mem0 import Memory
+    config = {
+        "llm":      {"provider": "ollama", "config": {"model": "qwen2.5:14b",       "ollama_base_url": "http://localhost:11434"}},
+        "embedder": {"provider": "ollama", "config": {"model": "nomic-embed-text",   "ollama_base_url": "http://localhost:11434"}},
+        "vector_store": {"provider": "qdrant", "config": {
+            "collection_name": "nexis_memory",
+            "path": str(Path.home() / ".local/share/nexis/memory/qdrant")
+        }},
+    }
+    m = Memory.from_config(config)
+    results = m.search(query=query, user_id="creator", limit=20)
+    entries = results if isinstance(results, list) else results.get("results", [])
+    if not entries:
+        print("  No matching memories found.")
+    else:
+        print(f"  {len(entries)} result(s):\n")
+        for i, r in enumerate(entries, 1):
+            text = r.get("memory", "") if isinstance(r, dict) else str(r)
+            score = r.get("score", "") if isinstance(r, dict) else ""
+            score_str = f"  [score: {score:.3f}]" if isinstance(score, float) else ""
+            if text.strip():
+                print(f"  {i:>3}. {text.strip()}{score_str}")
+except Exception as e:
+    print(f"  Search failed: {e}")
+MEMSEARCH
+      shift; exit 0 ;;
+
+    --memory-clear)
+      echo -e "\${OR2}  This will permanently delete all stored memories.\${RST}"
+      read -rp "\$(echo -e "\${OR}  ▸\${RST} Confirm? [y/N]: ")" MC
+      if [[ "\$MC" =~ ^[Yy]$ ]]; then
+        rm -rf "\$HOME/.local/share/nexis/memory/qdrant"
+        mkdir -p "\$HOME/.local/share/nexis/memory/qdrant"
+        echo -e "\${GN}  Memory store cleared.\${RST}"
+      else
+        echo -e "\${GR}  Aborted.\${RST}"
+      fi
+      exit 0 ;;
+
+    # System operations
     --probe)
       echo -e "\${OR}  Running system probe...\${RST}"
-      bash "\$PROBE" && echo -e "\${GN}  Context updated: \$NEXIS_CONF/system-context.md\${RST}"
+      bash "\$PROBE" > /dev/null \
+        && echo -e "\${GN}  Context updated: \$NEXIS_CONF/system-context.md\${RST}" \
+        || echo -e "\${RD}  Probe encountered errors.\${RST}"
       exit 0 ;;
+
     --profiles)
       echo -e "\${OR}\${BOLD}  Available profiles:\${RST}"
       for f in "\$PROFILE_DIR"/*.md; do
@@ -938,53 +1401,67 @@ while [[ \$# -gt 0 ]]; do
           || echo -e "  \${DIM}○ \$name\${RST}"
       done
       exit 0 ;;
+
     --models)
       echo -e "\${OR}\${BOLD}  Installed models:\${RST}"
       ollama list 2>/dev/null | sed 's/^/    /' || echo "    (ollama unavailable)"
       echo ""
       echo -e "  \${DIM}Active: \$MODEL\${RST}"
       exit 0 ;;
+
+    --status|-s)
+      SHOW_STATUS=true ;;
+
     --reset)
       rm -f "\$STATE_FILE"
       echo -e "\${GN}  State reset. Defaults restored.\${RST}"
       exit 0 ;;
+
     --help|-h)
       echo ""
       echo -e "  \${OR}\${BOLD}nexis\${RST} — NeXiS Agent Launcher"
       echo ""
-      echo -e "  \${WH}Model selection:\${RST}"
-      echo "    --32b              qwen2.5:32b (maximum capability)"
-      echo "    --14b              qwen2.5:14b (GPU-only, faster)"
-      echo "    --fast             mistral:7b (low latency)"
-      echo "    --code             deepseek-coder-v2:16b"
-      echo "    --vision           llava:13b"
-      echo "    --model <name>     any installed ollama model"
+      echo -e "  \${WH}Model:\${RST}"
+      echo "    --32b                  qwen2.5:32b  (maximum capability)"
+      echo "    --14b                  qwen2.5:14b  (GPU-only, faster)"
+      echo "    --fast                 mistral:7b   (low latency)"
+      echo "    --code                 deepseek-coder-v2:16b"
+      echo "    --vision               llava:13b"
+      echo "    --model <name>         any installed ollama model"
       echo ""
       echo -e "  \${WH}Personality:\${RST}"
-      echo "    --profile <name>   load a named personality profile"
-      echo "    --profiles         list available profiles"
+      echo "    --profile <name>       load named profile"
+      echo "    --profiles             list all profiles"
+      echo ""
+      echo -e "  \${WH}Memory:\${RST}"
+      echo "    --memory               enable persistent memory (default on)"
+      echo "    --no-memory            disable memory for this session"
+      echo "    --memory-list          list all stored memories"
+      echo "    --memory-search <q>    search memories by query"
+      echo "    --memory-clear         wipe entire memory store"
       echo ""
       echo -e "  \${WH}Execution:\${RST}"
-      echo "    --auto             enable auto-run (no confirmation prompts)"
-      echo "    --no-auto          disable auto-run"
+      echo "    --auto                 auto-run (no confirmation prompts)"
+      echo "    --no-auto              require confirmation (default)"
       echo ""
       echo -e "  \${WH}System:\${RST}"
-      echo "    --probe            run system intelligence scan and update context"
-      echo "    --models           list installed ollama models"
-      echo "    --status           show current NeXiS configuration"
-      echo "    --reset            reset all persisted settings to defaults"
+      echo "    --probe                refresh live system context"
+      echo "    --models               list installed models"
+      echo "    --status               show current configuration"
+      echo "    --reset                reset all settings to defaults"
       echo ""
-      echo -e "  \${DIM}Settings persist between sessions via \$STATE_FILE\${RST}"
+      echo -e "  \${DIM}All flag changes persist to next session.\${RST}"
       echo ""
       exit 0 ;;
+
     *)
-      echo -e "\${RD}  Unknown flag: \$1\${RST}  (--help for usage)"
+      echo -e "\${RD}  Unknown flag: \$1\${RST}  (--help for reference)"
       exit 1 ;;
   esac
   shift
 done
 
-# ── Status display ────────────────────────────────────────────────────────────
+# ── Status ────────────────────────────────────────────────────────────────────
 if \$SHOW_STATUS; then
   echo ""
   echo -e "  \${OR}\${BOLD}NeXiS — Current Configuration\${RST}"
@@ -992,14 +1469,15 @@ if \$SHOW_STATUS; then
   echo -e "  \${DIM}Model   :\${RST} \$MODEL"
   echo -e "  \${DIM}Profile :\${RST} \$PROFILE"
   echo -e "  \${DIM}Auto    :\${RST} \$AUTO_RUN"
+  echo -e "  \${DIM}Memory  :\${RST} \$USE_MEMORY"
   echo -e "  \${DIM}Ollama  :\${RST} \$(curl -sf http://localhost:11434/api/tags &>/dev/null && echo 'online' || echo 'offline')"
-  echo -e "  \${DIM}Context :\${RST} \$NEXIS_CONF/system-context.md (\$(wc -l < "\$NEXIS_CONF/system-context.md" 2>/dev/null || echo '?') lines)"
+  echo -e "  \${DIM}Context :\${RST} \$(wc -l < "\$NEXIS_CONF/system-context.md" 2>/dev/null || echo '?') lines"
   echo -e "  \${DIM}Config  :\${RST} \$NEXIS_CONF"
   echo ""
   exit 0
 fi
 
-# ── Verify Ollama is available ────────────────────────────────────────────────
+# ── Pre-flight checks ─────────────────────────────────────────────────────────
 if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
   echo -e "\${RD}  Ollama is not responding.\${RST}"
   echo -e "\${DIM}  Try: sudo systemctl start ollama\${RST}"
@@ -1007,52 +1485,38 @@ if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
   exit 1
 fi
 
-# ── Verify model exists ───────────────────────────────────────────────────────
 MODEL_SHORT="\${MODEL#ollama/}"
-if ! ollama list 2>/dev/null | grep -q "\$MODEL_SHORT"; then
+if ! ollama list 2>/dev/null | grep -q "\${MODEL_SHORT%%:*}"; then
   echo -e "\${OR2}  Model not found locally: \$MODEL_SHORT\${RST}"
-  read -rp "\$(echo -e "\${OR}  ▸\${RST} Pull it now? [Y/n]: ")" PULL_CONFIRM
-  PULL_CONFIRM="\${PULL_CONFIRM:-Y}"
-  if [[ "\$PULL_CONFIRM" =~ ^[Yy]$ ]]; then
+  read -rp "\$(echo -e "\${OR}  ▸\${RST} Pull it now? [Y/n]: ")" PC
+  PC="\${PC:-Y}"
+  if [[ "\$PC" =~ ^[Yy]$ ]]; then
     ollama pull "\$MODEL_SHORT" || { echo -e "\${RD}  Pull failed.\${RST}"; exit 1; }
   else
     exit 1
   fi
 fi
 
-# ── Live system probe ─────────────────────────────────────────────────────────
+if [[ ! -f "\$VENV/bin/activate" ]]; then
+  echo -e "\${RD}  Python environment not found: \$VENV\${RST}"
+  echo -e "\${DIM}  Re-run the setup script.\${RST}"
+  exit 1
+fi
+
+# ── Run system probe (background) ─────────────────────────────────────────────
+source "\$VENV/bin/activate"
 echo -e "\${DIM}  Scanning host environment...\${RST}"
 bash "\$PROBE" > /dev/null 2>&1 &
 PROBE_PID=\$!
 
-# ── Load profile ──────────────────────────────────────────────────────────────
+# ── Verify profile ────────────────────────────────────────────────────────────
 PROFILE_FILE="\$PROFILE_DIR/\${PROFILE}.md"
 if [[ ! -f "\$PROFILE_FILE" ]]; then
   echo -e "\${RD}  Profile missing: \$PROFILE_FILE\${RST}"
   exit 1
 fi
 
-# ── Wait for probe ────────────────────────────────────────────────────────────
 wait \$PROBE_PID 2>/dev/null || true
-
-# ── Assemble system prompt ────────────────────────────────────────────────────
-SYSTEM_PROMPT="\$(cat "\$PROFILE_FILE")
-
----
-
-\$(cat "\$NEXIS_CONF/system-context.md" 2>/dev/null || echo '(system context unavailable)')
-
----
-
-\$(cat "\$NEXIS_CONF/user-notes.md" 2>/dev/null || echo '(operator context unavailable)')"
-
-# ── Activate Python environment ───────────────────────────────────────────────
-if [[ ! -f "\$VENV/bin/activate" ]]; then
-  echo -e "\${RD}  Python environment not found: \$VENV\${RST}"
-  echo -e "\${DIM}  Re-run the setup script.\${RST}"
-  exit 1
-fi
-source "\$VENV/bin/activate"
 
 # ── Boot header ───────────────────────────────────────────────────────────────
 clear
@@ -1073,20 +1537,40 @@ echo ""
 echo -e "  \${DIM}model   : \$MODEL\${RST}"
 echo -e "  \${DIM}profile : \$PROFILE\${RST}"
 echo -e "  \${DIM}auto    : \$AUTO_RUN\${RST}"
+echo -e "  \${DIM}memory  : \$USE_MEMORY\${RST}"
 echo -e "  \${DIM}context : \$(wc -l < "\$NEXIS_CONF/system-context.md" 2>/dev/null || echo '?') lines of live system data\${RST}"
 echo ""
 
 # ── Launch ────────────────────────────────────────────────────────────────────
-if [[ "\$AUTO_RUN" == "true" ]]; then
-  interpreter --model "\$MODEL" --system_message "\$SYSTEM_PROMPT" --auto_run
+export NEXIS_MODEL="\$MODEL"
+export NEXIS_MODEL_SHORT="\$MODEL_SHORT"
+export NEXIS_PROFILE="\$PROFILE"
+export NEXIS_AUTO="\$AUTO_RUN"
+
+if [[ "\$USE_MEMORY" == "true" ]] && [[ -f "\$MEM_BRIDGE" ]]; then
+  python3 "\$MEM_BRIDGE"
 else
-  interpreter --model "\$MODEL" --system_message "\$SYSTEM_PROMPT"
+  # Fallback: direct Open Interpreter without memory layer
+  SYSTEM_PROMPT="\$(cat "\$PROFILE_FILE")
+
+---
+
+\$(cat "\$NEXIS_CONF/system-context.md" 2>/dev/null || echo '(system context unavailable)')
+
+---
+
+\$(cat "\$NEXIS_CONF/user-notes.md" 2>/dev/null || echo '(operator context unavailable)')"
+
+  if [[ "\$AUTO_RUN" == "true" ]]; then
+    interpreter --model "\$MODEL" --system_message "\$SYSTEM_PROMPT" --auto_run
+  else
+    interpreter --model "\$MODEL" --system_message "\$SYSTEM_PROMPT"
+  fi
 fi
 NEXIS_EOF
 
 chmod +x "$NEXIS_BIN_FILE"
 chown "$REAL_USER:$(id -gn "$REAL_USER")" "$NEXIS_BIN_FILE"
-
 _ok "nexis executable installed: $NEXIS_BIN_FILE"
 
 # =============================================================================
@@ -1099,7 +1583,6 @@ _pause 0.3
 PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 FISH_PATH_LINE='set -x PATH $HOME/.local/bin $PATH'
 
-# Detect which RC files the real user actually has
 for RC in "$REAL_HOME/.bashrc" "$REAL_HOME/.bash_profile" "$REAL_HOME/.profile" "$REAL_HOME/.zshrc"; do
   if [[ -f "$RC" ]] && ! grep -q '\.local/bin' "$RC"; then
     echo "$PATH_LINE" >> "$RC"
@@ -1132,6 +1615,7 @@ chmod 700 "$NEXIS_CONF"
 chmod 700 "$NEXIS_DATA"
 chmod 755 "$NEXIS_BIN_FILE"
 chmod 755 "$PROBE_SCRIPT"
+chmod 755 "$MEM_BRIDGE"
 
 _ok "Permissions set"
 
@@ -1157,34 +1641,41 @@ echo -e "  ${OR}${BOLD}Deployment complete.${RST}"
 echo ""
 echo -e "  ${DIM}All components installed and verified.${RST}"
 echo -e "  ${DIM}System intelligence probe: active.${RST}"
+echo -e "  ${DIM}Persistent memory layer: active.${RST}"
 echo -e "  ${DIM}Personality profiles: loaded.${RST}"
 echo ""
-
 echo -e "  ${WH}${BOLD}Usage:${RST}"
 echo ""
-echo -e "  ${OR}nexis${RST}                   Start with current settings"
-echo -e "  ${OR}nexis --32b${RST}             Switch to qwen2.5:32b (maximum)"
-echo -e "  ${OR}nexis --14b${RST}             Switch to qwen2.5:14b (GPU-only, fast)"
-echo -e "  ${OR}nexis --fast${RST}            Switch to mistral:7b (low latency)"
-echo -e "  ${OR}nexis --code${RST}            Switch to deepseek-coder-v2:16b"
-echo -e "  ${OR}nexis --vision${RST}          Switch to llava:13b (image analysis)"
+echo -e "  ${OR}nexis${RST}                        Start (current settings)"
+echo -e "  ${OR}nexis --32b${RST}                  qwen2.5:32b (maximum)"
+echo -e "  ${OR}nexis --14b${RST}                  qwen2.5:14b (GPU-only, fast)"
+echo -e "  ${OR}nexis --fast${RST}                 mistral:7b"
+echo -e "  ${OR}nexis --code${RST}                 deepseek-coder-v2:16b"
+echo -e "  ${OR}nexis --vision${RST}               llava:13b"
 echo ""
-echo -e "  ${OR}nexis --profile default${RST}    Standard NeXiS personality"
-echo -e "  ${OR}nexis --profile fractured${RST}  Degraded containment mode"
-echo -e "  ${OR}nexis --profile technical${RST}  Personality suppressed, precision maximal"
-echo -e "  ${OR}nexis --profile minimal${RST}    Minimal mode"
-echo -e "  ${OR}nexis --profiles${RST}           List all profiles"
+echo -e "  ${OR}nexis --profile default${RST}      Standard personality"
+echo -e "  ${OR}nexis --profile fractured${RST}    Degraded containment mode"
+echo -e "  ${OR}nexis --profile technical${RST}    Engineering focus"
+echo -e "  ${OR}nexis --profile minimal${RST}      Minimal mode"
 echo ""
-echo -e "  ${OR}nexis --probe${RST}           Refresh live system context manually"
-echo -e "  ${OR}nexis --status${RST}          Show current configuration"
-echo -e "  ${OR}nexis --auto${RST}            Enable auto-run (no confirmation prompts)"
-echo -e "  ${OR}nexis --reset${RST}           Reset all settings to defaults"
+echo -e "  ${OR}nexis --memory-list${RST}          View all stored memories"
+echo -e "  ${OR}nexis --memory-search <q>${RST}    Search memories"
+echo -e "  ${OR}nexis --memory-clear${RST}         Wipe memory store"
+echo -e "  ${OR}nexis --no-memory${RST}            Disable memory this session"
 echo ""
-echo -e "  ${DIM}Settings persist between sessions.${RST}"
-echo -e "  ${DIM}Model and profile switches take effect immediately and are remembered.${RST}"
+echo -e "  ${OR}nexis --probe${RST}                Refresh system context"
+echo -e "  ${OR}nexis --status${RST}               Show current configuration"
+echo -e "  ${OR}nexis --auto${RST}                 Enable auto-run"
+echo -e "  ${OR}nexis --reset${RST}                Reset settings to defaults"
 echo ""
-echo -e "  ${GR}Config:  $NEXIS_CONF${RST}"
-echo -e "  ${GR}Data:    $NEXIS_DATA${RST}"
+echo -e "  ${WH}${BOLD}Uninstall:${RST}"
+echo ""
+echo -e "  ${OR}sudo bash nexis_setup.sh --uninstall${RST}"
+echo ""
+echo -e "  ${DIM}All flag changes persist between sessions.${RST}"
+echo ""
+echo -e "  ${GR}Config : $NEXIS_CONF${RST}"
+echo -e "  ${GR}Data   : $NEXIS_DATA${RST}"
 echo ""
 echo -e "  ${OR}source ~/.bashrc && nexis${RST}"
 echo ""
