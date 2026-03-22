@@ -5,7 +5,7 @@
                   / | \
                  /  |  \
                 / .' '. \
-               /.' (*) '.\
+               /.'  (*)  '.\
               / '.     .' \
              /    '---'    \
             /_______________\
@@ -48,6 +48,10 @@ nexis --profile minimal     # stripped to function
 nexis --memory-list
 nexis --memory-search <query>
 nexis --memory-clear
+
+# Self-evolution (off by default)
+nexis --evolve        # enable: NeXiS rewrites its own profile each session
+nexis --no-evolve     # disable
 
 # System
 nexis --probe        # refresh live system context
@@ -125,6 +129,10 @@ Four are installed. Not themes. Behavioural states.
 **minimal** — Direct. Accurate. Brief.
 
 Drop a `.md` file into `~/.config/nexis/profiles/` and call it with `nexis --profile yourfile` to create your own.
+
+**Self-evolution** — when enabled with `nexis --evolve`, NeXiS rewrites its own personality profile at the end of each session based on what happened. It adds fixations, observations, texture — whatever accumulated. The old profile is backed up as `.md.bak` before every write.
+
+Mid-conversation, NeXiS can also flag changes it wants to make to itself using `[SELF-MODIFICATION REQUEST: ...]` in its response. You confirm before anything is written.
 
 ---
 
