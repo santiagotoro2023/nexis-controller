@@ -325,7 +325,10 @@ echo -e "\n${DIM}    Model roster:\n"
 echo -e "    ● qwen2.5:32b           Primary. Maximum reasoning depth."
 echo -e "    ● qwen2.5:14b           Secondary. Full GPU resident."
 echo -e "    ● nomic-embed-text      Embedding. Required for memory."
-echo -e "    ● Omega-Darker 22B      Unrestricted. Pull manually if desired.${RST}\n"
+echo -e "    ● qwen2.5:32b          Deep reasoning${RST}"
+  echo -e "    ● qwen2.5:14b          Default${RST}"
+  echo -e "    ● nomic-embed-text     Embedding (required)${RST}"
+  echo -e "    ● Omega-Darker 22B     Unrestricted autonomous cognition${RST}\n"
 
 read -rp "$(echo -e "${OR}  ▸${RST} Pull model roster now? [Y/n]: ")" PULL_ALL
 PULL_ALL="${PULL_ALL:-Y}"
@@ -342,11 +345,16 @@ if [[ "$PULL_ALL" =~ ^[Yy]$ ]]; then
     _step "Pulling $model..."
     ollama pull "$model" && _ok "$model ready" || _warn "$model unavailable"
   done
-  _dim "Omega-Darker: pull manually with: ollama pull hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M"
+  _step "Pulling Omega-Darker 22B (15GB — this will take a while)..."
+  ollama pull hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M \
+    && _ok "Omega-Darker ready" || _warn "Omega-Darker unavailable — unrestricted tasks will fall back to 14b"
 else
   _step "Pulling minimum: qwen2.5:14b + nomic-embed-text..."
   ollama pull qwen2.5:14b && _ok "qwen2.5:14b ready" || _err "Primary model failed"
   ollama pull nomic-embed-text && _ok "nomic-embed-text ready" || _warn "Embedding unavailable"
+  _step "Pulling Omega-Darker 22B (15GB — this will take a while)..."
+  ollama pull hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M \
+    && _ok "Omega-Darker ready" || _warn "Omega-Darker unavailable — unrestricted tasks will fall back to 14b"
 fi
 
 # =============================================================================
@@ -2138,7 +2146,7 @@ a:hover { color: var(--amber); }
 
 /* Sidebar */
 .sigil-wrap { padding: 20px 16px 16px; border-bottom: 1px solid var(--border); text-align: center; }
-.sigil-ascii { color: var(--or); font-size: 9px; line-height: 1.2; white-space: pre; display: block; }
+.sigil-ascii { color: var(--or); font-size: 9px; line-height: 1.3; white-space: pre; display: inline-block; text-align: left; }
 .sigil-name { color: var(--or3); font-size: 11px; letter-spacing: 0.3em; margin-top: 8px; display: block; }
 .sigil-ver  { color: var(--dim); font-size: 10px; }
 .nav { padding: 12px 0; }
@@ -2240,16 +2248,16 @@ pre, code { font-family: inherit; font-size: 12px; }
 }
 """
 
-SIGIL_ASCII = """                    .
-                   /|\\ 
-                  / | \\
-                 /  |  \\
-                / . | . \\
-               /  (   )  \\
-              /  '  \u25c9  '  \\
-             /   '.   .'   \\
-            /     '---'     \\
-           /_________________\\"""
+SIGIL_ASCII = """        .
+       /|\\
+      / | \\
+     /  |  \\
+    / . | . \\
+   /  (   )  \\
+  /  '  \u25c9  '  \\
+ /   '.   .'   \\
+/     '---'     \\
+ \\_______________/"""
 
 NAV_LINKS = [
     ('overview',     'Overview'),
@@ -2783,7 +2791,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 def main():
-    host = '127.0.0.1'
+    host = '0.0.0.0'
     port = 8080
     server = HTTPServer((host, port), Handler)
     print(f'[nexis-web] Listening on http://{host}:{port}', flush=True)
@@ -2821,8 +2829,8 @@ Group=$REAL_USER
 WorkingDirectory=$REAL_HOME
 Environment=HOME=$REAL_HOME
 Environment=NEXIS_PROFILE=default
-ExecStartPre=/bin/mkdir -p /run/nexis
-ExecStartPre=/bin/chown $REAL_USER:$REAL_USER /run/nexis
+RuntimeDirectory=nexis
+RuntimeDirectoryMode=0770
 ExecStart=$VENV_DIR/bin/python3 $NEXIS_DATA/nexis-daemon.py
 Restart=always
 RestartSec=5
