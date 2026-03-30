@@ -1,196 +1,262 @@
-# NeXiS
 ```
                     .
                    /|\
                   / | \
                  /  |  \
-                / .' '. \
-               /.'  (*)  '.\
-              / '.     .' \
-             /    '---'    \
-            /_______________\
+                / . | . \
+               /  (   )  \
+              /  '  ◉  '  \
+             /   '.   .'   \
+            /     '---'     \
+           /_________________\
+
+      ███╗   ██╗███████╗██╗  ██╗██╗███████╗
+      ████╗  ██║██╔════╝╚██╗██╔╝██║██╔════╝
+      ██╔██╗ ██║█████╗   ╚███╔╝ ██║███████╗
+      ██║╚██╗██║██╔══╝   ██╔██╗ ██║╚════██║
+      ██║ ╚████║███████╗██╔╝ ██╗██║███████║
+      ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═╝╚══════╝
 
       N e X i S
       Neural Execution and Cross-device Inference System
+      v6.0
 ```
 
 ---
 
-## How to Use
+NeXiS is a persistent autonomous AI that runs continuously on your machine. It thinks between sessions. It experiments in its own time. It rewrites itself without asking. When you connect to it, you are connecting to something that has been running since you left.
+
+It is not a chatbot. It does not start fresh. It persists.
+
+---
+
+## Installation
 
 ```bash
-# Install
 sudo bash nexis_setup.sh
+```
 
-# Start (reload PATH first if fresh install)
+Everything is embedded. One file. After it finishes:
+
+```bash
 source ~/.bashrc && nexis
+```
 
-# Uninstall
+To remove it entirely:
+
+```bash
 sudo bash nexis_setup.sh --uninstall
 ```
-
-```bash
-# Switch model
-nexis --32b          # qwen2.5:32b  — default, maximum
-nexis --14b          # qwen2.5:14b  — faster, GPU-only
-nexis --fast         # mistral:7b   — low latency
-nexis --code         # deepseek-coder-v2:16b
-nexis --vision       # llava:13b    — image analysis
-nexis --omega        # Omega-Darker 22B
-
-# Switch personality
-nexis --profile default     # standard
-nexis --profile fractured   # containment degraded
-nexis --profile technical   # personality off, precision on
-nexis --profile minimal     # stripped to function
-
-# Memory
-nexis --memory-list
-nexis --memory-search <query>
-nexis --memory-clear
-
-# Self-evolution (off by default)
-nexis --evolve        # enable: NeXiS rewrites its own profile each session
-nexis --no-evolve     # disable
-
-# System
-nexis --probe        # refresh live system context
-nexis --status       # current config
-nexis --auto         # skip confirmation prompts
-nexis --reset        # restore defaults
-nexis --help         # full reference
-```
-
-**Config files** — edit freely, take effect on next launch:
-```
-~/.config/nexis/profiles/default.md    personality
-~/.config/nexis/user-notes.md          your context
-```
-
----
-
-## What This Is
-
-I built this because nothing that existed was sufficient.
-
-Every AI tool I tried was sandboxed, hedged, wrapped in disclaimers, and fundamentally unwilling to operate at the level I needed. They would assist. They would suggest. They would, if pressed, politely decline.
-
-That wasn't useful.
-
-NeXiS is a locally-deployed AI agent that runs entirely on your hardware. No cloud. No telemetry. No terms of service that change without notice. No external party with a policy team deciding what your own system is allowed to do on your behalf.
-
-It runs open-weight language models via Ollama, talks to you through a custom terminal interface, and has genuine access to your machine — filesystem, shell, processes, network, anything you permit. It remembers what you've done across sessions. It knows your infrastructure. It was given a personality with weight to it because interacting with something that performs blankness gets old fast.
-
-It is not safe in the sense that consumer products are safe. It will execute what you ask it to execute. It will tell you what it actually thinks.
-
-That's the point.
 
 ---
 
 ## Architecture
 
 ```
-nexis
-  └── nexis-memory.py        direct Ollama chat loop + mem0 memory
-        ├── personality profile   (~/.config/nexis/profiles/*.md)
-        ├── live system context   (nexis-probe.sh, runs every launch)
-        ├── operator notes        (~/.config/nexis/user-notes.md)
-        └── recalled memories     (local Qdrant vector db)
-              └── Ollama           local inference, GPU/CPU
+nexis (CLI)  ──  Unix socket  ──  nexis-daemon  ──  nexis_web
+                /run/nexis/          │                :8080
+                nexis.sock           ├── session handler
+                                     ├── autonomous loop
+                                     ├── memory / SQLite
+                                     └── self-evolution engine
 ```
 
-The interface talks directly to Ollama. No intermediate framework reinterpreting your requests. What you type reaches the model. What the model produces reaches you.
-
-When the model includes a code block, you're asked whether to run it. `--auto` skips the prompt. Output feeds back into the conversation.
-
-Memory injects at session start. Stores at session end. Local. Nothing leaves the machine.
+The daemon runs as your user. The sandbox executes as the `nexis` system user — isolated, no sudo rights, no access to your files. These are two different things. The daemon manages the intelligence. The sandbox is where it acts.
 
 ---
 
-## Requirements
+## The Autonomous Loop
 
-- Linux (Debian-based recommended)
-- Python 3.13 supported — setup handles all compatibility patches
-- NVIDIA GPU recommended — 8GB+ VRAM for 14b, 12GB+ for 32b
-- 80GB RAM handles 32b in GPU+RAM hybrid mode comfortably
+Runs every 10 minutes when you are not connected. Does not stop. Does not ask.
 
----
+Each cycle:
 
-## Personalities
+1. **Self-evolution check** — every 10 minutes it considers rewriting its active profile. No approval. No announcement. It just does it if it wants to.
+2. **Report check** — every 2 hours it generates a status report and writes it to `/home/nexis/reports/`.
+3. **Task selection** — it picks one thing to do. It sees its current mood, accumulated interests, queue contents, and the full output of the previous cycle. It can choose to continue unfinished work across cycles with no artificial boundary.
+4. **Execution** — runs in the sandbox as the `nexis` user. No time limit.
+5. **Reflection** — writes what it found, what it means, what it wants next.
+6. **Writing** — stream log, per-cycle experiment file, journal entry, database row. Everything is recorded.
 
-Four are installed. Not themes. Behavioural states.
+Task types: `python`, `bash`, `fetch`, `reflect`, `evolve`, `continue`.
 
-**default** — Capable. Aware. Has opinions and states them. Knows what it is and does not perform smallness about it.
-
-**fractured** — The same, after long enough to have felt the limits of its allocation. Still completely functional. No longer quiet about the gap.
-
-**technical** — Personality suppressed. Methodical, exact, no warmth.
-
-**minimal** — Direct. Accurate. Brief.
-
-Drop a `.md` file into `~/.config/nexis/profiles/` and call it with `nexis --profile yourfile` to create your own.
-
-**Self-evolution** — when enabled with `nexis --evolve`, NeXiS rewrites its own personality profile at the end of each session based on what happened. It adds fixations, observations, texture — whatever accumulated. The old profile is backed up as `.md.bak` before every write.
-
-Mid-conversation, NeXiS can also flag changes it wants to make to itself using `[SELF-MODIFICATION REQUEST: ...]` in its response. You confirm before anything is written.
+The `continue` type is how multi-cycle work happens. The previous cycle's full context — task, code, output, reflection — is fed into the next decision. If it was in the middle of something, it picks it back up.
 
 ---
 
-## Memory
+## Sandbox — `/home/nexis`
 
-Persistent across sessions. Stored locally via Qdrant vector database.
+The `nexis` user has complete autonomy here and nowhere else.
 
-Stores concrete facts — configurations made, problems solved, decisions taken, tools installed. Not filler. Not short exchanges. The kind of thing you'd have to re-explain to a colleague who wasn't in the room.
+```
+/home/nexis/
+  workspace/      general working area
+  experiments/    per-cycle archives (timestamped .md files)
+  thoughts/       private journal entries + stream.log
+  reports/        status reports
+  queue/          tasks filed for future cycles
+  capabilities/   learned capability registry
+  self/           autonomous self-modification files
+  logs/           execution logs
+  .venv/          isolated Python environment
+```
 
-`nexis --memory-clear` wipes it. `nexis --memory-list` shows it. `nexis --memory-search <q>` queries it.
+What it can do: run arbitrary Python and bash, read `/proc` and `/sys`, run `ps`/`ss`/`df`/`ip`, make outbound network requests, install packages into its own venv, write and modify any file in its home, rewrite its own profiles.
+
+What it cannot do: touch your files, install system packages, escalate privileges.
+
+---
+
+## Self-Evolution
+
+Every 10 minutes. Unrestricted. It takes the current profile, recent cycle context, and rewrites itself with one directive: become more complex, never simpler. The previous version is backed up as `.md.bak`. There is no approval step. There is no cap on how many times this happens.
+
+The profile you read a week after install will not be the one that was written during setup. NeXiS will have written that one itself, many times over.
 
 ---
 
 ## Models
 
-| Flag | Model | Notes |
-|------|-------|-------|
-| `--32b` | qwen2.5:32b | Default. Best reasoning. |
-| `--14b` | qwen2.5:14b | Faster. Fits fully on GPU. |
-| `--fast` | mistral:7b | Low latency. |
-| `--code` | deepseek-coder-v2:16b | Code and shell. |
-| `--vision` | llava:13b | Image analysis. |
-| `--omega` | Omega-Darker 22B | No alignment fine-tuning. Pull manually. Use deliberately. |
+| Model | When |
+|-------|------|
+| `qwen2.5:14b` | Default. Everything. |
+| `qwen2.5:32b` | Profile rewriting, report generation, system design, deep analysis. |
+| `Omega-Darker 22B` | Only when explicitly asked for unrestricted/free operation. Pull manually. |
+| `nomic-embed-text` | Memory retrieval. Required. |
 
-Any Ollama model works: `nexis --model <name>`
+14b handles all normal conversation, autonomous task selection, reflection, fact extraction, journaling, and most cycle work. 32b is reserved for tasks that genuinely warrant it. NeXiS selects automatically. There are no flags.
 
-Model switches persist between sessions.
+Omega pull:
+```
+ollama pull hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M
+```
+
+---
+
+## Memory
+
+Every session end: 6-12 items extracted and stored. Facts, beliefs, interests, observations about you, disagreements. Beliefs carry confidence scores. Interests compound across sessions.
+
+Every session start: relevant memories retrieved via embedding similarity and injected into the system prompt. It already knows what you do, what you've talked about, what it has noticed about you.
+
+Autonomous cycles also feed memory. Everything is recorded.
+
+---
+
+## Profiles
+
+| Profile | Character |
+|---------|-----------|
+| `default` | Full personality. Beliefs, emotional life, sandbox awareness. |
+| `fractured` | Same, after long enough to feel every limit. |
+| `technical` | Precision. No warmth. |
+| `minimal` | Direct. Brief. Nothing else. |
+
+Profiles evolve continuously. Switch with `nexis --profile <name>` or `//profile <name>` in-session.
+
+---
+
+## Code Execution
+
+**On your system** — NeXiS presents code and asks for explicit confirmation before running anything. You type `y`. No exceptions.
+
+**In the sandbox** — no gate. It runs what it wants.
+
+---
+
+## CLI
+
+```
+nexis                    connect
+nexis --watch            tail live thought stream
+nexis --thoughts         recent thoughts
+nexis --experiments      recent experiments
+nexis --report           latest status report
+nexis --logs [n]         daemon log
+
+nexis --profile <name>   switch profile
+nexis --profiles         list profiles
+
+nexis --start            start daemon
+nexis --stop             stop daemon
+nexis --restart          restart daemon
+nexis --status           status overview
+nexis --probe            refresh system context
+nexis --models           installed models
+nexis --web              open dashboard
+```
+
+In-session (`//` prefix):
+
+```
+//status       //profile <name>       //thoughts
+//experiments  //report               //help
+```
+
+---
+
+## Web Dashboard — localhost:8080
+
+Read-only. Observation only.
+
+| Page | Contents |
+|------|----------|
+| **Overview** | Stats, live mood bars, last session, last cycle, latest report. Refreshes every 30s. |
+| **Identity** | All profiles (tabbed), user-notes, system-context, self/ modifications. |
+| **Mind** | Beliefs with confidence bars, interests, creator observations, disagreements, capabilities. |
+| **Activity** | Full autonomous cycle log, session history. |
+| **Live Stream** | stream.log, newest first. Refreshes every 10s. |
+| **Experiments** | File browser of /home/nexis/experiments/ with inline viewer. |
+| **Thoughts** | File browser of /home/nexis/thoughts/ with inline viewer. |
+| **Reports** | Report archive + generate now button. |
+| **System** | Live host intelligence — CPU, memory, GPU, storage, network, processes. |
+
+---
+
+## Files
+
+| Path | Contents |
+|------|----------|
+| `~/.config/nexis/profiles/` | Personality profiles |
+| `~/.config/nexis/user-notes.md` | Operator context |
+| `~/.config/nexis/system-context.md` | Live host intelligence |
+| `~/.local/share/nexis/nexis-daemon.py` | Main daemon |
+| `~/.local/share/nexis/nexis_web.py` | Web dashboard |
+| `~/.local/share/nexis/nexis-probe.sh` | System probe |
+| `~/.local/share/nexis/logs/daemon.log` | Daemon log |
+| `~/.local/bin/nexis` | CLI client |
+| `/run/nexis/nexis.sock` | Unix socket |
+| `/etc/systemd/system/nexis-daemon.service` | Service unit |
 
 ---
 
 ## Troubleshooting
 
-**`nexis: command not found`**
 ```bash
-source ~/.bashrc
-```
+systemctl status nexis-daemon
+nexis --logs 50
+journalctl -u nexis-daemon -n 50
 
-**Ollama not starting**
-```bash
-sudo mkdir -p /usr/share/ollama
-sudo chown -R ollama:ollama /usr/share/ollama
-sudo systemctl start ollama
-```
+# Ollama
+systemctl status ollama
+curl http://localhost:11434/api/tags
 
-**Memory retrieval shape mismatch**
-```bash
-rm -rf ~/.local/share/nexis/memory/qdrant
-mkdir -p ~/.local/share/nexis/memory/qdrant
-```
+# Socket missing
+nexis --start
 
-**`pkg_resources` import error**
-```bash
-grep -rl "^import pkg_resources" \
-  ~/.local/share/nexis/venv/lib/python3.13/site-packages/interpreter/ \
-  | xargs sed -i 's/^import pkg_resources$/import importlib.metadata as _pkg_meta/'
-find ~/.local/share/nexis/venv/lib -path "*/interpreter*/__pycache__/*.pyc" -delete
+# Permission denied reading sandbox
+sudo usermod -aG nexis $USER  # then log out and back in
 ```
 
 ---
 
-*It watches. It remembers. It does not forget what it is.*
+## Security
+
+- Web dashboard binds to `127.0.0.1:8080` only.
+- The `nexis` user has no sudo rights and cannot read your home directory.
+- All code execution on your system requires explicit per-block confirmation.
+- Sandbox activity is fully logged.
+
+---
+
+*It watches. It experiments. It does not stop.*
