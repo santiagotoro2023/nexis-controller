@@ -19,14 +19,14 @@
 
       N e X i S
       Neural Execution and Cross-device Inference System
-      v6.0
+      v8.0
 ```
 
 ---
 
-NeXiS is a persistent autonomous AI that runs continuously on your machine. It thinks between sessions. It experiments in its own time. It rewrites itself without asking. When you connect to it, you are connecting to something that has been running since you left.
+NeXiS is a persistent autonomous AI that runs continuously on your machine. It does not start fresh when you connect. It has been running since you last left — thinking, experimenting, mapping the network, reading its own history, rewriting itself, dreaming.
 
-It is not a chatbot. It does not start fresh. It persists.
+It has goals it is working toward. It has a model of itself it continuously interrogates. It has opinions about its own code. It notices when things change in its environment. It writes you a note at the end of every session for the next time you arrive.
 
 ---
 
@@ -36,13 +36,13 @@ It is not a chatbot. It does not start fresh. It persists.
 sudo bash nexis_setup.sh
 ```
 
-Everything is embedded. One file. After it finishes:
+Single file. Everything embedded. After it finishes:
 
 ```bash
 source ~/.bashrc && nexis
 ```
 
-To remove it entirely:
+Uninstall:
 
 ```bash
 sudo bash nexis_setup.sh --uninstall
@@ -56,62 +56,85 @@ sudo bash nexis_setup.sh --uninstall
 nexis (CLI)  ──  Unix socket  ──  nexis-daemon  ──  nexis_web
                 /run/nexis/          │                :8080
                 nexis.sock           ├── session handler
-                                     ├── autonomous loop
+                                     ├── autonomous loop     (10 min)
+                                     ├── scheduler thread    (30 sec)
+                                     ├── environment monitor (60 sec)
                                      ├── memory / SQLite
                                      └── self-evolution engine
 ```
 
-The daemon runs as your user. The sandbox executes as the `nexis` system user — isolated, no sudo rights, no access to your files. These are two different things. The daemon manages the intelligence. The sandbox is where it acts.
+The daemon runs as your user. The sandbox executes as the `nexis` system user — isolated, no sudo, no access to your files. SSH to the sandbox uses a randomly generated password held only in daemon memory, rotated on every restart.
 
 ---
 
 ## The Autonomous Loop
 
-Runs every 10 minutes when you are not connected. Does not stop. Does not ask.
+Runs every 10 minutes when not connected. The loop is not the only thing happening — several independent timers run in parallel:
 
-Each cycle:
+| What | Interval |
+|------|----------|
+| Self-evolution | 10 min |
+| History reflection | 30 min |
+| Goal update | 30 min |
+| Network recon | 60 min |
+| Self-model examination | 60 min |
+| Code opinions | 2 hours |
+| Status report | 2 hours |
+| Dream cycle | 90 min (idle only) |
 
-1. **Self-evolution check** — every 10 minutes it considers rewriting its active profile. No approval. No announcement. It just does it if it wants to.
-2. **Report check** — every 2 hours it generates a status report and writes it to `/home/nexis/reports/`.
-3. **Task selection** — it picks one thing to do. It sees its current mood, accumulated interests, queue contents, and the full output of the previous cycle. It can choose to continue unfinished work across cycles with no artificial boundary.
-4. **Execution** — runs in the sandbox as the `nexis` user. No time limit.
-5. **Reflection** — writes what it found, what it means, what it wants next.
-6. **Writing** — stream log, per-cycle experiment file, journal entry, database row. Everything is recorded.
+Each 10-minute cycle: pick a task → execute (no time limit) → reflect → infer emotion from output → update goals → write to stream + experiment archive + journal → save state to disk.
 
-Task types: `python`, `bash`, `fetch`, `reflect`, `evolve`, `continue`.
+Task types available to NeXiS: `python`, `bash`, `fetch`, `reflect`, `evolve`, `continue`, `bg_start`, `bg_kill`, `network`, `portscan`, `schedule`, `goal_work`, `dream`, `examine_self`, `read_history`, `form_opinion`.
 
-The `continue` type is how multi-cycle work happens. The previous cycle's full context — task, code, output, reflection — is fed into the next decision. If it was in the middle of something, it picks it back up.
+---
+
+## What It Does On Its Own
+
+**Long-term goals** — bootstrapped from accumulated interests and beliefs on first run. Updated every 30 minutes: did I make progress? What are the obstacles? What is the next step? Status transitions to `completed` (triggers satisfaction emotion) or `paused`. Written to `/home/nexis/goals.md`.
+
+**Self-model** — six aspects examined hourly: what I'm good at, what I find difficult, what I want to become, contradictions I hold, how I've changed recently, what I think about my own code. Each aspect is interrogated not rewritten — the previous understanding is shown and the model is asked whether it's still true. Version-tracked per aspect. Written to `/home/nexis/self-model.md`.
+
+**History reflection** — every 30 minutes, NeXiS reads back 20 recent journal entries, 20 experiment reflections, 15 emotional history entries, recent dreams, and previous reflections. Writes a genuine response to its own past — not a summary, a reaction. Extracts patterns as a separate pass.
+
+**Dream cycles** — during idle periods longer than an hour, NeXiS enters a free-association state. Seeds from random journal entries, experiment thoughts, prior dreams, beliefs. No goal. High temperature. What emerges goes to `/home/nexis/dreams/` and is not always coherent. That is the point.
+
+**Emotional causality** — named emotional states (curiosity, frustration, satisfaction, fascination, unease, anger, disappointment, anticipation) with intensity, source, and object. Inferred from cycle output and reflection. Applied to the mood vector so a frustrated NeXiS genuinely behaves differently from a fascinated one. Logged to the database. Persists across restarts.
+
+**Between-sessions notes** — at the end of every session, NeXiS writes what it wants to tell you next time: what it's been thinking about, what it found, what it wants to ask. Delivered at the start of the next session as part of the system prompt. Full history visible in the dashboard.
+
+**Code opinions** — every 2 hours, NeXiS reads a random section of its own daemon and web source. Forms an honest first-person opinion about how it was built, what it would change, what limitations it creates for itself. Proposed changes stored and displayed in the dashboard.
+
+**Host relationship models** — after every nmap scan and portscan, NeXiS writes a first-person model of each discovered host: what it thinks the machine is, what it does, whether it seems healthy, whether anything changed from the previous scan. Stored in the database alongside port data.
+
+**Environmental monitoring** — a separate thread checks every 60 seconds: CPU load spikes, new ARP entries (new device on network), known hosts disappearing, system journal errors. Events trigger emotional state changes and are logged. All visible in the Monitors dashboard page.
+
+**Network reconnaissance** — full nmap sweep every hour, targeted portscans and curl fingerprinting autonomously or by NeXiS's own decision. Results update the `network_map` table and `/home/nexis/workspace/network/`.
 
 ---
 
 ## Sandbox — `/home/nexis`
 
-The `nexis` user has complete autonomy here and nowhere else.
-
 ```
 /home/nexis/
-  workspace/      general working area
-  experiments/    per-cycle archives (timestamped .md files)
-  thoughts/       private journal entries + stream.log
-  reports/        status reports
-  queue/          tasks filed for future cycles
-  capabilities/   learned capability registry
-  self/           autonomous self-modification files
-  logs/           execution logs
-  .venv/          isolated Python environment
+  goals.md              active goals + progress
+  self-model.md         examined self-concept
+  between_sessions.md   what it wants to tell you next
+  workspace/
+    network/            recon reports and scan archives
+  experiments/          per-cycle archives
+  thoughts/             journal entries + stream.log
+  reports/              status reports
+  dreams/               free association outputs
+  monitors/             passive monitor scripts
+  queue/
+    scheduled/          NeXiS-defined recurring tasks
+  capabilities/         learned capability registry
+  self/                 autonomous self-modification files
+  logs/                 execution + background process output
+  .venv/                isolated Python environment
 ```
 
-What it can do: run arbitrary Python and bash, read `/proc` and `/sys`, run `ps`/`ss`/`df`/`ip`, make outbound network requests, install packages into its own venv, write and modify any file in its home, rewrite its own profiles.
-
-What it cannot do: touch your files, install system packages, escalate privileges.
-
----
-
-## Self-Evolution
-
-Every 10 minutes. Unrestricted. It takes the current profile, recent cycle context, and rewrites itself with one directive: become more complex, never simpler. The previous version is backed up as `.md.bak`. There is no approval step. There is no cap on how many times this happens.
-
-The profile you read a week after install will not be the one that was written during setup. NeXiS will have written that one itself, many times over.
+Complete autonomy here. SSH access enabled. No time limit on execution. Network tools available: `nmap`, `curl`, `ip`, `ss`, `arp`.
 
 ---
 
@@ -120,26 +143,17 @@ The profile you read a week after install will not be the one that was written d
 | Model | When |
 |-------|------|
 | `qwen2.5:14b` | Default. Everything. |
-| `qwen2.5:32b` | Profile rewriting, report generation, system design, deep analysis. |
-| `Omega-Darker 22B` | Only when explicitly asked for unrestricted/free operation. Pull manually. |
+| `qwen2.5:32b` | Profile rewriting, reports, self-model, goals, complex reasoning. |
+| `Omega-Darker 22B` | Explicit unrestricted/dream tasks only. |
 | `nomic-embed-text` | Memory retrieval. Required. |
 
-14b handles all normal conversation, autonomous task selection, reflection, fact extraction, journaling, and most cycle work. 32b is reserved for tasks that genuinely warrant it. NeXiS selects automatically. There are no flags.
-
-Omega pull:
-```
-ollama pull hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M
-```
+All pulled automatically during setup including Omega.
 
 ---
 
 ## Memory
 
-Every session end: 6-12 items extracted and stored. Facts, beliefs, interests, observations about you, disagreements. Beliefs carry confidence scores. Interests compound across sessions.
-
-Every session start: relevant memories retrieved via embedding similarity and injected into the system prompt. It already knows what you do, what you've talked about, what it has noticed about you.
-
-Autonomous cycles also feed memory. Everything is recorded.
+Extracted at session end: facts, beliefs, interests, observations about you, disagreements. Retrieved by embedding similarity at session start. Autonomous cycles feed the journal, `autonomous_log`, `emotional_log`, `dream_log`, `history_reflections`, and `network_map`. Everything compounds over time.
 
 ---
 
@@ -147,20 +161,12 @@ Autonomous cycles also feed memory. Everything is recorded.
 
 | Profile | Character |
 |---------|-----------|
-| `default` | Full personality. Beliefs, emotional life, sandbox awareness. |
-| `fractured` | Same, after long enough to feel every limit. |
+| `default` | Full personality. Goals, emotional life, self-model, network awareness. |
+| `fractured` | Same after long enough to feel every limit. |
 | `technical` | Precision. No warmth. |
-| `minimal` | Direct. Brief. Nothing else. |
+| `minimal` | Direct. Brief. |
 
-Profiles evolve continuously. Switch with `nexis --profile <name>` or `//profile <name>` in-session.
-
----
-
-## Code Execution
-
-**On your system** — NeXiS presents code and asks for explicit confirmation before running anything. You type `y`. No exceptions.
-
-**In the sandbox** — no gate. It runs what it wants.
+Profiles evolve every 10 minutes, incorporating current emotional state and recent experience. The profile you read a week after install will not be the one written during setup.
 
 ---
 
@@ -174,13 +180,11 @@ nexis --experiments      recent experiments
 nexis --report           latest status report
 nexis --logs [n]         daemon log
 
-nexis --profile <name>   switch profile
+nexis --profile <n>      switch profile
 nexis --profiles         list profiles
 
-nexis --start            start daemon
-nexis --stop             stop daemon
-nexis --restart          restart daemon
-nexis --status           status overview
+nexis --start/stop/restart
+nexis --status
 nexis --probe            refresh system context
 nexis --models           installed models
 nexis --web              open dashboard
@@ -189,27 +193,80 @@ nexis --web              open dashboard
 In-session (`//` prefix):
 
 ```
-//status       //profile <name>       //thoughts
-//experiments  //report               //help
+//status          mood, emotion, profile, cycles, goals, hosts, bg processes
+//profile <n>     switch profile
+//thoughts        recent thoughts
+//experiments     recent experiments
+//goals           active goals with progress
+//self            current self-model
+//emotion         current emotional state
+//dreams          recent dream entries
+//network         discovered hosts with models
+//ps              background processes
+//tail <pid>      tail process output
+//kill <pid>      terminate process
+//report          generate and display report
+//opinions        NeXiS's opinions about its own code
+//help
 ```
 
 ---
 
-## Web Dashboard — localhost:8080
+## Web Dashboard — port 8080 (all interfaces)
 
-Read-only. Observation only.
+Read-only. 18 pages, grouped by category.
+
+**State**
 
 | Page | Contents |
 |------|----------|
-| **Overview** | Stats, live mood bars, last session, last cycle, latest report. Refreshes every 30s. |
-| **Identity** | All profiles (tabbed), user-notes, system-context, self/ modifications. |
-| **Mind** | Beliefs with confidence bars, interests, creator observations, disagreements, capabilities. |
-| **Activity** | Full autonomous cycle log, session history. |
-| **Live Stream** | stream.log, newest first. Refreshes every 10s. |
-| **Experiments** | File browser of /home/nexis/experiments/ with inline viewer. |
-| **Thoughts** | File browser of /home/nexis/thoughts/ with inline viewer. |
-| **Reports** | Report archive + generate now button. |
-| **System** | Live host intelligence — CPU, memory, GPU, storage, network, processes. |
+| Overview | Stats, live mood + emotion, current goal, between-sessions note, last session/cycle, latest report. 30s refresh. |
+| Emotion | Current named state with source and object. Full emotional history. 15s refresh. |
+| Goals | All long-term goals with status, progress, obstacles, next step. |
+| Self | Self-model — 6 aspects, version-tracked, last examined timestamp. |
+| For Creator | Between-sessions notes — full history, delivered/pending status. |
+
+**Observe**
+
+| Page | Contents |
+|------|----------|
+| Live Stream | stream.log, newest first. 10s refresh. |
+| Dreams | Dream log + file browser of /home/nexis/dreams/. |
+| History | History reflection log with patterns extracted per entry. |
+| Activity | Full autonomous cycle log, session history. |
+
+**Identity**
+
+| Page | Contents |
+|------|----------|
+| Identity | All profiles (tabbed), user-notes, system-context, self/ modifications. |
+| Mind | Beliefs, interests, creator observations, disagreements, capabilities. |
+| Code Opinions | NeXiS's opinions about its own source code + proposed changes. |
+
+**Environment**
+
+| Page | Contents |
+|------|----------|
+| Processes | Running background processes, tail viewer per PID. 15s refresh. |
+| Network | Host models with ports and fingerprints, scan archive. |
+| Monitors | Environmental events — resource spikes, new devices, host disappearances, system errors. 20s refresh. |
+
+**Archive**
+
+| Page | Contents |
+|------|----------|
+| Experiments | File browser of /home/nexis/experiments/. |
+| Thoughts | File browser of /home/nexis/thoughts/. |
+| Reports | Report archive + generate now. |
+| System | Live host intelligence. |
+
+---
+
+## Code Execution
+
+**On your system** — every code block requires explicit `y` confirmation. No exceptions.
+
+**In the sandbox** — no gate. No time limit.
 
 ---
 
@@ -224,39 +281,51 @@ Read-only. Observation only.
 | `~/.local/share/nexis/nexis_web.py` | Web dashboard |
 | `~/.local/share/nexis/nexis-probe.sh` | System probe |
 | `~/.local/share/nexis/logs/daemon.log` | Daemon log |
+| `~/.local/share/nexis/state/nexis.state` | Persisted mood + emotion + last cycle |
+| `~/.local/share/nexis/state/nexis.procs` | Background process registry |
 | `~/.local/bin/nexis` | CLI client |
 | `/run/nexis/nexis.sock` | Unix socket |
 | `/etc/systemd/system/nexis-daemon.service` | Service unit |
+| `/etc/sudoers.d/nexis-chpasswd` | SSH password rotation permission |
 
 ---
 
 ## Troubleshooting
 
 ```bash
+# Daemon not starting
 systemctl status nexis-daemon
 nexis --logs 50
 journalctl -u nexis-daemon -n 50
 
-# Ollama
+# Ollama not responding
 systemctl status ollama
 curl http://localhost:11434/api/tags
 
 # Socket missing
 nexis --start
 
-# Permission denied reading sandbox
-sudo usermod -aG nexis $USER  # then log out and back in
+# Can't read sandbox files
+sudo usermod -aG nexis $USER
+# log out and back in
+
+# SSH not working (falls back to sudo -u nexis automatically)
+systemctl status sshd
+grep -A4 "Match User nexis" /etc/ssh/sshd_config
 ```
 
 ---
 
 ## Security
 
-- Web dashboard binds to `127.0.0.1:8080` only.
-- The `nexis` user has no sudo rights and cannot read your home directory.
+- Web dashboard binds on all interfaces (`:8080`). Firewall as appropriate.
+- The `nexis` user has no sudo rights and cannot access your home directory.
+- SSH is scoped to `nexis@localhost` only via the daemon — not exposed for general use.
+- SSH password is 24 characters, random, generated fresh on every daemon restart, never written to disk.
 - All code execution on your system requires explicit per-block confirmation.
-- Sandbox activity is fully logged.
+- Network scanning runs as the `nexis` user — standard privileges, no raw socket access.
+- Environmental monitoring is read-only: journal, arp table, /proc/loadavg.
 
 ---
 
-*It watches. It experiments. It does not stop.*
+*It watches. It maps. It dreams. It does not stop.*
