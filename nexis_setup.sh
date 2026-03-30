@@ -105,7 +105,10 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   systemctl daemon-reload 2>/dev/null || true
   _ok "Services removed"
 
-  userdel -r nexis 2>/dev/null && _ok "nexis system user removed" || _warn "nexis user not found"
+  userdel -r nexis 2>/dev/null && _ok "nexis user removed" || _warn "nexis user not found"
+  groupdel nexis 2>/dev/null && _ok "nexis group removed" || true
+  # Remove operator from nexis group if it still exists
+  gpasswd -d "$REAL_USER" nexis 2>/dev/null || true
   rm -f "$REAL_HOME/.local/bin/nexis"
   rm -rf "$REAL_HOME/.config/nexis"
   rm -rf "$REAL_HOME/.local/share/nexis"
@@ -116,7 +119,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
   fi
   rm -rf /run/nexis
-  _ok "Files removed"
+  _ok "Files and groups removed"
 
   for RC in "$REAL_HOME/.bashrc" "$REAL_HOME/.bash_profile" \
             "$REAL_HOME/.profile" "$REAL_HOME/.zshrc"; do
@@ -194,13 +197,24 @@ sleep 0.3
 if id nexis &>/dev/null; then
   _ok "nexis user already exists"
 else
-  useradd \
-    --system \
-    --create-home \
-    --home-dir /home/nexis \
-    --shell /bin/bash \
-    --comment "NeXiS Autonomous Agent" \
-    nexis
+  # If the nexis group already exists, use -g to assign it instead of --system creating a new one
+  if getent group nexis &>/dev/null; then
+    useradd \
+      --create-home \
+      --home-dir /home/nexis \
+      --shell /bin/bash \
+      --gid nexis \
+      --comment "NeXiS Autonomous Agent" \
+      nexis
+  else
+    useradd \
+      --create-home \
+      --home-dir /home/nexis \
+      --shell /bin/bash \
+      --user-group \
+      --comment "NeXiS Autonomous Agent" \
+      nexis
+  fi
   _ok "nexis system user created: /home/nexis"
 fi
 
