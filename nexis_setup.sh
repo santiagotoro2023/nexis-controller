@@ -2746,7 +2746,7 @@ _ok "Daemon v8 installed: $DAEMON_FILE"
 # =============================================================================
 
 _header "PHASE 13 — WEB COMMAND CENTRE v8"
-_sys "Goals · Self-Model · Dreams · Emotions · History · Hosts · Code Opinions"
+_tag "Goals · Self-Model · Dreams · Emotions · History · Hosts · Code Opinions"
 sleep 0.3
 
 WEB_FILE="$NEXIS_DATA/nexis_web.py"
