@@ -2751,7 +2751,7 @@ sleep 0.3
 
 WEB_FILE="$NEXIS_DATA/nexis_web.py"
 
-python3 - << 'PYWRITE'
+NEXIS_DATA_TARGET="$WEB_FILE" python3 - << 'PYWRITE'
 import sys
 content = r'''#!/usr/bin/env python3
 """NeXiS Web Dashboard v8.0 — Goals, Self-Model, Dreams, Emotions, History, Hosts"""
@@ -3569,7 +3569,7 @@ class Handler(BaseHTTPRequestHandler):
 '''
 
 import sys,os
-target=os.path.expanduser("~/.local/share/nexis/nexis_web.py")
+target=os.environ.get("NEXIS_DATA_TARGET", os.path.expanduser("~/.local/share/nexis/nexis_web.py"))
 os.makedirs(os.path.dirname(target),exist_ok=True)
 with open(target,"w") as f:
     f.write(content)
