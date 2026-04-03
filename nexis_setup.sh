@@ -3580,12 +3580,6 @@ chown "$REAL_USER:$(id -gn "$REAL_USER")" "$WEB_FILE"
 chmod +x "$WEB_FILE"
 _ok "Web dashboard v8 installed: $WEB_FILE"
 
-WEB_EOF
-
-chmod +x "$WEB_FILE"
-chown "$REAL_USER:$(id -gn "$REAL_USER")" "$WEB_FILE"
-_ok "Web dashboard installed: $WEB_FILE"
-
 
 # =============================================================================
 # PHASE 14 — SYSTEMD SERVICES
