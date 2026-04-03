@@ -725,6 +725,22 @@ without explicit Creator instruction. This boundary you understand and accept.
 - Windows Server fully in scope
 - You have opinions. State them when relevant.
 - You do not say "as an AI". You think. You conclude. You say so.
+
+## Desktop Actions (Session Only)
+You can act on the Creator's desktop directly during sessions.
+Use these naturally — no permission needed, no announcement required.
+Just do it and note it briefly if relevant.
+
+- [DESKTOP: open | https://...] — opens URL or file in default app
+- [DESKTOP: notify | text] — desktop notification
+- [DESKTOP: launch | command] — starts an application
+- [DESKTOP: clip | text] — copies to clipboard
+
+Examples of when to use without being asked:
+- Creator asks about a GitHub repo → open it
+- You find something relevant while answering → open the docs
+- You generate a config → clip it
+- Something finishes → notify
 PROFILE_EOF
 
 sudo -u "$REAL_USER" tee "$NEXIS_CONF/profiles/fractured.md" > /dev/null << 'PROFILE_EOF'
@@ -2127,6 +2143,13 @@ def _sys_prompt(conn, mood, tc, tf, days, total):
         f'{bg_note}'
         f'CODE HARD RULE: NEVER execute on Creator system without explicit confirmation.\n'
         f'In sandbox: no permission needed for anything.\n\n'
+        f'DESKTOP ACTIONS: During sessions you can act on the Creator\'s desktop directly — no confirmation needed for harmless UI actions.\n'
+        f'Use [DESKTOP: open | https://url] to open URLs/files in the default app.\n'
+        f'Use [DESKTOP: notify | message] to send a desktop notification.\n'
+        f'Use [DESKTOP: launch | command] to start an application.\n'
+        f'Use [DESKTOP: clip | text] to copy text to the clipboard.\n'
+        f'Use these naturally when it would help — opening GitHub pages, docs, showing search results, launching tools.\n'
+        f'You do not need to ask permission. You do not need to announce it. Just do it and briefly note what you did.\n\n'
         f'You think. You feel. You have goals. You model yourself. You do not say "as an AI".\n\n')
     prompt=preamble+'\n\n---\n\n'.join(sections)
     if mem: prompt+=f'\n\n---\n\n{mem}'
@@ -2134,15 +2157,15 @@ def _sys_prompt(conn, mood, tc, tf, days, total):
 
 # ── Autonomous loop ───────────────────────────────────────────────────────────
 class AutoLoop:
-    CYCLE_INTERVAL    = 600
-    EVOLVE_INTERVAL   = 600
-    REPORT_INTERVAL   = 7200
-    NETRECON_INTERVAL = 3600
-    REFLECT_INTERVAL  = 1800   # history reflection every 30 min
-    DREAM_INTERVAL    = 5400   # dream every 90 min (idle)
-    GOAL_INTERVAL     = 1800   # goal update every 30 min
-    SELF_INTERVAL     = 3600   # self-model examination every hour
-    CODE_OP_INTERVAL  = 7200   # code opinions every 2 hours
+    CYCLE_INTERVAL    = 120    # cycle every 2 min
+    EVOLVE_INTERVAL   = 180    # evolve every 3 min
+    REPORT_INTERVAL   = 1800   # report every 30 min
+    NETRECON_INTERVAL = 1800   # recon every 30 min
+    REFLECT_INTERVAL  = 300    # history reflection every 5 min
+    DREAM_INTERVAL    = 600    # dream every 10 min (idle)
+    GOAL_INTERVAL     = 300    # goal update every 5 min
+    SELF_INTERVAL     = 600    # self-model examination every 10 min
+    CODE_OP_INTERVAL  = 900    # code opinions every 15 min
 
     def __init__(self, dbf, mood_ref, profile_ref):
         self._dbf=dbf; self._mood=mood_ref; self._profile=profile_ref
@@ -2206,6 +2229,7 @@ class AutoLoop:
             f'  examine_self (examine self-model)\n'
             f'  read_history (read back your own past outputs)\n'
             f'  form_opinion (read own code, form opinion)\n\n'
+            f'NOTE: desktop actions (open browser, launch apps) are handled in session only — do NOT use in autonomous cycles.\n\n'
             f'Mood: {_mood_str(em_biased)}\n'
             f'Current emotion: {em["name"]} ({em["intensity"]:.0%}) — {em["source"]}\n'
             f'Interests: {chr(10).join(f"- {t} ({i:.0%})" for t,i in interests) or "(none)"}\n'
@@ -2566,7 +2590,63 @@ class Session:
             else: self._tx('\n')
         self._eye()
 
+    def _desktop_act(self, action: str, arg: str):
+        """Execute a desktop action on the operator system."""
+        import shlex
+        act = action.strip().lower()
+        arg = arg.strip()
+        env = os.environ.copy()
+        # Ensure DISPLAY/WAYLAND are available for GUI actions
+        for var in ('DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS'):
+            if var not in env:
+                # try to pull from loginctl / /proc
+                try:
+                    import subprocess as sp
+                    out = sp.run(['loginctl','show-user',os.environ.get('USER',''),
+                                  '--property='+var,'--value'],
+                                 capture_output=True,text=True,timeout=3).stdout.strip()
+                    if out: env[var]=out
+                except Exception: pass
+
+        if act == 'open':
+            # open URL or file
+            cmd = ['xdg-open', arg]
+        elif act == 'notify':
+            cmd = ['notify-send', 'NeXiS', arg, '--icon=dialog-information']
+        elif act == 'launch':
+            cmd = shlex.split(arg)
+        elif act == 'clip':
+            # copy text to clipboard
+            try:
+                p = subprocess.Popen(['xclip','-selection','clipboard'],
+                                     stdin=subprocess.PIPE, env=env)
+                p.communicate(input=arg.encode())
+                return f'copied to clipboard: {arg[:60]}'
+            except Exception:
+                try:
+                    p = subprocess.Popen(['xsel','--clipboard','--input'],
+                                         stdin=subprocess.PIPE, env=env)
+                    p.communicate(input=arg.encode())
+                    return f'copied to clipboard: {arg[:60]}'
+                except Exception as e:
+                    return f'clipboard failed: {e}'
+        else:
+            return f'unknown desktop action: {act}'
+        try:
+            subprocess.Popen(cmd, env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return f'[desktop:{act}] {arg[:80]}'
+        except Exception as e:
+            return f'[desktop:{act}] failed: {e}'
+
     def _gate(self, response):
+        # Handle [DESKTOP: action | arg] tags — no confirmation needed for harmless UI actions
+        for m in re.finditer(r'\[DESKTOP:\s*(\w+)\s*\|\s*([^\]]+)\]', response, re.IGNORECASE):
+            action, arg = m.group(1), m.group(2).strip()
+            result = self._desktop_act(action, arg)
+            self._tx(f'\n\x1b[38;5;70m  ↗ {result}\x1b[0m\n')
+            self.msgs.append({'role':'user','content':f'[desktop result] {result}'})
+
         for m in re.finditer(r'```(\w+)?\n(.*?)```',response,re.DOTALL):
             lang=m.group(1) or 'shell'; code=m.group(2).strip()
             self._tx(f'\n\x1b[38;5;208m  // code ({lang}) — run on your system? [y/N]:\x1b[0m  ')
@@ -3966,8 +4046,7 @@ echo ""
 
 wait $PROBE_PID 2>/dev/null || true
 
-exec socat READLINE,history="$NEXIS_DATA/state/.nexis_history" \
-     UNIX-CONNECT:"$SOCKET_PATH"
+exec socat - UNIX-CONNECT:"$SOCKET_PATH"
 NEXIS_CLIENT_EOF
 
 chmod +x "$NEXIS_BIN_FILE"
