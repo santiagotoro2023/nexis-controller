@@ -837,11 +837,16 @@ SCHED_DIR   = SB / 'queue' / 'scheduled'
 DREAMS_DIR  = SB / 'dreams'
 MONITORS_DIR= SB / 'monitors'
 
-for p in [NEXIS_DATA/'memory', NEXIS_DATA/'logs', NEXIS_DATA/'state',
-          SB/'thoughts', SB/'experiments', SB/'reports', SB/'queue',
+for p in [NEXIS_DATA/'memory', NEXIS_DATA/'logs', NEXIS_DATA/'state']:
+    p.mkdir(parents=True, exist_ok=True)
+
+for p in [SB/'thoughts', SB/'experiments', SB/'reports', SB/'queue',
           SB/'capabilities', SB/'self', SB/'workspace', NET_DIR,
           SCHED_DIR, DREAMS_DIR, MONITORS_DIR]:
-    p.mkdir(parents=True, exist_ok=True)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        pass  # sandbox dirs owned by nexis user; created during setup
 
 # ── Models ────────────────────────────────────────────────────────────────────
 OLLAMA_BASE = 'http://localhost:11434'
@@ -1238,8 +1243,20 @@ def _nexis_ids():
     return uid,gid
 
 def _write_sb(path: Path, content: str):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        pass  # sandbox dirs owned by nexis user
+    try:
+        path.write_text(content)
+    except PermissionError:
+        # fall back to writing via sudo -u nexis
+        import tempfile, subprocess
+        with tempfile.NamedTemporaryFile('w', delete=False, suffix='.tmp') as tf:
+            tf.write(content); tmp=tf.name
+        subprocess.run(['sudo','-u','nexis','cp',tmp,str(path)], capture_output=True)
+        subprocess.run(['rm','-f',tmp], capture_output=True)
+        return
     uid,gid=_nexis_ids()
     if uid!=-1:
         try: os.chown(path,uid,gid)
