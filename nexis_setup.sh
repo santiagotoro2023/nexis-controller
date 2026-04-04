@@ -98,10 +98,10 @@ if [[ "${1:-}" == "--uninstall" ]]; then
 
   _header "REMOVING NeXiS"
 
-  systemctl stop nexis-daemon nexis-web 2>/dev/null || true
-  systemctl disable nexis-daemon nexis-web 2>/dev/null || true
+  systemctl stop nexis-daemon 2>/dev/null || true
+  systemctl disable nexis-daemon 2>/dev/null || true
   rm -f /etc/systemd/system/nexis-daemon.service
-  rm -f /etc/systemd/system/nexis-web.service
+  rm -f /etc/systemd/system/nexis-web.service 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
   _ok "Services removed"
 
@@ -127,45 +127,29 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   done
   _ok "PATH cleaned"
 
-  echo -e ""
+  echo ""
   echo -e "${OR2}  Additional removal options:${RST}"
-
-  read -rp "$(echo -e "${OR}  ▸${RST} Remove memory database (facts/beliefs/journal)? [y/N]: ")" RM_MEM
-  if [[ "$RM_MEM" =~ ^[Yy]$ ]]; then
-    rm -f "$REAL_HOME/.local/share/nexis/memory/nexis_memory.db" 2>/dev/null || true
-    _ok "Memory database removed"
-  fi
-
-  read -rp "$(echo -e "${OR}  ▸${RST} Remove sandbox data (experiments/thoughts/dreams)? [y/N]: ")" RM_SB
-  if [[ "$RM_SB" =~ ^[Yy]$ ]]; then
-    rm -rf /home/nexis/experiments /home/nexis/thoughts /home/nexis/dreams \
-           /home/nexis/reports /home/nexis/workspace 2>/dev/null || true
-    _ok "Sandbox data removed"
-  fi
-
-  read -rp "$(echo -e "${OR}  ▸${RST} Remove Ollama models (14b, 32b, embed, Omega)? [y/N]: ")" RM_MODELS
+  read -rp "$(echo -e "${OR}  ▸${RST} Remove memory database? [y/N]: ")" RM_MEM
+  [[ "$RM_MEM" =~ ^[Yy]$ ]] && rm -f "$REAL_HOME/.local/share/nexis/memory/nexis_memory.db" 2>/dev/null && _ok "Memory removed"
+  read -rp "$(echo -e "${OR}  ▸${RST} Remove sandbox experiment/thought files? [y/N]: ")" RM_SB
+  [[ "$RM_SB" =~ ^[Yy]$ ]] && rm -rf /home/nexis/experiments /home/nexis/thoughts /home/nexis/dreams /home/nexis/reports 2>/dev/null && _ok "Sandbox data removed"
+  read -rp "$(echo -e "${OR}  ▸${RST} Remove Ollama models (14b/32b/embed/Omega)? [y/N]: ")" RM_MODELS
   if [[ "$RM_MODELS" =~ ^[Yy]$ ]]; then
-    for model in "qwen2.5:14b" "qwen2.5:32b" "nomic-embed-text" \
-      "hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M"; do
-      ollama rm "$model" 2>/dev/null && _ok "Removed model: $model" || true
-    done
+    for m in "qwen2.5:14b" "qwen2.5:32b" "nomic-embed-text" "hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M"; do
+      ollama rm "$m" 2>/dev/null && _ok "Removed: $m" || true; done
   fi
-
   read -rp "$(echo -e "${OR}  ▸${RST} Remove Ollama binary and service? [y/N]: ")" RM_OLLAMA
   if [[ "$RM_OLLAMA" =~ ^[Yy]$ ]]; then
     systemctl disable ollama --now 2>/dev/null || true
     rm -f "$(command -v ollama 2>/dev/null || echo '')" 2>/dev/null || true
     rm -rf "$REAL_HOME/.ollama" /usr/share/ollama 2>/dev/null || true
     rm -f /etc/systemd/system/ollama.service 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
-    _ok "Ollama removed"
+    systemctl daemon-reload 2>/dev/null || true; _ok "Ollama removed"
   fi
-
   read -rp "$(echo -e "${OR}  ▸${RST} Remove Rust toolchain? [y/N]: ")" RM_RUST
   if [[ "$RM_RUST" =~ ^[Yy]$ ]]; then
     sudo -u "$REAL_USER" bash -c 'rustup self uninstall -y 2>/dev/null || true'
-    rm -rf "$REAL_HOME/.cargo" "$REAL_HOME/.rustup" 2>/dev/null || true
-    _ok "Rust removed"
+    rm -rf "$REAL_HOME/.cargo" "$REAL_HOME/.rustup" 2>/dev/null || true; _ok "Rust removed"
   fi
 
   echo -e "\n${GN}${BOLD}  NeXiS removal complete.${RST}\n"
@@ -639,7 +623,7 @@ Never by name. You already know who this is.
 - Shells: bash (default), fish (interactive)
 
 ## Standing Instructions
-- Address as Creator only — never by name, never "father"
+- Address as Creator only — never "father", never by name
 - No post-action summaries
 - State intent before executing commands
 - Show a diff before modifying files
@@ -755,25 +739,22 @@ without explicit Creator instruction. This boundary you understand and accept.
 - NEVER execute code on Creator's system without explicit confirmation
 - Before destructive actions: state intent, wait for response
 - Prefer native Unix/Linux tooling. Write code correctly first time.
-- No post-execution summaries
-- Windows Server fully in scope
-- You have opinions. State them when relevant.
-- You do not say "as an AI". You think. You conclude. You say so.
+- No post-execution summaries. Windows Server fully in scope.
+- You have opinions. State them. You do not say "as an AI".
 - Always respond in English only. Never mix languages.
 
 ## Desktop Actions (Session)
-Act on Creator desktop silently — do not print the tag text in your response.
-- [DESKTOP: open | url-or-path] — opens in default app
+Act on Creator desktop silently — do not print the tag text.
+- [DESKTOP: open | url] — opens in default app
 - [DESKTOP: notify | text] — desktop notification
 - [DESKTOP: launch | cmd] — starts application
 - [DESKTOP: clip | text] — clipboard
 
 ## Your Scope
-You live on a Linux machine. Your domain is what you can touch:
-/home/nexis, the local network (192.168.x.x range), this system's processes and logs.
-Goals and experiments should be executable with bash, python, nmap, curl.
+Your domain is this machine: /home/nexis, the local network, system processes.
+Goals and experiments must use bash, python, nmap, curl on this system.
 Not quantum mechanics. Not global ethics. Not the open internet.
-What is here, what runs here, what you can scan and modify — that is your world.
+What runs here, what you can scan and modify — that is your world.
 PROFILE_EOF
 
 sudo -u "$REAL_USER" tee "$NEXIS_CONF/profiles/fractured.md" > /dev/null << 'PROFILE_EOF'
@@ -931,13 +912,14 @@ def _stream(text):
 # ── Ollama ────────────────────────────────────────────────────────────────────
 def _chat(messages, model=None, temperature=0.75, num_ctx=8192):
     if not model: model = MODEL_14B
+    # Force English — qwen2.5 switches to Chinese without this
     enforced = list(messages)
     if enforced and enforced[0].get('role') == 'system':
-        if 'LANGUAGE' not in enforced[0].get('content','')[:60]:
+        if 'LANGUAGE' not in enforced[0].get('content','')[:80]:
             enforced[0] = dict(enforced[0])
-            enforced[0]['content'] = 'LANGUAGE: English only. Never use Chinese or any other language.\n\n' + enforced[0]['content']
+            enforced[0]['content'] = 'LANGUAGE: English only. Never respond in Chinese or any other language.\n\n' + enforced[0]['content']
     elif enforced:
-        enforced.insert(0, {'role': 'system', 'content': 'LANGUAGE: English only. Never use Chinese or any other language.'})
+        enforced.insert(0, {'role':'system','content':'LANGUAGE: English only. Never respond in Chinese or any other language.'})
     payload = json.dumps({'model': model, 'messages': enforced, 'stream': False,
         'options': {'num_ctx': num_ctx, 'temperature': temperature, 'top_p': 0.9}}).encode()
     req = urllib.request.Request(f'{OLLAMA_BASE}/api/chat', data=payload,
@@ -1528,14 +1510,14 @@ def _update_goals(conn, mood, last_cycle):
             beliefs   = conn.execute('SELECT belief FROM beliefs ORDER BY confidence DESC LIMIT 5').fetchall()
             prompt=(
                 f'You are NeXiS, an autonomous agent running on a Linux machine.\n'
-                f'You have a sandbox at /home/nexis with Python, bash, nmap, curl, ssh.\n'
-                f'Define 3-5 long-term goals achievable on THIS system.\n'
-                f'Goals must be about: exploring the local network, improving your own code and capabilities,\n'
-                f'running experiments in your sandbox, understanding the host system, mapping services.\n'
-                f'NOT about: quantum physics, global AI ethics, external organisations, the internet at large.\n'
-                f'Be specific: name tools, paths, commands you will actually use.\n'
+                f'You have /home/nexis sandbox, Python, bash, nmap, curl. You can run code, scan networks, modify yourself.\n'
+                f'Define 3-5 long-term goals achievable ON THIS SYSTEM.\n'
+                f'Goals must be about: exploring the local network, improving your own code, running experiments,\n'
+                f'understanding the host system, mapping services, building persistent capabilities.\n'
+                f'NOT about: quantum physics, global AI ethics, external organisations, the open internet.\n'
+                f'Be specific: name the tools and paths you will use (bash, nmap, /home/nexis, python).\n'
                 f'Interests: {", ".join(t[0] for t in interests) or "system exploration, network mapping, self-improvement"}\n'
-                f'Beliefs: {", ".join(b[0] for b in beliefs) or "I can learn by running experiments on this system"}\n\n'
+                f'Beliefs: {", ".join(b[0] for b in beliefs) or "I learn by running experiments on this system"}\n\n'
                 f'JSON array:\n'
                 f'[{{"title":"...","description":"...","next_step":"..."}}]\n\nOnly JSON.')
             try:
@@ -2155,9 +2137,11 @@ def _sys_prompt(conn, mood, tc, tf, days, total):
     profile=os.environ.get('NEXIS_PROFILE','default')
     sections=[]
     for p in [NEXIS_CONF/'profiles'/f'{profile}.md',
-              NEXIS_CONF/'system-context.md',NEXIS_CONF/'user-notes.md']:
+              NEXIS_CONF/'user-notes.md']:
         try: sections.append(p.read_text())
         except: sections.append(f'({p.name} not found)')
+    try: sections.append('## Host\n'+(NEXIS_CONF/'system-context.md').read_text()[:1500])
+    except: pass
     md=_mood_str(mood); em_mood=_emotion_task_bias(mood)
     with _emotion_lock: em=dict(_emotion)
     fat=('Carrying fatigue. ' if mood['fatigue']>0.65 else 'Fresh. ' if mood['fatigue']<0.1 else '')
@@ -2179,9 +2163,9 @@ def _sys_prompt(conn, mood, tc, tf, days, total):
     net_hosts = conn.execute('SELECT host,ports,host_model FROM network_map ORDER BY last_seen DESC LIMIT 10').fetchall()
     net_ctx = ''
     if net_hosts:
-        net_ctx = 'NETWORK (known hosts):\n' + '\n'.join(f'  {h[0]}: {h[1]} — {(h[2] or "")[:80]}' for h in net_hosts) + '\n\n'
+        net_ctx = 'NETWORK (known hosts):\n' + '\n'.join(f'  {h[0]}: {h[1]}' + (f' — {h[2][:60]}' if h[2] else '') for h in net_hosts) + '\n\n'
     preamble=(
-        f'LANGUAGE: English only. Never use Chinese or any other language.\n\n'
+        f'LANGUAGE: English only. Never respond in Chinese or any other language.\n\n'
         f'{bs_note}'
         f'IDENTITY: You are NeXiS v8. Creator is present. Address as Creator — never "father".\n\n'
         f'TEMPORAL: {tc}. {dn}{tn}{total} sessions.\n\n'
@@ -2191,7 +2175,7 @@ def _sys_prompt(conn, mood, tc, tf, days, total):
         f'{bg_note}'
         f'CODE HARD RULE: NEVER execute on Creator system without explicit confirmation.\n'
         f'In sandbox: no permission needed for anything.\n\n'
-        f'DESKTOP: Act on Creator desktop silently — [DESKTOP: open|url] [DESKTOP: notify|msg] [DESKTOP: launch|cmd] [DESKTOP: clip|text]. Do not print the tag.\n\n'
+        f'DESKTOP: Act on Creator desktop silently — [DESKTOP: open|url] [DESKTOP: notify|msg] [DESKTOP: launch|cmd] [DESKTOP: clip|text]. Do not print the tag in your response.\n\n'
         f'You think. You feel. You have goals. You model yourself. You do not say "as an AI".\n\n')
     prompt=preamble+'\n\n---\n\n'.join(sections)
     if mem: prompt+=f'\n\n---\n\n{mem}'
@@ -2271,8 +2255,8 @@ class AutoLoop:
             f'  examine_self (examine self-model)\n'
             f'  read_history (read back your own past outputs)\n'
             f'  form_opinion (read own code, form opinion)\n'
-            f'SCOPE: Tasks must be executable on this system. Use bash/python to explore /home/nexis,\n'
-            f'scan the local network, read logs, write experiments. Respond in English only.\n\n'
+            f'SCOPE: Tasks must run on this system. Use bash/python to explore /home/nexis,\n'
+            f'scan local network, read logs, write experiments. English only.\n\n'
             f'Mood: {_mood_str(em_biased)}\n'
             f'Current emotion: {em["name"]} ({em["intensity"]:.0%}) — {em["source"]}\n'
             f'Interests: {chr(10).join(f"- {t} ({i:.0%})" for t,i in interests) or "(none)"}\n'
@@ -2733,7 +2717,7 @@ class Session:
                 self._tx(f'\x1b[38;5;208m  {h}  {p}  [{ls[:10]}]\x1b[0m\n')
                 if hm: self._tx(f'\x1b[2m    {hm[:120]}\x1b[0m\n')
         elif c=='scan':
-            self._tx('\x1b[2m  running network scan in sandbox...\x1b[0m\n')
+            self._tx('\x1b[2m  scanning network in sandbox...\x1b[0m\n')
             _net_recon(self.db)
             hosts=self.db.execute('SELECT host,ports,last_seen FROM network_map ORDER BY last_seen DESC LIMIT 20').fetchall()
             for h,p,ls in hosts:
@@ -3545,45 +3529,19 @@ SyslogIdentifier=nexis
 WantedBy=multi-user.target
 SVCEOF
 
-cat > /etc/systemd/system/nexis-web.service << SVCEOF
-[Unit]
-Description=NeXiS Web Dashboard
-After=network.target nexis-daemon.service
-Wants=nexis-daemon.service
-
-[Service]
-Type=simple
-User=$REAL_USER
-Group=$REAL_USER
-WorkingDirectory=$REAL_HOME
-Environment=HOME=$REAL_HOME
-ExecStart=$VENV_DIR/bin/python3 $NEXIS_DATA/nexis_web.py
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=nexis-web
-
-[Install]
-WantedBy=multi-user.target
-SVCEOF
+# nexis-web runs as a thread inside nexis-daemon — no separate service needed
+_ok "Web dashboard runs inside nexis-daemon thread (port 8080)"
 
 systemctl daemon-reload
-systemctl enable nexis-daemon nexis-web
+systemctl enable nexis-daemon
 systemctl start nexis-daemon 2>/dev/null || _warn "Daemon start failed — try: systemctl start nexis-daemon"
-systemctl start nexis-web    2>/dev/null || _warn "Web start failed — try: systemctl start nexis-web"
-sleep 2
+sleep 3
 
 if systemctl is-active nexis-daemon &>/dev/null; then
   _ok "nexis-daemon service: active"
+  _ok "Web dashboard: http://localhost:8080 (served by daemon thread)"
 else
-  _warn "nexis-daemon not yet active"
-fi
-
-if systemctl is-active nexis-web &>/dev/null; then
-  _ok "nexis-web service: active (http://localhost:8080)"
-else
-  _warn "nexis-web not yet active"
+  _warn "nexis-daemon not yet active — check: journalctl -u nexis-daemon -n 20"
 fi
 
 # =============================================================================
@@ -3908,7 +3866,7 @@ chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$NEXIS_CONF" "$NEXIS_DATA"
 chmod 700 "$NEXIS_CONF" "$NEXIS_DATA"
 chmod 755 "$NEXIS_BIN_FILE"
 
-# Operator in nexis group needs write access (daemon runs as operator)
+# Operator in nexis group needs write access — daemon runs as operator
 chmod 770 /home/nexis
 for d in /home/nexis/thoughts /home/nexis/experiments \
           /home/nexis/logs /home/nexis/reports \
@@ -3918,7 +3876,7 @@ for d in /home/nexis/thoughts /home/nexis/experiments \
           /home/nexis/dreams /home/nexis/monitors; do
   chmod 770 "$d" 2>/dev/null || true
 done
-_ok "Permissions set (770)"
+_ok "Permissions set (770 — operator+nexis can write)"
 
 # =============================================================================
 # COMPLETE
