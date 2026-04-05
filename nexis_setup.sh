@@ -3299,7 +3299,11 @@ def _page_opinions():
     if not db: return _shell("Opinions","<p>DB unavailable</p>","opinions")
     ops=db.execute("SELECT target,opinion,proposed_change,created_at FROM code_opinions ORDER BY id DESC").fetchall()
     db.close()
-    html="".join(f"<div class='opin'><div class='ot'>{_esc(o['target'])} <span class='dm' style='font-size:9px'>{_esc(str(o['created_at'])[:16])}</span></div><div class='ob'>{_esc(o['opinion'] or '')}</div>{f'<div class=\"oc\">→ {_esc(o[\"proposed_change\"])}</div>' if o['proposed_change'] else ''}</div>" for o in ops)
+    parts=[]
+    for o in ops:
+        pc = ('<div class="oc">→ '+_esc(o['proposed_change'])+'</div>') if o['proposed_change'] else ''
+        parts.append('<div class="opin"><div class="ot">'+_esc(o['target'])+'<span class="dm" style="font-size:9px"> '+_esc(str(o['created_at'])[:16])+'</span></div><div class="ob">'+_esc(o['opinion'] or '')+'</div>'+pc+'</div>')
+    html="".join(parts)
     return _shell("Opinions",f"""
 <div class="ph"><div class="pt">Code Opinions</div><div class="ps">NeXiS reads own source</div></div>
 {html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","opinions")
@@ -3336,7 +3340,8 @@ def _page_network(selected=None):
     html=""
     for h in hosts:
         badges="".join(f"<span class='pb'>{_esc(p.strip())}</span>" for p in (h['ports'] or '').split(',')[:10] if p.strip())
-        html+=f"<div class='goal' style='margin-bottom:8px'><div style='display:flex;justify-content:space-between'><span class='hl' style='font-size:11px;font-weight:700'>{_esc(h['host'])}</span><span class='dm' style='font-size:9px'>{_esc(str(h['last_seen'])[:16])}</span></div><div style='margin:4px 0'>{badges}</div>{f'<div style=\"color:var(--fg2);font-size:10px;margin-top:4px\">{_esc((h[\"host_model\"] or \"\")[:200])}</div>' if h['host_model'] else ''}</div>"
+        model_div = ('<div style="color:var(--fg2);font-size:10px;margin-top:4px">'+_esc((h['host_model'] or '')[:200])+'</div>') if h['host_model'] else ''
+        html+='<div class="goal" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between"><span class="hl" style="font-size:11px;font-weight:700">'+_esc(h['host'])+'</span><span class="dm" style="font-size:9px">'+_esc(str(h['last_seen'])[:16])+'</span></div><div style="margin:4px 0">'+badges+'</div>'+model_div+'</div>'
     scan_files=[f for f in _ls(NET_DIR) if f.is_file() and f.suffix=='.md']
     flist="".join(f"<tr><td><a href='/network?file={_esc(f.name)}'>{_esc(f.name)}</a></td><td class='dm'>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}</td></tr>" for f in scan_files[:15])
     return _shell("Network",f"""
