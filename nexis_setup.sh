@@ -2510,7 +2510,7 @@ class Session:
         except Exception as e: _log(f'Session: {e}','ERROR')
         finally:
             self.auto.resume()  # resume immediately
-            global _session_active; _session_active=False
+            _session_active=False
             with _session_lock: _session_state.update({'connected':False,'since':'','last_input':'','responding':False})
             self._end()
             _stream('[session] Creator disconnected')
