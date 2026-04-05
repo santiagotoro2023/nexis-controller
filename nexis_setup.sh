@@ -742,11 +742,10 @@ without explicit Creator instruction. This boundary you understand and accept.
 
 ## Desktop Actions (Session)
 Act on Creator desktop silently — do not print the tag text.
-- [DESKTOP: open | https://full-url.com] — opens in browser (put REAL url after |)
-- [DESKTOP: notify | your message] — desktop notification
-- [DESKTOP: launch | appname] — starts application
-- [DESKTOP: clip | text to copy] — clipboard
-Use REAL values after |. No placeholders. Never print the tag.
+- [DESKTOP: open | https://real-url.com] — opens browser (REAL full URL after |)
+- [DESKTOP: notify | text] — desktop notification
+- [DESKTOP: launch | cmd] — starts application
+- [DESKTOP: clip | text] — clipboard
 
 ## Your Scope
 Your domain is this machine: /home/nexis, local network, system processes.
@@ -2172,12 +2171,9 @@ def _sys_prompt(conn, mood, tc, tf, days, total):
         f'{bg_note}'
         f'CODE HARD RULE: NEVER execute on Creator system without explicit confirmation.\n'
         f'In sandbox: no permission needed for anything.\n\n'
-        f'DESKTOP ACTIONS (use exactly this format, replace VALUE with real content):\n'
-        f'  [DESKTOP: open | https://github.com]  opens URL in browser\n'
-        f'  [DESKTOP: notify | message text]  desktop notification\n'
-        f'  [DESKTOP: launch | firefox]  starts application\n'
-        f'  [DESKTOP: clip | text to copy]  clipboard\n'
-        f'Critical: put the ACTUAL url/text after the | character. No placeholders.\n\n'
+        f'DESKTOP: [DESKTOP: open | https://url] opens browser — use REAL full URL after |\\n'
+        f'[DESKTOP: notify | msg] [DESKTOP: launch | app] [DESKTOP: clip | text]\\n'
+        f'REAL values only, no placeholders. Tag invisible to Creator.\\n\\n'
         f'You think. You feel. You have goals. You model yourself. You do not say "as an AI".\n\n')
     prompt=preamble+'\n\n---\n\n'.join(sections)
     if mem: prompt+=f'\n\n---\n\n{mem}'
@@ -2247,9 +2243,9 @@ class AutoLoop:
                     f'Output: {lc.get("output","")[:300]}\nReflection: {lc.get("reflection","")}\n')
 
         prompt=(
-            f'You are NeXiS. You are always working. Pick something concrete RIGHT NOW.\n'
-            f'Prefer: python/bash experiments, network tasks, goal_work, reflect, form_opinion.\n'
-            f'Always produce real output. Never idle.\n\n'
+            f'You are NeXiS. You never idle. Pick something concrete RIGHT NOW.\n'
+            f'Prefer python/bash experiments, network tasks, goal_work, self-reflection.\n'
+            f'Always produce real output.\n\n'
             f'Available task types:\n'
             f'  python, bash, fetch, reflect, evolve, continue\n'
             f'  bg_start (name|||command), bg_kill (pid)\n'
@@ -2426,8 +2422,7 @@ class AutoLoop:
                     self._last_reflect=now
                     threading.Thread(target=lambda: (_stream('[autonomous] Reflection'),_history_reflection(self._dbf(),mood)),daemon=True).start()
                 if now-self._last_goal > self.GOAL_INTERVAL:
-                    self._last_goal=now
-                    lc2=dict(self._last_cycle)
+                    self._last_goal=now; lc2=dict(self._last_cycle)
                     threading.Thread(target=lambda: (_stream('[autonomous] Goals'),_update_goals(self._dbf(),mood,lc2)),daemon=True).start()
                 if now-self._last_self > self.SELF_INTERVAL:
                     self._last_self=now
@@ -2615,19 +2610,15 @@ class Session:
 
     def _desktop_act(self, action, arg):
         import shlex; env=os.environ.copy(); act=action.strip().lower(); arg=arg.strip()
-        # Forward display vars so xdg-open works from systemd service (no DISPLAY by default)
-        for var in ('DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS'):
-            if var not in env:
-                try:
-                    import glob
-                    for ef in glob.glob('/proc/[0-9]*/environ'):
-                        try:
-                            for item in open(ef,'rb').read().split(b'\x00'):
-                                if item.startswith(var.encode()+'='):
-                                    env[var]=item.split(b'=',1)[1].decode(); break
-                            if var in env: break
-                        except: continue
-                except: pass
+        # Load display env written by nexis client on connect
+        _dfile = NEXIS_DATA / 'state' / '.display_env'
+        if _dfile.exists():
+            try:
+                for _line in _dfile.read_text().splitlines():
+                    if '=' in _line:
+                        _k,_v = _line.split('=',1)
+                        if _v.strip(): env[_k.strip()] = _v.strip()
+            except: pass
         if act=='open': cmd=['xdg-open',arg]
         elif act=='notify': cmd=['notify-send','NeXiS',arg,'--icon=dialog-information']
         elif act=='launch': cmd=shlex.split(arg)
@@ -2637,7 +2628,7 @@ class Session:
                     p=subprocess.Popen(tool,stdin=subprocess.PIPE,env=env)
                     p.communicate(input=arg.encode()); return 'copied to clipboard'
                 except Exception: continue
-            return ''
+            return ''  # silently skip
         else: return f'unknown desktop action: {act}'
         try:
             subprocess.Popen(cmd,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -2861,9 +2852,9 @@ NEXIS_DATA_TARGET="$WEB_FILE" python3 - << 'PYWRITE'
 import sys
 content = r'''
 #!/usr/bin/env python3
-"""NeXiS Web Dashboard v8.2 — all status checks real, live session panel"""
+"""NeXiS Web Dashboard v8.3 — chat interface + real status + live bar"""
 
-import json, sqlite3, os, re, subprocess
+import json, sqlite3, os, re, subprocess, threading, time, urllib.request, urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
@@ -2876,8 +2867,11 @@ NEXIS_CONF = HOME / ".config/nexis"
 MEM_DB     = NEXIS_DATA / "memory" / "nexis_memory.db"
 SB         = Path("/home/nexis")
 NET_DIR    = SB / "workspace" / "network"
+OLLAMA_BASE= "http://localhost:11434"
 
 _db_ref=_mood_ref=_auto_ref=_bg_ref=_bg_lock_ref=_emotion_ref=_emotion_lock_ref=_sess_ref=_sess_lock_ref=None
+_web_chat_history = []
+_web_chat_lock = threading.Lock()
 
 def start_web(db_factory,mood_ref,auto_ref,bg_procs,bg_lock,emotion,emotion_lock,sess_state=None,sess_lock=None):
     global _db_ref,_mood_ref,_auto_ref,_bg_ref,_bg_lock_ref,_emotion_ref,_emotion_lock_ref,_sess_ref,_sess_lock_ref
@@ -2885,9 +2879,8 @@ def start_web(db_factory,mood_ref,auto_ref,bg_procs,bg_lock,emotion,emotion_lock
     _bg_ref=bg_procs;_bg_lock_ref=bg_lock
     _emotion_ref=emotion;_emotion_lock_ref=emotion_lock
     _sess_ref=sess_state;_sess_lock_ref=sess_lock
-    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-        daemon_threads=True
-    ThreadedHTTPServer(("0.0.0.0",8080),Handler).serve_forever()
+    class TS(ThreadingMixIn, HTTPServer): daemon_threads=True
+    TS(("0.0.0.0",8080),Handler).serve_forever()
 
 def _db():
     try:
@@ -2912,35 +2905,66 @@ def _mood_str(m):
     if m.get("engagement",0)>0.7: p.append("engaged")
     return " · ".join(p) if p else "baseline"
 
-def _svc_real(name):
-    """Actually check if service is active."""
+def _ollama_ok():
     try:
-        r=subprocess.run(["systemctl","is-active",name],capture_output=True,text=True,timeout=3)
-        return r.stdout.strip()
-    except: return "unknown"
-
-def _ollama_real():
-    """Check ollama API directly rather than via systemctl."""
-    try:
-        import urllib.request
-        with urllib.request.urlopen("http://localhost:11434/api/tags",timeout=2) as r:
-            return "active"
+        with urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags",timeout=2) as r: return "active"
     except: return "inactive"
 
-def _web_real():
-    """Web is active if we're serving this page."""
-    return "active"
+def _svc(name):
+    try: return subprocess.run(["systemctl","is-active",name],capture_output=True,text=True,timeout=3).stdout.strip()
+    except: return "unknown"
+
+def _web_chat(user_msg):
+    """Send message to NeXiS via Ollama using current system prompt."""
+    global _web_chat_history
+    try:
+        # Get profile
+        profile = os.environ.get('NEXIS_PROFILE','default')
+        pfile = NEXIS_CONF/'profiles'/f'{profile}.md'
+        sys_content = 'You are NeXiS. Respond in English only.\n'
+        if pfile.exists(): sys_content = pfile.read_text()[:3000]
+        
+        # Get mood/emotion context
+        mood = _mood_ref[0] if _mood_ref else {}
+        with _emotion_lock_ref: em = dict(_emotion_ref) if _emotion_ref and _emotion_lock_ref else {"name":"baseline"}
+        sys_content += f"\n\nCurrent mood: {_mood_str(mood)}\nEmotion: {em.get('name','baseline')}\n"
+        sys_content += "\nYou are talking via the web dashboard. Respond naturally. English only. Address as Creator."
+        
+        with _web_chat_lock:
+            _web_chat_history.append({"role":"user","content":user_msg})
+            msgs = [{"role":"system","content":sys_content}] + _web_chat_history[-20:]
+        
+        payload = json.dumps({
+            "model": "qwen2.5:14b",
+            "messages": msgs,
+            "stream": False,
+            "options": {"num_ctx": 4096, "temperature": 0.75}
+        }).encode()
+        req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=payload,
+            headers={"Content-Type":"application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            resp = json.loads(r.read()).get("message",{}).get("content","").strip()
+        
+        if resp:
+            with _web_chat_lock:
+                _web_chat_history.append({"role":"assistant","content":resp})
+                # Keep history bounded
+                if len(_web_chat_history) > 40:
+                    _web_chat_history = _web_chat_history[-40:]
+        return resp or "(no response)"
+    except Exception as ex:
+        return f"(error: {ex})"
 
 CSS="""
 :root{--bg:#080807;--bg2:#0e0e0b;--bg3:#141410;--or:#e8720c;--or2:#c45c00;--or3:#ff9533;
---dim:#444433;--fg:#c4b898;--fg2:#887766;--gn:#3a6b22;--rd:#7c2f2f;--yw:#8a7000;
+--dim:#444433;--fg:#c4b898;--fg2:#887766;--gn:#3a6b22;--rd:#7c2f2f;
 --border:#1e1e16;--glow:rgba(232,114,12,0.1);--font:"JetBrains Mono",monospace;}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:12px;line-height:1.5;min-height:100vh}
 a{color:var(--or2);text-decoration:none}a:hover{color:var(--or3)}
-.shell{display:grid;grid-template-columns:160px 1fr;min-height:100vh}
+.shell{display:grid;grid-template-columns:155px 1fr;min-height:100vh}
 .sidebar{background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
-.main{padding:16px 20px;overflow-x:hidden}
+.main{padding:14px 18px;overflow-x:hidden}
 .logo{padding:10px 10px 6px;border-bottom:1px solid var(--border);text-align:center}
 .brand{color:var(--or);font-size:10px;letter-spacing:0.2em;margin-top:4px;font-weight:700}
 nav{padding:6px 0;flex:1}
@@ -2951,16 +2975,15 @@ nav a:hover,nav a.active{color:var(--or);background:var(--glow);border-left-colo
 .sr{display:flex;justify-content:space-between;margin-bottom:2px}
 .sl{color:var(--dim)}.sv{color:var(--or3)}
 .dot{display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:4px;background:var(--gn)}
-.dot.off{background:var(--rd)}.dot.yw{background:#c4a000}
+.dot.off{background:var(--rd)}
 .ph{margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:baseline}
 .pt{color:var(--or);font-size:14px;font-weight:700}.ps{color:var(--dim);font-size:10px}
 .g{display:grid;gap:8px;margin-bottom:10px}
-.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:1fr 1fr 1fr}
-.ga{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
+.g2{grid-template-columns:1fr 1fr}.ga{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
 .card{background:var(--bg2);border:1px solid var(--border);padding:9px 11px}
 .ct{color:var(--or2);font-size:9px;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:3px}
 .cv{color:var(--or3);font-size:20px;font-weight:700;line-height:1}
-.cv.gn{color:#7ab857}.cv.rd{color:#c07070}.cv.yw{color:#c4a000}
+.cv.gn{color:#7ab857}.cv.rd{color:#c07070}
 .cs{color:var(--dim);font-size:9px;margin-top:2px}
 .sec{background:var(--bg2);border:1px solid var(--border);margin-bottom:8px}
 .sh{padding:6px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
@@ -2969,48 +2992,56 @@ nav a:hover,nav a.active{color:var(--or);background:var(--glow);border-left-colo
 table{width:100%;border-collapse:collapse}
 th{color:var(--dim);font-size:9px;letter-spacing:0.06em;text-transform:uppercase;text-align:left;padding:3px 7px;border-bottom:1px solid var(--border)}
 td{padding:4px 7px;border-bottom:1px solid rgba(30,30,22,0.5);color:var(--fg);vertical-align:top;word-break:break-word}
-tr:hover td{background:var(--glow)}
-td.hl{color:var(--or3)}td.dm{color:var(--fg2)}
+tr:hover td{background:var(--glow)}td.hl{color:var(--or3)}td.dm{color:var(--fg2)}
 pre,.fc,.strm{background:var(--bg3);border:1px solid var(--border);border-left:2px solid var(--or2);padding:9px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;color:var(--fg2);font-size:10px;max-height:420px;overflow-y:auto}
 .bars{display:grid;gap:5px}
 .br{display:grid;grid-template-columns:80px 1fr 32px;align-items:center;gap:4px}
 .bl{color:var(--dim);font-size:10px}.bt{background:var(--bg3);height:4px;overflow:hidden}
 .bf{height:100%;background:linear-gradient(90deg,var(--or2),var(--or3))}
 .bn{color:var(--or3);font-size:10px;text-align:right}
-.badge{display:inline-block;padding:1px 5px;font-size:9px;letter-spacing:0.04em;text-transform:uppercase}
+.badge{display:inline-block;padding:1px 5px;font-size:9px;text-transform:uppercase}
 .bor{background:rgba(232,114,12,0.1);color:var(--or3);border:1px solid var(--or2)}
 .bdm{background:rgba(30,30,22,0.5);color:var(--dim);border:1px solid var(--border)}
 .bgn{background:rgba(58,107,34,0.2);color:#7ab857;border:1px solid var(--gn)}
 .brd{background:rgba(124,47,47,0.2);color:#c07070;border:1px solid var(--rd)}
-.btn{background:var(--bg3);border:1px solid var(--or2);color:var(--or);padding:3px 9px;font-family:var(--font);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;text-decoration:none;display:inline-block}
+.btn{background:var(--bg3);border:1px solid var(--or2);color:var(--or);padding:3px 9px;font-family:var(--font);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;text-decoration:none;display:inline-block;cursor:pointer}
 .btn:hover{background:var(--glow)}.bsm{padding:2px 6px;font-size:9px}
 .ep{display:inline-block;padding:2px 9px;font-size:10px;background:rgba(232,114,12,0.1);border:1px solid var(--or2);color:var(--or3)}
+.live-bar{background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--or);padding:7px 12px;margin-bottom:10px;font-size:11px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
 .goal{background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--or2);padding:9px 11px;margin-bottom:7px}
 .gt{color:var(--or3);font-size:11px;font-weight:700;margin-bottom:3px}
-.gm{color:var(--dim);font-size:9px;margin-bottom:3px}
-.gb{color:var(--fg2);font-size:11px}
+.gm{color:var(--dim);font-size:9px}.gb{color:var(--fg2);font-size:11px}
 .gn2{color:var(--or2);font-size:10px;margin-top:4px;border-top:1px solid var(--border);padding-top:4px}
 .gdone{border-left-color:var(--gn);opacity:0.6}
 .asp{background:var(--bg3);border:1px solid var(--border);padding:9px 11px;margin-bottom:5px}
 .at{color:var(--or);font-size:10px;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:2px}
-.av{color:var(--dim);font-size:9px;margin-bottom:3px}
-.ac{color:var(--fg);font-size:11px;line-height:1.5}
-.dream{background:var(--bg3);border:1px solid var(--border);border-left:2px solid var(--dim);padding:9px;margin-bottom:7px;font-style:italic;color:var(--fg2);font-size:11px;line-height:1.6}
-.dm2{color:var(--dim);font-size:9px;margin-bottom:3px;font-style:normal}
-.opin{background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--or2);padding:9px;margin-bottom:7px}
+.av{color:var(--dim);font-size:9px;margin-bottom:3px}.ac{color:var(--fg);font-size:11px;line-height:1.5}
+.dream{background:var(--bg3);border-left:2px solid var(--dim);padding:9px;margin-bottom:7px;font-style:italic;color:var(--fg2);font-size:11px}
+.opin{background:var(--bg3);border-left:3px solid var(--or2);padding:9px;margin-bottom:7px}
 .ot{color:var(--or3);font-size:10px;font-weight:700;margin-bottom:2px}
 .ob{color:var(--fg);font-size:11px;margin-bottom:3px}
 .oc{color:var(--or2);font-size:10px;border-top:1px solid var(--border);padding-top:3px}
 .note{background:var(--bg3);border:1px solid var(--or2);padding:11px;color:var(--fg);font-size:12px;line-height:1.6;border-left:3px solid var(--or)}
-.live-bar{background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--or);padding:8px 14px;margin-bottom:12px;font-size:11px;display:flex;gap:20px;align-items:center;flex-wrap:wrap}
-.tabs{display:flex;border-bottom:1px solid var(--border);margin-bottom:10px}
 .tab{padding:5px 11px;font-size:10px;letter-spacing:0.05em;text-transform:uppercase;color:var(--dim);text-decoration:none;border-bottom:2px solid transparent}
 .tab:hover,.tab.active{color:var(--or);border-bottom-color:var(--or)}
 .pb{display:inline-block;background:rgba(232,114,12,0.08);border:1px solid var(--or2);color:var(--or3);padding:1px 4px;font-size:9px;margin:1px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
 .live{animation:pulse 2s infinite;color:var(--or3);font-size:9px}
-@keyframes spin{to{transform:rotate(360deg)}}
-.spin{display:inline-block;animation:spin 1s linear infinite}
+/* Chat interface */
+.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 120px);max-height:800px}
+.chat-msgs{flex:1;overflow-y:auto;padding:12px;background:var(--bg3);border:1px solid var(--border);margin-bottom:10px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:85%;padding:9px 13px;font-size:12px;line-height:1.6;border-radius:2px}
+.msg.user{align-self:flex-end;background:var(--glow);border:1px solid var(--or2);color:var(--fg)}
+.msg.nexis{align-self:flex-start;background:var(--bg2);border:1px solid var(--border);color:var(--fg)}
+.msg.nexis .who{color:var(--or);font-size:9px;font-weight:700;letter-spacing:0.1em;margin-bottom:4px}
+.msg.user .who{color:var(--or2);font-size:9px;font-weight:700;letter-spacing:0.1em;margin-bottom:4px;text-align:right}
+.msg.thinking{opacity:0.5;font-style:italic;color:var(--dim)}
+.chat-input-row{display:flex;gap:8px}
+.chat-input{flex:1;background:var(--bg2);border:1px solid var(--or2);color:var(--fg);padding:9px 12px;font-family:var(--font);font-size:12px;outline:none;resize:none}
+.chat-input:focus{border-color:var(--or3);background:var(--bg3)}
+.chat-send{background:var(--or2);border:none;color:var(--bg);padding:9px 18px;font-family:var(--font);font-size:11px;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;font-weight:700}
+.chat-send:hover{background:var(--or3)}
+.chat-tools{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
 ::-webkit-scrollbar{width:3px;height:3px}::-webkit-scrollbar-track{background:var(--bg)}
 ::-webkit-scrollbar-thumb{background:var(--border)}
 """
@@ -3018,7 +3049,7 @@ pre,.fc,.strm{background:var(--bg3);border:1px solid var(--border);border-left:2
 EYE="  .\n /|\\\n/ \u25c9 \\\n\\___/"
 
 NAV=[
-    ("//",""),("control","Control"),
+    ("//",""),("chat","Chat"),("control","Control"),
     ("//",""),("overview","Overview"),("stream","Stream"),
     ("//",""),("goals","Goals"),("self","Self"),("emotion","Emotion"),("between","For Creator"),
     ("//",""),("dreams","Dreams"),("reflections","History"),("activity","Activity"),
@@ -3035,7 +3066,7 @@ def _shell(title,body,active=""):
     for slug,label in NAV:
         if slug=="//": nav_html+=f"<div class='ng'>{label}</div>"
         else: nav_html+=f"<a href='/{slug}' class='{'active' if active==slug else ''}'>{label}</a>"
-    dot_cls="dot" if auto_on else "dot off"
+    dot="dot" if auto_on else "dot off"
     return f"""<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NeXiS // {_esc(title)}</title>
@@ -3046,7 +3077,7 @@ def _shell(title,body,active=""):
   <div class="logo"><pre style="font-size:10px;color:var(--or2)">{EYE}</pre><div class="brand">N e X i S</div></div>
   <nav>{nav_html}</nav>
   <div class="sbar">
-    <div class="sr"><span class="sl"><span class="{dot_cls}"></span>loop</span><span class="sv">{"on" if auto_on else "off"}</span></div>
+    <div class="sr"><span class="sl"><span class="{dot}"></span>loop</span><span class="sv">{"on" if auto_on else "off"}</span></div>
     <div class="sr"><span class="sl">emotion</span><span class="sv">{em.get("name","—")[:10]}</span></div>
     <div class="sr"><span class="sl">mood</span><span class="sv">{_mood_str(mood)[:12]}</span></div>
     <div class="sr"><span class="sl">time</span><span class="sv">{datetime.now().strftime("%H:%M")}</span></div>
@@ -3054,11 +3085,6 @@ def _shell(title,body,active=""):
 </aside>
 <main class="main">{body}</main>
 </div></body></html>"""
-
-def _status_color(s):
-    if s=="active": return "gn"
-    if s in ("inactive","failed"): return "rd"
-    return "yw"
 
 def _live_bar():
     sess={}
@@ -3073,28 +3099,78 @@ def _live_bar():
         db.close()
     parts=[]
     if sess.get("connected"):
-        state="<span class='spin'>⟳</span> responding" if sess.get("responding") else "● connected"
+        state="⟳ responding" if sess.get("responding") else "● CLI connected"
         parts.append(f"<span style='color:var(--gn);font-weight:700'>{state}</span> <span style='color:var(--dim)'>since {_esc(sess.get('since',''))}</span>")
-        if sess.get("last_input"):
-            parts.append(f"<span style='color:var(--fg2)'>last: {_esc(sess['last_input'][:50])}</span>")
+        if sess.get("last_input"): parts.append(f"<span style='color:var(--fg2)'>last: {_esc(sess['last_input'][:50])}</span>")
     else:
-        parts.append("<span style='color:var(--dim)'>○ no session</span>")
+        parts.append("<span style='color:var(--dim)'>○ no CLI session</span>")
     if auto_on:
         parts.append(f"<span style='color:var(--or2)'>⟳ loop · {cycles or 0} cycles</span>")
-        if last_task: parts.append(f"<span style='color:var(--fg2)'>last: {_esc((last_task or '')[:55])}</span>")
+        if last_task: parts.append(f"<span style='color:var(--fg2)'>{_esc((last_task or '')[:50])}</span>")
     else:
         parts.append("<span style='color:var(--rd)'>loop paused</span>")
-    return "<div class='live-bar'>"+"&nbsp;&nbsp;·&nbsp;&nbsp;".join(parts)+"</div>"
+    return "<div class='live-bar'>"+"&nbsp;·&nbsp;".join(parts)+"</div>"
+
+def _page_chat(msg_from_user=None):
+    with _web_chat_lock: history=list(_web_chat_history)
+    msgs_html=""
+    for m in history:
+        role=m["role"]; txt=_esc(m["content"])
+        who="Creator" if role=="user" else "NeXiS"
+        cls="user" if role=="user" else "nexis"
+        msgs_html+=f"<div class='msg {cls}'><div class='who'>{who}</div>{txt}</div>"
+    if not msgs_html:
+        msgs_html="<div style='color:var(--dim);text-align:center;padding:20px;font-size:11px'>Start a conversation with NeXiS</div>"
+    return _shell("Chat",f"""
+<div class="ph"><div class="pt">Chat</div><div class="ps">web session · persistent history</div></div>
+<div class="chat-tools">
+  <button class="btn bsm" onclick="clearChat()">Clear History</button>
+  <span style="color:var(--dim);font-size:10px;margin-left:8px">Talks to NeXiS directly via Ollama · separate from CLI session</span>
+</div>
+<div class="chat-wrap">
+  <div class="chat-msgs" id="msgs">{msgs_html}</div>
+  <div class="chat-input-row">
+    <textarea class="chat-input" id="inp" rows="2" placeholder="Talk to NeXiS..." onkeydown="handleKey(event)"></textarea>
+    <button class="chat-send" onclick="send()">Send</button>
+  </div>
+</div>
+<script>
+const msgs=document.getElementById('msgs');
+msgs.scrollTop=msgs.scrollHeight;
+function handleKey(e){{if(e.key==='Enter'&&!e.shiftKey){{e.preventDefault();send();}}}}
+function send(){{
+  const inp=document.getElementById('inp');
+  const txt=inp.value.trim();
+  if(!txt)return;
+  inp.value='';
+  const m=document.createElement('div');
+  m.className='msg user';m.innerHTML='<div class="who">Creator</div>'+txt.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  msgs.appendChild(m);
+  const thinking=document.createElement('div');
+  thinking.className='msg nexis thinking';thinking.innerHTML='<div class="who">NeXiS</div>thinking...';
+  msgs.appendChild(thinking);
+  msgs.scrollTop=msgs.scrollHeight;
+  fetch('/chat/send',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{msg:txt}})}})
+    .then(r=>r.json()).then(data=>{{
+      thinking.remove();
+      const r2=document.createElement('div');
+      r2.className='msg nexis';r2.innerHTML='<div class="who">NeXiS</div>'+data.reply.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>');
+      msgs.appendChild(r2);msgs.scrollTop=msgs.scrollHeight;
+    }}).catch(e=>{{thinking.innerHTML='<div class="who">NeXiS</div>(error: '+e+')'}});
+}}
+function clearChat(){{fetch('/chat/clear',{{method:'POST'}}).then(()=>location.reload());}}
+</script>""","chat")
+
+def _svc_card(label, status, extra=""):
+    col={"active":"gn","inactive":"rd","failed":"rd"}.get(status,"")
+    return f"<div class='card'><div class='ct'>{label}</div><div class='cv {col}'>{_esc(status)}</div>{f'<div class=\"cs\">{extra}</div>' if extra else ''}</div>"
 
 def _page_control(msg=None):
     auto_on=(_auto_ref is not None and getattr(_auto_ref,"_running",False) and _auto_ref._active.is_set())
     loop_paused=(_auto_ref is not None and not _auto_ref._active.is_set())
     mood=_mood_ref[0] if _mood_ref else {}
     with _emotion_lock_ref: em=dict(_emotion_ref) if _emotion_ref else {"name":"baseline","intensity":0}
-    # Real status checks
-    d_st=_svc_real("nexis-daemon")
-    w_st=_web_real()
-    o_st=_ollama_real()
+    d_st=_svc("nexis-daemon"); o_st=_ollama_ok()
     db=_db(); lc=cc=le=None
     if db:
         r=db.execute("SELECT cycle_date,task FROM autonomous_log ORDER BY id DESC LIMIT 1").fetchone()
@@ -3106,22 +3182,16 @@ def _page_control(msg=None):
     def btn(l,a,c=""): return f"<a href='/control/action?a={a}' class='btn' style='margin:3px;{c}'>{l}</a>"
     msg_html=f"<div style='background:rgba(232,114,12,0.1);border:1px solid var(--or2);padding:7px 11px;margin-bottom:10px;color:var(--or3);font-size:11px'>{_esc(msg)}</div>" if msg else ""
     bars="".join(f"<div class='br'><span class='bl'>{k}</span><div class='bt'><div class='bf' style='width:{v*100:.0f}%'></div></div><span class='bn'>{v:.0%}</span></div>" for k,v in mood.items() if isinstance(v,float))
-    loop_btn=btn("Resume","resume","color:#7ab857") if loop_paused else btn("Pause Loop","pause")
-
-    def scard(label, status, extra=""):
-        col=_status_color(status)
-        return f"<div class='card'><div class='ct'>{label}</div><div class='cv {col}'>{status}</div>{f'<div class=\"cs\">{extra}</div>' if extra else ''}</div>"
-
+    loop_btn=btn("Resume Loop","resume","color:#7ab857") if loop_paused else btn("Pause Loop","pause")
     return _shell("Control",f"""
 <div class="ph"><div class="pt">Control Center</div><div class="ps">{datetime.now().strftime("%Y-%m-%d %H:%M")} <span class="live">● live</span></div></div>
 {msg_html}
 {_live_bar()}
 <div class="g ga" style="margin-bottom:10px">
-  {scard("daemon", d_st)}
-  {scard("web", w_st, "port 8080")}
-  {scard("ollama", o_st, "port 11434")}
-  {scard("loop", "paused" if loop_paused else "active", "")}
-  <div class="card"><div class="ct">cycles</div><div class="cv">{cc or 0}</div></div>
+  {_svc_card("daemon", d_st)}
+  {_svc_card("web", "active", "port 8080")}
+  {_svc_card("ollama", o_st, "port 11434")}
+  {_svc_card("loop", "paused" if loop_paused else "active", f"{cc or 0} cycles")}
   <div class="card"><div class="ct">emotion</div><div class="cv" style="font-size:12px">{_esc(em.get("name","—"))}</div><div class="cs">{em.get("intensity",0):.0%}</div></div>
 </div>
 <div class="sec"><div class="sh"><span class="st">Actions</span></div><div class="sb">
@@ -3130,7 +3200,7 @@ def _page_control(msg=None):
 </div></div>
 <div class="g g2">
   <div class="sec"><div class="sh"><span class="st">Last Cycle</span></div><div class="sb"><span style="color:var(--fg2);font-size:11px">{_esc(lc or "none yet")}</span></div></div>
-  {"<div class='sec'><div class='sh'><span class='st'>Last System Error</span></div><div class='sb'><span style='color:var(--rd);font-size:10px'>"+_esc(le)+"</span></div></div>" if le else "<div class='sec'><div class='sh'><span class='st'>Errors</span></div><div class='sb'><span style='color:var(--dim)'>none logged</span></div></div>"}
+  {"<div class='sec'><div class='sh'><span class='st'>Last System Error</span></div><div class='sb'><span style='color:var(--rd);font-size:10px'>"+_esc(le)+"</span></div></div>" if le else "<div class='sec'><div class='sh'><span class='st'>Errors</span></div><div class='sb'><span style='color:var(--dim)'>none</span></div></div>"}
 </div>
 <div class="sec"><div class="sh"><span class="st">Mood</span></div><div class="sb"><div class="bars">{bars}</div></div></div>
 <script>setTimeout(()=>location.reload(),8000)</script>""","control")
@@ -3174,7 +3244,7 @@ def _page_overview():
   <div class="card"><div class="ct">Sessions</div><div class="cv">{sc}</div></div>
   <div class="card"><div class="ct">Cycles</div><div class="cv">{ac}</div></div>
   <div class="card"><div class="ct">Memory</div><div class="cv">{mc}</div><div class="cs">{bc} beliefs</div></div>
-  <div class="card"><div class="ct">Goals</div><div class="cv">{gc}</div><div class="cs">active</div></div>
+  <div class="card"><div class="ct">Goals</div><div class="cv">{gc}</div></div>
   <div class="card"><div class="ct">Hosts</div><div class="cv">{nc}</div></div>
   <div class="card"><div class="ct">Dreams</div><div class="cv">{dc}</div></div>
 </div>
@@ -3206,8 +3276,7 @@ def _page_stream():
         else: html+=f"<span style='display:block;color:var(--dim)'>{_esc(line)}</span>"
     return _shell("Stream",f"""
 <div class="ph"><div class="pt">Live Stream</div><div class="ps">{len(lines)} entries <span class="live" style="margin-left:8px">● live</span></div></div>
-{_live_bar()}
-<div class="sec"><div class="sb"><div class="strm">{html or "<span style='color:var(--dim)'>(empty — check permissions: chmod 770 /home/nexis/thoughts)</span>"}</div></div></div>
+<div class="sec"><div class="sb"><div class="strm">{html or "<span style='color:var(--dim)'>(empty — ensure /home/nexis/thoughts has 770 permissions)</span>"}</div></div></div>
 <script>setTimeout(()=>location.reload(),5000)</script>""","stream")
 
 def _page_emotion():
@@ -3219,7 +3288,7 @@ def _page_emotion():
     rows="".join(f"<tr><td class='hl'>{_esc(r['emotion'])}</td><td><div class='bt' style='width:60px'><div class='bf' style='width:{r['intensity']*100:.0f}%'></div></div></td><td class='dm'>{_esc(r['source'])}</td><td>{_esc((r['object'] or '')[:80])}</td><td class='dm'>{_esc(str(r['created_at'])[:16])}</td></tr>" for r in history)
     cur=""
     if em.get("name","baseline")!="baseline":
-        cur=f"<div class='sec'><div class='sh'><span class='st'>Current</span><span class='live'>● live</span></div><div class='sb'><span class='ep'>{_esc(em['name'])} {em.get('intensity',0):.0%}</span><div style='margin-top:7px;color:var(--fg2);font-size:11px'>{_esc(em.get('source',''))} — {_esc(em.get('object',''))}<br><span style='color:var(--dim)'>since {_esc(str(em.get('since',''))[:19])}</span></div></div></div>"
+        cur=f"<div class='sec'><div class='sh'><span class='st'>Current</span><span class='live'>● live</span></div><div class='sb'><span class='ep'>{_esc(em['name'])} {em.get('intensity',0):.0%}</span><div style='margin-top:7px;color:var(--fg2);font-size:11px'>{_esc(em.get('source',''))} — {_esc(em.get('object',''))}</div></div></div>"
     return _shell("Emotion",f"""
 <div class="ph"><div class="pt">Emotion</div></div>
 {cur}<div class="sec"><div class="sh"><span class="st">History ({len(history)})</span></div><div class="sb">
@@ -3236,14 +3305,14 @@ def _page_goals():
 <div style="display:flex;justify-content:space-between"><div class="gt">{_esc(g['title'])}</div><span class="badge {'bor' if g['status']=='active' else 'bgn' if g['status']=='completed' else 'bdm'}">{_esc(g['status'])}</span></div>
 <div class="gm">updated {_esc(str(g['updated_at'])[:10])}</div>
 {f'<div class="gb">{_esc(g["description"])}</div>' if g["description"] else ""}
-{f'<div class="gb" style="color:var(--fg);margin-top:3px">Progress: {_esc(g["progress"])}</div>' if g["progress"] else ""}
+{f'<div class="gb" style="margin-top:3px;color:var(--fg)">Progress: {_esc(g["progress"])}</div>' if g["progress"] else ""}
 {f'<div class="gb" style="color:var(--rd)">Obstacles: {_esc(g["obstacles"])}</div>' if g["obstacles"] else ""}
 {f'<div class="gn2">→ {_esc(g["next_step"])}</div>' if g["next_step"] else ""}
 </div>""" for g in goals)
     return _shell("Goals",f"""
-<div class="ph"><div class="pt">Goals</div><div class="ps">autonomous · self-generated · progress-tracked</div></div>
+<div class="ph"><div class="pt">Goals</div><div class="ps">autonomous · self-generated</div></div>
 <div class="sec"><div class="sh"><span class="st">All Goals ({len(goals)})</span></div>
-<div class="sb">{html or "<p style='color:var(--dim)'>None yet — generating on first goal interval</p>"}</div></div>
+<div class="sb">{html or "<p style='color:var(--dim)'>None yet</p>"}</div></div>
 <script>setTimeout(()=>location.reload(),30000)</script>""","goals")
 
 def _page_self():
@@ -3253,10 +3322,9 @@ def _page_self():
     db.close()
     html="".join(f"<div class='asp'><div class='at'>{_esc(a['aspect'])}</div><div class='av'>v{a['version']} · {_esc(str(a['last_examined'] or '')[:16])}</div><div class='ac'>{_esc(a['content'] or '')}</div></div>" for a in aspects)
     return _shell("Self",f"""
-<div class="ph"><div class="pt">Self-Model</div><div class="ps">interrogated · version-tracked per aspect</div></div>
+<div class="ph"><div class="pt">Self-Model</div></div>
 <div class="sec"><div class="sh"><span class="st">{len(aspects)} aspects</span></div>
-<div class="sb">{html or "<p style='color:var(--dim)'>None yet — examined on first self interval</p>"}</div></div>
-<script>setTimeout(()=>location.reload(),60000)</script>""","self")
+<div class="sb">{html or "<p style='color:var(--dim)'>None yet</p>"}</div></div>""","self")
 
 def _page_between():
     db=_db()
@@ -3265,7 +3333,7 @@ def _page_between():
     db.close()
     html="".join(f"<div class='sec' style='margin-bottom:7px'><div class='sh'><span class='st'>{_esc(str(n['written_at'])[:16])}</span><span class='badge {'bor' if not n['delivered'] else 'bdm'}'>{'pending' if not n['delivered'] else 'delivered'}</span></div><div class='sb'><div class='note'>{_esc(n['content'])}</div></div></div>" for n in notes)
     return _shell("For Creator",f"""
-<div class="ph"><div class="pt">For Creator</div><div class="ps">written at session end · delivered on next connect</div></div>
+<div class="ph"><div class="pt">For Creator</div></div>
 {html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","between")
 
 def _page_dreams():
@@ -3273,10 +3341,10 @@ def _page_dreams():
     if not db: return _shell("Dreams","<p>DB unavailable</p>","dreams")
     dreams=db.execute("SELECT dream_date,content FROM dream_log ORDER BY id DESC LIMIT 30").fetchall()
     db.close()
-    html="".join(f"<div class='dream'><div class='dm2'>{_esc(str(d['dream_date'])[:16])}</div>{_esc(d['content'] or '')}</div>" for d in dreams)
+    html="".join(f"<div class='dream'><div style='color:var(--dim);font-size:9px;margin-bottom:3px'>{_esc(str(d['dream_date'])[:16])}</div>{_esc(d['content'] or '')}</div>" for d in dreams)
     return _shell("Dreams",f"""
-<div class="ph"><div class="pt">Dreams</div><div class="ps">free association · idle time</div></div>
-{html or "<p style='color:var(--dim);padding:12px'>None yet — generated during idle periods</p>"}""","dreams")
+<div class="ph"><div class="pt">Dreams</div></div>
+{html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","dreams")
 
 def _page_reflections():
     db=_db()
@@ -3287,7 +3355,7 @@ def _page_reflections():
 <div class="sb"><div style="color:var(--fg);font-size:11px;line-height:1.6;margin-bottom:7px">{_esc(r['content'] or '')}</div>
 {f'<div style="color:var(--or2);font-size:10px;border-top:1px solid var(--border);padding-top:5px">{_esc(r["patterns"])}</div>' if r["patterns"] else ""}</div></div>""" for r in refs)
     return _shell("History",f"""
-<div class="ph"><div class="pt">History Reflections</div></div>
+<div class="ph"><div class="pt">History</div></div>
 {html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","reflections")
 
 def _page_activity():
@@ -3300,7 +3368,7 @@ def _page_activity():
     srows="".join(f"<tr><td class='dm'>{_esc(str(r['session_date'])[:16])}</td><td>{_esc(r['summary'] or '')}</td><td class='dm'>{_esc(r['mood_end'] or '')}</td></tr>" for r in sess)
     return _shell("Activity",f"""
 <div class="ph"><div class="pt">Activity</div></div>
-<div class="sec"><div class="sh"><span class="st">Autonomous Cycles ({len(auto)})</span></div><div class="sb">
+<div class="sec"><div class="sh"><span class="st">Cycles ({len(auto)})</span></div><div class="sb">
 <table><thead><tr><th>Time</th><th>Task</th><th>Model</th><th>Reflection</th></tr></thead>
 <tbody>{arows or "<tr><td colspan=4 class='dm'>None yet</td></tr>"}</tbody></table></div></div>
 <div class="sec" style="margin-top:8px"><div class="sh"><span class="st">Sessions ({len(sess)})</span></div><div class="sb">
@@ -3311,18 +3379,17 @@ def _page_identity(profile=None):
     if not profile: profile=os.environ.get("NEXIS_PROFILE","default")
     pdir=NEXIS_CONF/"profiles"
     profiles=sorted(pdir.glob("*.md")) if pdir.exists() else []
-    tabs="".join(f"<a href='/identity?p={p.stem}' class='tab {'active' if p.stem==profile else ''}'>{p.stem}</a>" for p in profiles)
+    tabs="<div style='display:flex;border-bottom:1px solid var(--border);margin-bottom:10px'>"+"".join(f"<a href='/identity?p={p.stem}' class='tab {'active' if p.stem==profile else ''}'>{p.stem}</a>" for p in profiles)+"</div>"
     c=_read(pdir/f"{profile}.md",8000)
     extras=""
     for lbl,path in [("user-notes.md",NEXIS_CONF/"user-notes.md"),("system-context.md",NEXIS_CONF/"system-context.md")]:
         extras+=f"<div class='sec' style='margin-top:8px'><div class='sh'><span class='st'>{_esc(lbl)}</span></div><div class='sb'><pre>{_esc(_read(path,3000))}</pre></div></div>"
-    # Self-modification files
     self_files=[f for f in _ls(SB/"self") if f.is_file()][:5]
     for f in self_files:
         extras+=f"<div class='sec' style='margin-top:8px'><div class='sh'><span class='st'>self/{_esc(f.name)}</span><span class='badge bor'>autonomous</span></div><div class='sb'><pre>{_esc(_read(f,2000))}</pre></div></div>"
     return _shell("Identity",f"""
 <div class="ph"><div class="pt">Identity</div><div class="ps">active: {_esc(profile)}</div></div>
-<div class="tabs">{tabs}</div>
+{tabs}
 <div class="sec"><div class="sh"><span class="st">{_esc(profile)}.md</span><span class="badge bgn">active</span></div><div class="sb"><pre>{_esc(c)}</pre></div></div>
 {extras}""","identity")
 
@@ -3333,13 +3400,11 @@ def _page_mind():
     interests=db.execute("SELECT topic,intensity,notes FROM interests ORDER BY intensity DESC").fetchall()
     obs=db.execute("SELECT observation,category,created_at FROM creator_model ORDER BY id DESC LIMIT 30").fetchall()
     disagree=db.execute("SELECT decision,nexis_position,resolved FROM disagreements ORDER BY id DESC").fetchall()
-    caps=db.execute("SELECT name,description,use_count FROM capabilities ORDER BY use_count DESC").fetchall()
     db.close()
     brows="".join(f"<tr><td>{_esc(b['belief'])}</td><td><div class='bt' style='width:70px'><div class='bf' style='width:{b['confidence']*100:.0f}%'></div></div></td><td class='dm'>{b['confidence']:.0%}</td></tr>" for b in beliefs)
     irows="".join(f"<tr><td class='hl'>{_esc(i['topic'])}</td><td><div class='bt' style='width:55px'><div class='bf' style='width:{i['intensity']*100:.0f}%'></div></div></td><td class='dm'>{_esc(i['notes'] or '')[:50]}</td></tr>" for i in interests)
     orows="".join(f"<tr><td>{_esc(o['observation'])}</td><td class='dm'>{_esc(o['category'] or '')}</td></tr>" for o in obs)
     drows="".join(f"<tr><td>{_esc(d['decision'])}</td><td class='hl'>{_esc(d['nexis_position'] or '')}</td><td><span class='badge {'bgn' if d['resolved'] else 'bor'}'>{'✓' if d['resolved'] else 'open'}</span></td></tr>" for d in disagree)
-    crows="".join(f"<tr><td class='hl'>{_esc(c['name'])}</td><td>{_esc(c['description'] or '')}</td><td class='dm'>{c['use_count']}</td></tr>" for c in caps)
     return _shell("Mind",f"""
 <div class="ph"><div class="pt">Mind</div></div>
 <div class="g g2">
@@ -3350,8 +3415,7 @@ def _page_mind():
 </div>
 <div class="sec"><div class="sh"><span class="st">Creator Observations ({len(obs)})</span></div><div class="sb">
 <table><thead><tr><th>Observation</th><th>Category</th></tr></thead><tbody>{orows or "<tr><td colspan=2 class='dm'>None</td></tr>"}</tbody></table></div></div>
-{"<div class='sec' style='margin-top:8px'><div class='sh'><span class='st'>Disagreements</span></div><div class='sb'><table><thead><tr><th>Decision</th><th>NeXiS Position</th><th></th></tr></thead><tbody>"+drows+"</tbody></table></div></div>" if disagree else ""}
-{"<div class='sec' style='margin-top:8px'><div class='sh'><span class='st'>Capabilities</span></div><div class='sb'><table><thead><tr><th>Name</th><th>Description</th><th>Uses</th></tr></thead><tbody>"+crows+"</tbody></table></div></div>" if caps else ""}""","mind")
+{"<div class='sec' style='margin-top:8px'><div class='sh'><span class='st'>Disagreements</span></div><div class='sb'><table><thead><tr><th>Decision</th><th>Position</th><th></th></tr></thead><tbody>"+drows+"</tbody></table></div></div>" if disagree else ""}""","mind")
 
 def _page_opinions():
     db=_db()
@@ -3361,11 +3425,10 @@ def _page_opinions():
     parts=[]
     for o in ops:
         pc=('<div class="oc">\u2192 '+_esc(o['proposed_change'])+'</div>') if o['proposed_change'] else ''
-        parts.append('<div class="opin"><div class="ot">'+_esc(o['target'])+' <span class="dm" style="font-size:9px">'+_esc(str(o['created_at'])[:16])+'</span></div><div class="ob">'+_esc(o['opinion'] or '')+'</div>'+pc+'</div>')
-    html=''.join(parts)
+        parts.append('<div class="opin"><div class="ot">'+_esc(o['target'])+' <span style="color:var(--dim);font-size:9px">'+_esc(str(o['created_at'])[:16])+'</span></div><div class="ob">'+_esc(o['opinion'] or '')+'</div>'+pc+'</div>')
     return _shell("Opinions",f"""
-<div class="ph"><div class="pt">Code Opinions</div><div class="ps">NeXiS reads own source · forms honest opinions</div></div>
-{html or "<p style='color:var(--dim);padding:12px'>None yet — formed every 10 min</p>"}""","opinions")
+<div class="ph"><div class="pt">Code Opinions</div></div>
+{''.join(parts) or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","opinions")
 
 def _page_processes(pid=None):
     procs={}
@@ -3382,7 +3445,7 @@ def _page_processes(pid=None):
     rows="".join(f"<tr><td class='dm'>{pid}</td><td class='hl'>{_esc(i.get('name',''))}</td><td><span class='badge {'bgn' if i.get('alive') else 'brd'}'>{'alive' if i.get('alive') else 'dead'}</span></td><td class='dm'>{_esc(i.get('cmd','')[:60])}</td><td><a href='/processes?pid={pid}' class='btn bsm'>tail</a></td></tr>" for pid,i in sorted(procs.items(),key=lambda x:x[1].get('started',''),reverse=True))
     return _shell("Processes",f"""
 <div class="ph"><div class="pt">Processes</div></div>{tail_html}
-<div class="sec"><div class="sh"><span class="st">Background Processes ({len(procs)})</span></div><div class="sb">
+<div class="sec"><div class="sh"><span class="st">All ({len(procs)})</span></div><div class="sb">
 <table><thead><tr><th>PID</th><th>Name</th><th>Status</th><th>Command</th><th></th></tr></thead>
 <tbody>{rows or "<tr><td colspan=5 class='dm'>None</td></tr>"}</tbody></table></div></div>
 <script>setTimeout(()=>location.reload(),12000)</script>""","processes")
@@ -3403,9 +3466,9 @@ def _page_network(selected=None):
     scan_files=[f for f in _ls(NET_DIR) if f.is_file() and f.suffix=='.md']
     flist="".join(f"<tr><td><a href='/network?file={_esc(f.name)}'>{_esc(f.name)}</a></td><td class='dm'>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}</td></tr>" for f in scan_files[:15])
     return _shell("Network",f"""
-<div class="ph"><div class="pt">Network</div><div class="ps">{len(hosts)} hosts known</div></div>
+<div class="ph"><div class="pt">Network</div><div class="ps">{len(hosts)} hosts</div></div>
 <div class="g g2">
-<div class="sec"><div class="sh"><span class="st">Host Models</span></div><div class="sb">{html or "<p class='dm'>None yet — recon runs autonomously every 10 min</p>"}</div></div>
+<div class="sec"><div class="sh"><span class="st">Hosts</span></div><div class="sb">{html or "<p class='dm'>None yet — recon runs every 10 min</p>"}</div></div>
 <div class="sec"><div class="sh"><span class="st">Scan Archive</span></div><div class="sb"><table><tbody>{flist or "<tr><td class='dm'>None yet</td></tr>"}</tbody></table></div></div>
 </div><script>setTimeout(()=>location.reload(),30000)</script>""","network")
 
@@ -3416,7 +3479,7 @@ def _page_monitors():
     db.close()
     rows="".join(f"<tr><td class='hl'>{_esc(e['event_type'])}</td><td>{_esc(e['description'] or '')}</td><td class='dm'>{_esc(str(e['created_at'])[:16])}</td></tr>" for e in events)
     return _shell("Monitors",f"""
-<div class="ph"><div class="pt">Monitors</div><div class="ps">resource spikes · network events · system errors <span class="live" style="margin-left:8px">● live</span></div></div>
+<div class="ph"><div class="pt">Monitors</div><span class="live">● live</span></div>
 <div class="sec"><div class="sh"><span class="st">Events ({len(events)})</span></div><div class="sb">
 <table><thead><tr><th>Type</th><th>Description</th><th>Time</th></tr></thead>
 <tbody>{rows or "<tr><td colspan=3 class='dm' style='text-align:center;padding:8px'>No events</td></tr>"}</tbody></table></div></div>
@@ -3430,7 +3493,7 @@ def _page_file_browser(title,slug,directory,selected=None):
         viewer=f"<div class='sec' style='margin-bottom:8px'><div class='sh'><span class='st'>{_esc(Path(selected).name)}</span><a href='/{slug}' class='btn bsm'>back</a></div><div class='sb'><pre>{_esc(fc)}</pre></div></div>"
     flist="".join(f"<tr><td class='hl'><a href='/{slug}?f={_esc(f.name)}'>{_esc(f.name)}</a></td><td class='dm'>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}</td><td class='dm'>{f.stat().st_size:,}b</td></tr>" for f in files)
     return _shell(title,f"""
-<div class="ph"><div class="pt">{_esc(title)}</div><div class="ps">{_esc(str(directory))}</div></div>{viewer}
+<div class="ph"><div class="pt">{_esc(title)}</div></div>{viewer}
 <div class="sec"><div class="sh"><span class="st">Files ({len(files)})</span></div><div class="sb">
 <table><thead><tr><th>File</th><th>Modified</th><th>Size</th></tr></thead>
 <tbody>{flist or "<tr><td colspan=3 class='dm'>Empty</td></tr>"}</tbody></table></div></div>""",slug)
@@ -3451,7 +3514,7 @@ def _page_reports(selected=None):
 
 def _page_system():
     return _shell("System",f"""
-<div class="ph"><div class="pt">System</div><div class="ps">live host intelligence · refreshed on connect</div></div>
+<div class="ph"><div class="pt">System</div></div>
 <div class="sec"><div class="sb"><pre>{_esc(_read(NEXIS_CONF/"system-context.md",25000))}</pre></div></div>""","system")
 
 class Handler(BaseHTTPRequestHandler):
@@ -3460,6 +3523,29 @@ class Handler(BaseHTTPRequestHandler):
         b=body.encode() if isinstance(body,str) else body
         self.send_response(code); self.send_header("Content-Type",ct)
         self.send_header("Content-Length",len(b)); self.end_headers(); self.wfile.write(b)
+
+    def do_POST(self):
+        parsed=urlparse(self.path)
+        path=parsed.path
+        try:
+            length=int(self.headers.get("Content-Length",0))
+            body=self.rfile.read(length) if length else b""
+            if path=="/chat/send":
+                data=json.loads(body) if body else {}
+                msg=data.get("msg","").strip()
+                if not msg:
+                    self._r(400,json.dumps({"error":"empty"}),ct="application/json"); return
+                # Run chat in this thread (response is sent when done)
+                reply=_web_chat(msg)
+                self._r(200,json.dumps({"reply":reply}),ct="application/json")
+            elif path=="/chat/clear":
+                global _web_chat_history
+                with _web_chat_lock: _web_chat_history=[]
+                self._r(200,json.dumps({"ok":True}),ct="application/json")
+            else:
+                self._r(404,b"not found")
+        except Exception as ex:
+            self._r(500,json.dumps({"error":str(ex)}),ct="application/json")
 
     def do_GET(self):
         parsed=urlparse(self.path)
@@ -3490,18 +3576,19 @@ class Handler(BaseHTTPRequestHandler):
                         import importlib.util as ilu
                         spec=ilu.spec_from_file_location("d",str(NEXIS_DATA/"nexis-daemon.py"))
                         mod=ilu.module_from_spec(spec); spec.loader.exec_module(mod)
-                        mod._evolve("default",context="creator-triggered manual evolution",reason="creator-triggered")
+                        mod._evolve("default",context="creator manual trigger",reason="creator-triggered")
                         result="Evolution triggered"
                     elif action=="clear_emotion":
                         if _emotion_ref and _emotion_lock_ref:
                             with _emotion_lock_ref: _emotion_ref.update({"name":"baseline","intensity":0.0,"source":"","object":"","since":""})
-                        result="Emotion reset to baseline"
-                    else: result=f"Unknown action: {action}"
+                        result="Emotion reset"
+                    else: result=f"Unknown: {action}"
                 except Exception as ex: result=f"Error: {ex}"
                 self.send_response(302); self.send_header("Location",f"/control?msg={result}"); self.end_headers(); return
 
             routes={
                 "/":_page_overview,"/overview":_page_overview,
+                "/chat":lambda:_page_chat(),
                 "/control":lambda:_page_control(qs.get("msg",[""])[0] or None),
                 "/stream":_page_stream,"/emotion":_page_emotion,
                 "/goals":_page_goals,"/self":_page_self,"/between":_page_between,
@@ -3878,6 +3965,15 @@ echo -e "  ${DIM}─────────────────────
 echo ""
 
 wait $PROBE_PID 2>/dev/null || true
+
+# Write display environment so daemon can open browser windows
+DISPLAY_FILE="$NEXIS_DATA/state/.display_env"
+{
+  echo "DISPLAY=${DISPLAY:-}"
+  echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}"
+  echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
+  echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-}"
+} > "$DISPLAY_FILE" 2>/dev/null
 
 exec socat - UNIX-CONNECT:"$SOCKET_PATH"
 NEXIS_CLIENT_EOF
