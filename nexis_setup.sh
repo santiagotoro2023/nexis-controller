@@ -3996,7 +3996,7 @@ printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\nXDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADD
   > "$NEXIS_DATA/state/.display_env" 2>/dev/null || true
 
 exec socat - UNIX-CONNECT:"$SOCKET_PATH"
-XIS_CLIENT_EOF
+NEXIS_CLIENT_EOF
 
 chmod +x "$NEXIS_BIN_FILE"
 chown "$REAL_USER:$(id -gn "$REAL_USER")" "$NEXIS_BIN_FILE"
