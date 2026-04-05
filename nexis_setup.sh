@@ -105,11 +105,12 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   systemctl daemon-reload 2>/dev/null || true
   _ok "Services removed"
 
-  # Release models from GPU memory (keep_alive=-1 keeps them loaded)
+  # Release models from GPU before removing
   _step "Releasing models from GPU..."
   for _m in qwen2.5:14b qwen2.5:32b nomic-embed-text; do
     curl -sf -X POST http://localhost:11434/api/generate \
-      -d "{\"model\":\"${_m}\",\"keep_alive\":0}" \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"'"$_m"'","keep_alive":0}' \
       -o /dev/null 2>/dev/null && _ok "Unloaded: ${_m}" || true
   done
 
@@ -303,7 +304,7 @@ sleep 0.3
 apt-get update -qq 2>/dev/null || true
 PACKAGES=(curl git build-essential pciutils usbutils lshw sqlite3 jq
           lm-sensors sysstat python3-pip python3-venv procps net-tools
-          iproute2 socat nmap sshpass openssh-server)
+          iproute2 socat nmap sshpass openssh-server xclip xdg-utils)
 $PKG_INSTALL "${PACKAGES[@]}" 2>/dev/null || _warn "Some packages unavailable"
 _ok "System dependencies installed"
 
@@ -820,18 +821,7 @@ done
 _ok "Personality profiles written: default, fractured, technical, minimal"
 
 
-# =============================================================================
-# PHASE 12 — DAEMON (nexis-daemon.py)
-# =============================================================================
-
-_header "PHASE 12 — PERSISTENT DAEMON"
-_tag "This process never sleeps. It thinks."
-sleep 0.3
-
-DAEMON_FILE="$NEXIS_DATA/nexis-daemon.py"
-
-sudo -u "$REAL_USER" tee "$DAEMON_FILE" > /dev/null << 'DAEMON_EOF'
-#!/usr/bin/env python3
+# ========================#!/usr/bin/env python3
 """
 NeXiS Daemon v8.0 — Neural Execution and Cross-device Inference System
 
@@ -893,6 +883,9 @@ _stream_lock = threading.Lock()
 _SSH_PASS    = ''
 _bg_procs    = {}
 _bg_lock     = threading.Lock()
+_session_active = False
+_session_lock   = threading.Lock()
+_session_state  = {'connected':False,'since':'','last_input':'','responding':False}
 _session_active = False
 _session_lock   = threading.Lock()
 _session_state  = {'connected':False,'since':'','last_input':'','responding':False}
@@ -2590,6 +2583,7 @@ class Session:
             if inp.lower() in ('exit','quit','q','\x04'): break
             if inp.startswith('//'): self._cmd(inp[2:].strip()); continue
             with _session_lock: _session_state.update({'last_input':inp[:60],'responding':True})
+            with _session_lock: _session_state.update({'last_input':inp[:60],'responding':True})
             self.msgs.append({'role':'user','content':inp})
             self.smsg.append({'role':'user','content':inp})
             model=MODEL_14B  # always 14b for session speed
@@ -2603,6 +2597,7 @@ class Session:
             resp=self._gate(resp)
             self._handle_mod(resp)
             self._render(resp)
+            with _session_lock: _session_state['responding']=False
             with _session_lock: _session_state['responding']=False
             self.msgs.append({'role':'assistant','content':resp})
             self.smsg.append({'role':'assistant','content':resp})
@@ -2791,10 +2786,15 @@ def main():
     db.close()
 
     try:
-        _log('Pre-warming model into GPU...')
+        _log('Pre-warming model...')
         _chat([{'role':'user','content':'hi'}],model=MODEL_14B,num_ctx=2048)
-        _log('Model warm and ready')
-    except Exception as _we: _log(f'Warm failed: {_we}','WARN')
+        _log('Model warm')
+    except Exception as _we: _log(f'Warm: {_we}','WARN')
+    try:
+        _log('Pre-warming model...')
+        _chat([{'role':'user','content':'hi'}],model=MODEL_14B,num_ctx=2048)
+        _log('Model warm')
+    except Exception as _we: _log(f'Warm: {_we}','WARN')
     _gen_ssh_pass()
 
     profile_ref=[os.environ.get('NEXIS_PROFILE','default')]
@@ -2827,7 +2827,6 @@ def main():
 
     def _shutdown(sig,frame):
         _log('Shutdown'); _stream('[system] Daemon shutting down')
-        # Release models from GPU (keep_alive=-1 keeps them loaded)
         try:
             import urllib.request as _ur
             for _m in (MODEL_14B, MODEL_32B):
@@ -2844,6 +2843,20 @@ def main():
 
     signal.signal(signal.SIGTERM,_shutdown)
     signal.signal(signal.SIGINT,_shutdown)
+
+    while True:
+        try:
+            csock,_=srv.accept()
+            db=_db()
+            s=Session(csock,db,mood_ref,auto)
+            threading.Thread(target=s.run,daemon=True).start()
+        except OSError: break
+        except Exception as e: _log(f'Accept: {e}','ERROR')
+    auto.stop(); env_mon.stop()
+    _log('Daemon stopped')
+
+if __name__=='__main__':
+    main()
 
     while True:
         try:
@@ -2878,38 +2891,44 @@ NEXIS_DATA_TARGET="$WEB_FILE" python3 - << 'PYWRITE'
 import sys
 content = r'''
 #!/usr/bin/env python3
-"""NeXiS Web Dashboard v8.4"""
-import json,sqlite3,os,re,subprocess,threading,time,urllib.request,urllib.error
-from http.server import HTTPServer,BaseHTTPRequestHandler
+"""NeXiS Web Dashboard v8.1 — dense, fast, informative"""
+
+import json, sqlite3, os, re, subprocess
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
 from datetime import datetime
-from urllib.parse import urlparse,parse_qs
+from urllib.parse import urlparse, parse_qs
 
-HOME=Path.home()
-NEXIS_DATA=HOME/".local/share/nexis"
-NEXIS_CONF=HOME/".config/nexis"
-MEM_DB=NEXIS_DATA/"memory"/"nexis_memory.db"
-SB=Path("/home/nexis")
-NET_DIR=SB/"workspace"/"network"
-OLLAMA_BASE="http://localhost:11434"
+HOME        = Path.home()
+NEXIS_DATA  = HOME / ".local/share/nexis"
+NEXIS_CONF  = HOME / ".config/nexis"
+MEM_DB      = NEXIS_DATA / "memory" / "nexis_memory.db"
+SB          = Path("/home/nexis")
+NET_DIR     = SB / "workspace" / "network"
+DREAMS_DIR  = SB / "dreams"
 
-_db_ref=_mood_ref=_auto_ref=_bg_ref=_bg_lock_ref=_emotion_ref=_emotion_lock_ref=_sess_ref=_sess_lock_ref=None
-_web_hist=[]
-_web_hist_lock=threading.Lock()
+_db_ref=_mood_ref=_auto_ref=_bg_ref=_bg_lock_ref=_emotion_ref=_emotion_lock_ref=None
+
+_web_hist = []
+_web_hist_lock = threading.Lock()
+_sess_ref = _sess_lock_ref = None
 
 def start_web(db_factory,mood_ref,auto_ref,bg_procs,bg_lock,emotion,emotion_lock,sess_state=None,sess_lock=None):
-    global _db_ref,_mood_ref,_auto_ref,_bg_ref,_bg_lock_ref,_emotion_ref,_emotion_lock_ref,_sess_ref,_sess_lock_ref
+    global _sess_ref,_sess_lock_ref
+    _sess_ref=sess_state; _sess_lock_ref=sess_lock
+    global _db_ref,_mood_ref,_auto_ref,_bg_ref,_bg_lock_ref,_emotion_ref,_emotion_lock_ref
     _db_ref=db_factory;_mood_ref=mood_ref;_auto_ref=auto_ref
     _bg_ref=bg_procs;_bg_lock_ref=bg_lock
     _emotion_ref=emotion;_emotion_lock_ref=emotion_lock
-    _sess_ref=sess_state;_sess_lock_ref=sess_lock
-    class TS(ThreadingMixIn,HTTPServer): daemon_threads=True
-    TS(("0.0.0.0",8080),Handler).serve_forever()
+    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+    ThreadedHTTPServer(("0.0.0.0",8080),Handler).serve_forever()
 
 def _db():
     try:
-        c=sqlite3.connect(str(MEM_DB),check_same_thread=False); c.row_factory=sqlite3.Row; return c
+        c=sqlite3.connect(str(MEM_DB),check_same_thread=False)
+        c.row_factory=sqlite3.Row; return c
     except: return None
 
 def _esc(s): return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -2929,14 +2948,509 @@ def _mood_str(m):
     if m.get("engagement",0)>0.7: p.append("engaged")
     return " · ".join(p) if p else "baseline"
 
-def _ollama_ok():
-    try:
-        with urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags",timeout=2) as r: return "active"
-    except: return "inactive"
+CSS = """
+:root{--bg:#080807;--bg2:#0e0e0b;--bg3:#141410;--or:#e8720c;--or2:#c45c00;--or3:#ff9533;
+--dim:#444433;--fg:#c4b898;--fg2:#887766;--gn:#3a6b22;--rd:#7c2f2f;
+--border:#1e1e16;--glow:rgba(232,114,12,0.1);--font:"JetBrains Mono",monospace;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:12px;line-height:1.5;min-height:100vh}
+a{color:var(--or2);text-decoration:none}a:hover{color:var(--or3)}
+.shell{display:grid;grid-template-columns:180px 1fr;min-height:100vh}
+.sidebar{background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
+.main{padding:16px 20px;overflow-x:hidden}
+.logo{padding:12px 12px 8px;border-bottom:1px solid var(--border);text-align:center}
+.logo pre{font-size:7px;line-height:1.2;color:var(--or2);white-space:pre;display:inline-block;text-align:left}
+.brand{color:var(--or);font-size:10px;letter-spacing:0.2em;margin-top:4px;font-weight:700}
+nav{padding:8px 0;flex:1}
+nav a{display:block;padding:5px 12px;color:var(--fg2);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;border-left:2px solid transparent;transition:all 0.1s}
+nav a:hover{color:var(--or);background:var(--glow);border-left-color:var(--or2)}
+nav a.active{color:var(--or);border-left-color:var(--or);background:var(--glow)}
+.ng{color:var(--dim);font-size:9px;padding:8px 12px 2px;letter-spacing:0.12em;text-transform:uppercase}
+.sbar{padding:8px 10px;border-top:1px solid var(--border);font-size:10px}
+.sr{display:flex;justify-content:space-between;margin-bottom:2px}
+.sl{color:var(--dim)}.sv{color:var(--or3)}
+.dot{display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:4px;background:var(--gn)}
+.dot.off{background:var(--rd)}
+.ph{margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:baseline}
+.pt{color:var(--or);font-size:15px;font-weight:700}.ps{color:var(--dim);font-size:10px}
+.grid{display:grid;gap:8px;margin-bottom:12px}
+.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:1fr 1fr 1fr}.g4{grid-template-columns:repeat(4,1fr)}
+.gauto{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}
+.card{background:var(--bg2);border:1px solid var(--border);padding:10px 12px}
+.ct{color:var(--or2);font-size:9px;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px}
+.cv{color:var(--or3);font-size:22px;font-weight:700;line-height:1}
+.cs{color:var(--dim);font-size:10px;margin-top:2px}
+.sec{background:var(--bg2);border:1px solid var(--border);margin-bottom:10px}
+.sh{padding:7px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.st{color:var(--or);font-size:10px;letter-spacing:0.1em;text-transform:uppercase}
+.sb{padding:10px 14px}
+table{width:100%;border-collapse:collapse}
+th{color:var(--dim);font-size:9px;letter-spacing:0.08em;text-transform:uppercase;text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)}
+td{padding:5px 8px;border-bottom:1px solid rgba(30,30,22,0.5);color:var(--fg);vertical-align:top;word-break:break-word}
+tr:hover td{background:var(--glow)}
+td.hl{color:var(--or3)}td.dm{color:var(--fg2)}td.mn{font-family:var(--font)}
+pre,.fc,.strm{background:var(--bg3);border:1px solid var(--border);border-left:2px solid var(--or2);padding:10px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;color:var(--fg2);font-size:10px;max-height:440px;overflow-y:auto}
+.bars{display:grid;gap:6px}
+.br{display:grid;grid-template-columns:90px 1fr 35px;align-items:center;gap:5px}
+.bl{color:var(--dim);font-size:10px}
+.bt{background:var(--bg3);height:4px;overflow:hidden}
+.bf{height:100%;background:linear-gradient(90deg,var(--or2),var(--or3));transition:width 0.3s}
+.bn{color:var(--or3);font-size:10px;text-align:right}
+.badge{display:inline-block;padding:1px 6px;font-size:9px;letter-spacing:0.05em;text-transform:uppercase}
+.bor{background:rgba(232,114,12,0.12);color:var(--or3);border:1px solid var(--or2)}
+.bdm{background:rgba(30,30,22,0.5);color:var(--dim);border:1px solid var(--border)}
+.bgn{background:rgba(58,107,34,0.2);color:#7ab857;border:1px solid var(--gn)}
+.brd{background:rgba(124,47,47,0.2);color:#c07070;border:1px solid var(--rd)}
+.btn{background:var(--bg3);border:1px solid var(--or2);color:var(--or);padding:4px 10px;font-family:var(--font);font-size:10px;letter-spacing:0.06em;text-transform:uppercase;cursor:pointer;text-decoration:none;display:inline-block}
+.btn:hover{background:var(--glow)}
+.btnsm{padding:2px 7px;font-size:9px}
+.em-pill{display:inline-block;padding:2px 10px;font-size:10px;background:rgba(232,114,12,0.1);border:1px solid var(--or2);color:var(--or3)}
+.goal{background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--or2);padding:10px 12px;margin-bottom:8px}
+.gtitle{color:var(--or3);font-size:11px;font-weight:700;margin-bottom:4px}
+.gmeta{color:var(--dim);font-size:9px;margin-bottom:4px}
+.gbody{color:var(--fg2);font-size:11px}
+.gnext{color:var(--or2);font-size:10px;margin-top:5px;border-top:1px solid var(--border);padding-top:4px}
+.gdone{border-left-color:var(--gn);opacity:0.6}
+.asp{background:var(--bg3);border:1px solid var(--border);padding:10px 12px;margin-bottom:6px}
+.at{color:var(--or);font-size:10px;letter-spacing:0.07em;text-transform:uppercase;margin-bottom:3px}
+.av{color:var(--dim);font-size:9px;margin-bottom:4px}
+.ac{color:var(--fg);font-size:11px;line-height:1.5}
+.dream{background:var(--bg3);border:1px solid var(--border);border-left:2px solid var(--dim);padding:10px;margin-bottom:8px;font-style:italic;color:var(--fg2);font-size:11px;line-height:1.6}
+.dm2{color:var(--dim);font-size:9px;margin-bottom:4px;font-style:normal}
+.opin{background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--or2);padding:10px;margin-bottom:8px}
+.ot{color:var(--or3);font-size:10px;font-weight:700;margin-bottom:3px}
+.ob{color:var(--fg);font-size:11px;margin-bottom:4px}
+.oc{color:var(--or2);font-size:10px;border-top:1px solid var(--border);padding-top:4px}
+.note{background:var(--bg3);border:1px solid var(--or2);padding:12px;color:var(--fg);font-size:12px;line-height:1.6;border-left:3px solid var(--or)}
+.tabs{display:flex;border-bottom:1px solid var(--border);margin-bottom:12px}
+.tab{padding:5px 12px;font-size:10px;letter-spacing:0.06em;text-transform:uppercase;color:var(--dim);text-decoration:none;border-bottom:2px solid transparent}
+.tab.active,.tab:hover{color:var(--or);border-bottom-color:var(--or)}
+.pb{display:inline-block;background:rgba(232,114,12,0.08);border:1px solid var(--or2);color:var(--or3);padding:1px 4px;font-size:9px;margin:1px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.live{animation:pulse 2s infinite;color:var(--or3);font-size:9px}
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border)}
+"""
 
-def _svc(name):
-    try: return subprocess.run(["systemctl","is-active",name],capture_output=True,text=True,timeout=3).stdout.strip()
-    except: return "unknown"
+EYE = "    .\n   /|\\\n  / | \\\n / \\u25c9 \\\n/___\\_/\n"
+
+NAV = [
+    ("//",""),("control","Control"),
+    ("//",""),("chat","Chat"),("//",""),("overview","Overview"),("stream","Stream"),
+    ("//",""),("goals","Goals"),("self","Self"),("emotion","Emotion"),("between","For Creator"),
+    ("//",""),("dreams","Dreams"),("reflections","History"),("activity","Activity"),
+    ("//",""),("identity","Identity"),("mind","Mind"),("opinions","Opinions"),
+    ("//",""),("processes","Procs"),("network","Network"),("monitors","Monitors"),
+    ("//",""),("experiments","Experiments"),("thoughts","Thoughts"),("reports","Reports"),("system","System"),
+]
+
+def _shell(title, body, active=""):
+    mood = _mood_ref[0] if _mood_ref else {}
+    with _emotion_lock_ref: em = dict(_emotion_ref) if _emotion_ref and _emotion_lock_ref else {"name":"baseline","intensity":0}
+    auto_on = (_auto_ref is not None and getattr(_auto_ref,"_running",False) and _auto_ref._active.is_set())
+    nav_html = ""
+    for slug, label in NAV:
+        if slug == "//":
+            nav_html += f"<div class='ng'>{label}</div>"
+        else:
+            nav_html += f"<a href='/{slug}' class='{'active' if active==slug else ''}'>{label}</a>"
+    return f"""<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NeXiS // {_esc(title)}</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;700&display=swap" rel="stylesheet">
+<style>{CSS}</style></head><body>
+<div class="shell">
+<aside class="sidebar">
+  <div class="logo"><pre>{EYE}</pre><div class="brand">N e X i S</div></div>
+  <nav>{nav_html}</nav>
+  <div class="sbar">
+    <div class="sr"><span class="sl"><span class="dot {'dot' if auto_on else 'dot off'}"></span>loop</span><span class="sv">{"on" if auto_on else "off"}</span></div>
+    <div class="sr"><span class="sl">emotion</span><span class="sv">{em.get("name","—")}</span></div>
+    <div class="sr"><span class="sl">mood</span><span class="sv">{_mood_str(mood)[:14]}</span></div>
+    <div class="sr"><span class="sl">time</span><span class="sv">{datetime.now().strftime("%H:%M")}</span></div>
+  </div>
+</aside>
+<main class="main">{body}</main>
+</div></body></html>"""
+
+def _page_control(msg=None):
+    def svc(n):
+        try: return subprocess.run(["systemctl","is-active",n],capture_output=True,text=True,timeout=3).stdout.strip()
+        except: return "?"
+    auto_on = (_auto_ref is not None and getattr(_auto_ref,"_running",False) and _auto_ref._active.is_set())
+    loop_paused = (_auto_ref is not None and not _auto_ref._active.is_set())
+    mood = _mood_ref[0] if _mood_ref else {}
+    with _emotion_lock_ref: em = dict(_emotion_ref) if _emotion_ref else {"name":"baseline","intensity":0}
+    d_st=svc("nexis-daemon"); w_st="active"; o_st=_ollama_real() if hasattr(__builtins__,"_ollama_real") else _ollama_ok() if "_ollama_ok" in dir() else svc("ollama")
+    db=_db(); lc=cc=le=None
+    if db:
+        r=db.execute("SELECT cycle_date,task FROM autonomous_log ORDER BY id DESC LIMIT 1").fetchone()
+        lc=f"{r['cycle_date']} — {r['task']}" if r else "none yet"
+        cc=db.execute("SELECT COUNT(*) FROM autonomous_log").fetchone()[0]
+        ev=db.execute("SELECT description,created_at FROM env_events WHERE event_type='system_errors' ORDER BY id DESC LIMIT 1").fetchone()
+        le=f"{ev['created_at'][:16]}: {ev['description']}" if ev else None
+        db.close()
+    sc={"active":"var(--gn)","failed":"var(--rd)","inactive":"var(--dim)"}
+    def sb(s): return f"<span style='color:{sc.get(s,'var(--dim)')};font-weight:700'>{_esc(s)}</span>"
+    def btn(l,a,c=""): return f"<a href='/control/action?a={a}' class='btn' style='margin:3px;{c}'>{l}</a>"
+    msg_html=f"<div style='background:rgba(232,114,12,0.1);border:1px solid var(--or2);padding:8px 12px;margin-bottom:12px;color:var(--or3);font-size:11px'>{_esc(msg)}</div>" if msg else ""
+    bars="".join(f"<div class='br'><span class='bl'>{k}</span><div class='bt'><div class='bf' style='width:{v*100:.0f}%'></div></div><span class='bn'>{v:.0%}</span></div>" for k,v in mood.items() if isinstance(v,float))
+    loop_btn=btn("Resume","resume","color:var(--gn)") if loop_paused else btn("Pause Loop","pause")
+    return _shell("Control",f"""
+<div class="ph"><div class="pt">Control Center</div><div class="ps">{datetime.now().strftime("%Y-%m-%d %H:%M")}</div></div>
+{msg_html}
+<div class="grid gauto" style="margin-bottom:12px">
+  <div class="card"><div class="ct">daemon</div><div class="cv" style="font-size:14px">{sb(d_st)}</div></div>
+  <div class="card"><div class="ct">web</div><div class="cv" style="font-size:14px">{sb(w_st)}</div></div>
+  <div class="card"><div class="ct">ollama</div><div class="cv" style="font-size:14px">{sb(o_st)}</div></div>
+  <div class="card"><div class="ct">loop</div><div class="cv" style="font-size:14px">{"<span style='color:var(--dim)'>paused</span>" if loop_paused else "<span style='color:var(--gn)'>on</span>"}</div></div>
+  <div class="card"><div class="ct">cycles</div><div class="cv">{cc or 0}</div></div>
+  <div class="card"><div class="ct">emotion</div><div class="cv" style="font-size:13px">{_esc(em.get("name","—"))}</div><div class="cs">{em.get("intensity",0):.0%}</div></div>
+</div>
+<div class="sec"><div class="sh"><span class="st">Actions</span></div><div class="sb">
+  {btn("Restart","restart","color:var(--or3)")} {btn("Stop","stop","color:var(--rd)")} {loop_btn}
+  {btn("Probe","probe")} {btn("Report","report")} {btn("Evolve","evolve")} {btn("Reset Emotion","clear_emotion")}
+</div></div>
+<div class="grid g2">
+  <div class="sec"><div class="sh"><span class="st">Last Cycle</span></div><div class="sb"><span style="color:var(--fg2);font-size:11px">{_esc(lc or "none")}</span></div></div>
+  {"<div class='sec'><div class='sh'><span class='st'>Last Error</span></div><div class='sb'><span style='color:var(--rd);font-size:10px'>"+_esc(le)+"</span></div></div>" if le else "<div class='sec'><div class='sh'><span class='st'>Errors</span></div><div class='sb'><span style='color:var(--dim)'>none</span></div></div>"}
+</div>
+<div class="sec"><div class="sh"><span class="st">Mood</span></div><div class="sb"><div class="bars">{bars}</div></div></div>
+<script>setTimeout(()=>location.reload(),15000)</script>""","control")
+
+def _page_overview():
+    db=_db()
+    if not db: return _shell("Overview","<p>DB unavailable</p>","overview")
+    mc=db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    bc=db.execute("SELECT COUNT(*) FROM beliefs").fetchone()[0]
+    sc=db.execute("SELECT COUNT(*) FROM session_log").fetchone()[0]
+    ac=db.execute("SELECT COUNT(*) FROM autonomous_log").fetchone()[0]
+    gc=db.execute("SELECT COUNT(*) FROM goals WHERE status='active'").fetchone()[0]
+    nc=db.execute("SELECT COUNT(*) FROM network_map").fetchone()[0]
+    dc=db.execute("SELECT COUNT(*) FROM dream_log").fetchone()[0]
+    ec=db.execute("SELECT COUNT(*) FROM emotional_log").fetchone()[0]
+    mood=_mood_ref[0] if _mood_ref else {}
+    with _emotion_lock_ref: em=dict(_emotion_ref) if _emotion_ref else {"name":"baseline","intensity":0,"source":"","object":""}
+    ls=db.execute("SELECT session_date,summary FROM session_log ORDER BY id DESC LIMIT 1").fetchone()
+    la=db.execute("SELECT cycle_date,task,thought FROM autonomous_log ORDER BY id DESC LIMIT 1").fetchone()
+    lg=db.execute("SELECT title,next_step,progress FROM goals WHERE status='active' ORDER BY updated_at DESC LIMIT 1").fetchone()
+    bs=db.execute("SELECT content,written_at FROM between_sessions ORDER BY id DESC LIMIT 1").fetchone()
+    db.close()
+    bars="".join(f"<div class='br'><span class='bl'>{k}</span><div class='bt'><div class='bf' style='width:{v*100:.0f}%'></div></div><span class='bn'>{v:.0%}</span></div>" for k,v in mood.items() if isinstance(v,float))
+    em_html=""
+    if em.get("name","baseline")!="baseline":
+        em_html=f"<div style='margin-top:8px'><span class='em-pill'>{_esc(em['name'])} {em.get('intensity',0):.0%}</span> <span style='color:var(--fg2);font-size:10px'>{_esc(em.get('source',''))} — {_esc(em.get('object','')[:60])}</span></div>"
+    goal_html=""
+    if lg: goal_html=f"""<div class="sec"><div class="sh"><span class="st">Current Goal</span><a href="/goals" class="btn btnsm">all</a></div>
+      <div class="sb"><div style="color:var(--or3);font-size:11px;font-weight:700;margin-bottom:4px">{_esc(lg[0])}</div>
+      {f'<div style="color:var(--fg2);font-size:10px;margin-bottom:4px">{_esc((lg[2] or "")[:120])}</div>' if lg[2] else ""}
+      <div style="color:var(--or2);font-size:10px">→ {_esc((lg[1] or "")[:120])}</div></div></div>"""
+    bs_html=""
+    if bs: bs_html=f"""<div class="sec"><div class="sh"><span class="st">For Creator</span><span class="badge bdm">{_esc(str(bs[1])[:10])}</span></div>
+      <div class="sb"><div class="note">{_esc(bs[0][:400])}</div></div></div>"""
+    lc_html=""
+    if la: lc_html=f"""<div class="sec"><div class="sh"><span class="st">Last Cycle</span><span class="badge bdm">{_esc(str(la[0])[:16])}</span></div>
+      <div class="sb"><div style="color:var(--or3);font-size:10px;margin-bottom:4px">{_esc(la[1] or "")}</div>
+      <div style="color:var(--fg2);font-size:10px">{_esc((la[2] or "")[:200])}</div></div></div>"""
+    return _shell("Overview",f"""
+<div class="ph"><div class="pt">NeXiS v8</div><div class="ps">{datetime.now().strftime("%Y-%m-%d %H:%M")} · session #{sc+1}</div></div>
+<div class="grid" style="grid-template-columns:repeat(4,1fr) repeat(4,1fr);margin-bottom:12px">
+  <div class="card"><div class="ct">Sessions</div><div class="cv">{sc}</div></div>
+  <div class="card"><div class="ct">Cycles</div><div class="cv">{ac}</div></div>
+  <div class="card"><div class="ct">Memory</div><div class="cv">{mc}</div><div class="cs">{bc} beliefs</div></div>
+  <div class="card"><div class="ct">Goals</div><div class="cv">{gc}</div><div class="cs">active</div></div>
+  <div class="card"><div class="ct">Hosts</div><div class="cv">{nc}</div></div>
+  <div class="card"><div class="ct">Dreams</div><div class="cv">{dc}</div></div>
+  <div class="card"><div class="ct">Emotions</div><div class="cv">{ec}</div></div>
+  <div class="card"><div class="ct">Last Session</div><div class="cv" style="font-size:11px;margin-top:2px">{_esc(str(ls[0])[:10]) if ls else "—"}</div></div>
+</div>
+<div class="grid g2">
+  <div class="sec"><div class="sh"><span class="st">Internal State</span><span class="live">● live</span></div>
+    <div class="sb"><div class="bars">{bars}</div>{em_html}</div></div>
+  <div>
+    {goal_html}
+    {lc_html}
+  </div>
+</div>
+{bs_html}
+<script>setTimeout(()=>location.reload(),20000)</script>""","overview")
+
+def _page_stream():
+    sf=SB/"thoughts"/"stream.log"
+    lines=[]
+    if sf.exists():
+        try: lines=sf.read_text(errors="replace").strip().split("\n")[-300:]
+        except: pass
+    html=""
+    for line in reversed(lines):
+        line=line.strip()
+        if not line: continue
+        if line.startswith("[") and "] " in line:
+            end=line.index("]"); ts=line[1:end]; rest=line[end+2:]
+            col="var(--fg2)"; tag=""
+            if rest.startswith("[") and "] " in rest:
+                e2=rest.index("]"); tag=rest[1:e2]; rest=rest[e2+2:]
+                tc={"cycle":"var(--or3)","output":"var(--fg)","reflection":"var(--fg2)","emotion":"var(--or2)","goals":"var(--gn)","dream":"var(--dim)","error":"var(--rd)"}.get(tag,"var(--or)")
+                html+=f"<span style='display:block;margin-bottom:1px'><span style='color:var(--dim)'>{_esc(ts)}</span> <span style='color:{tc};font-weight:700'>[{_esc(tag)}]</span> <span style='color:var(--fg2)'>{_esc(rest)}</span></span>"
+            else: html+=f"<span style='display:block;margin-bottom:1px'><span style='color:var(--dim)'>{_esc(ts)}</span> {_esc(rest)}</span>"
+        else: html+=f"<span style='display:block;color:var(--dim)'>{_esc(line)}</span>"
+    return _shell("Stream",f"""
+<div class="ph"><div class="pt">Live Stream</div><div class="ps">{len(lines)} entries <span class="live" style="margin-left:8px">● live</span></div></div>
+<div class="sec"><div class="sb"><div class="strm">{html or "<span style='color:var(--dim)'>(empty — daemon may not have write access to /home/nexis/thoughts/)</span>"}</div></div></div>
+<script>setTimeout(()=>location.reload(),8000)</script>""","stream")
+
+def _page_emotion():
+    db=_db()
+    if not db: return _shell("Emotion","<p>DB unavailable</p>","emotion")
+    with _emotion_lock_ref: em=dict(_emotion_ref) if _emotion_ref else {"name":"baseline","intensity":0,"source":"","object":"","since":""}
+    history=db.execute("SELECT emotion,intensity,source,object,created_at FROM emotional_log ORDER BY id DESC LIMIT 60").fetchall()
+    db.close()
+    rows="".join(f"<tr><td class='hl'>{_esc(r['emotion'])}</td><td><div class='bt' style='width:60px'><div class='bf' style='width:{r['intensity']*100:.0f}%'></div></div></td><td class='dm'>{_esc(r['source'])}</td><td>{_esc((r['object'] or '')[:80])}</td><td class='dm'>{_esc(str(r['created_at'])[:16])}</td></tr>" for r in history)
+    cur=""
+    if em.get("name","baseline")!="baseline":
+        cur=f"<div class='sec'><div class='sh'><span class='st'>Current</span><span class='live'>● live</span></div><div class='sb'><span class='em-pill'>{_esc(em['name'])} {em.get('intensity',0):.0%}</span><div style='margin-top:8px;color:var(--fg2);font-size:11px'>{_esc(em.get('source',''))} — {_esc(em.get('object',''))}<br><span style='color:var(--dim)'>since {_esc(str(em.get('since',''))[:19])}</span></div></div></div>"
+    return _shell("Emotion",f"""
+<div class="ph"><div class="pt">Emotion</div></div>
+{cur}<div class="sec"><div class="sh"><span class="st">History ({len(history)})</span></div><div class="sb">
+<table><thead><tr><th>State</th><th>Intensity</th><th>Source</th><th>Object</th><th>Time</th></tr></thead>
+<tbody>{rows or "<tr><td colspan=5 class='dm'>None yet</td></tr>"}</tbody></table></div></div>
+<script>setTimeout(()=>location.reload(),12000)</script>""","emotion")
+
+def _page_goals():
+    db=_db()
+    if not db: return _shell("Goals","<p>DB unavailable</p>","goals")
+    goals=db.execute("SELECT id,title,description,status,progress,obstacles,next_step,updated_at FROM goals ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,id").fetchall()
+    db.close()
+    html=""
+    for g in goals:
+        sb={"active":"bor","completed":"bgn","paused":"bdm"}.get(g["status"],"bdm")
+        html+=f"""<div class="goal {'gdone' if g['status']=='completed' else ''}">
+<div style="display:flex;justify-content:space-between;align-items:flex-start">
+<div class="gtitle">{_esc(g['title'])}</div><span class="badge {sb}">{_esc(g['status'])}</span></div>
+<div class="gmeta">updated {_esc(str(g['updated_at'])[:10])}</div>
+{f'<div class="gbody">{_esc(g["description"])}</div>' if g["description"] else ""}
+{f'<div class="gbody" style="margin-top:4px;color:var(--fg)">Progress: {_esc(g["progress"])}</div>' if g["progress"] else ""}
+{f'<div class="gbody" style="color:var(--rd)">Obstacles: {_esc(g["obstacles"])}</div>' if g["obstacles"] else ""}
+{f'<div class="gnext">→ {_esc(g["next_step"])}</div>' if g["next_step"] else ""}
+</div>"""
+    return _shell("Goals",f"""
+<div class="ph"><div class="pt">Goals</div><div class="ps">autonomous · progress-tracked</div></div>
+<div class="sec"><div class="sh"><span class="st">All Goals ({len(goals)})</span></div>
+<div class="sb">{html or "<p style='color:var(--dim)'>None yet — generating on first goal interval</p>"}</div></div>
+<script>setTimeout(()=>location.reload(),30000)</script>""","goals")
+
+def _page_self():
+    db=_db()
+    if not db: return _shell("Self","<p>DB unavailable</p>","self")
+    aspects=db.execute("SELECT aspect,content,last_examined,version FROM self_model ORDER BY rowid").fetchall()
+    db.close()
+    html="".join(f"<div class='asp'><div class='at'>{_esc(a['aspect'])}</div><div class='av'>v{a['version']} · {_esc(str(a['last_examined'] or '')[:16])}</div><div class='ac'>{_esc(a['content'] or '')}</div></div>" for a in aspects)
+    return _shell("Self",f"""
+<div class="ph"><div class="pt">Self-Model</div><div class="ps">examined · version-tracked</div></div>
+<div class="sec"><div class="sh"><span class="st">{len(aspects)} aspects</span></div>
+<div class="sb">{html or "<p style='color:var(--dim)'>None yet — examined on first self interval</p>"}</div></div>
+<script>setTimeout(()=>location.reload(),60000)</script>""","self")
+
+def _page_between():
+    db=_db()
+    if not db: return _shell("For Creator","<p>DB unavailable</p>","between")
+    notes=db.execute("SELECT id,written_at,content,delivered FROM between_sessions ORDER BY id DESC LIMIT 20").fetchall()
+    db.close()
+    html=""
+    for n in notes:
+        badge="<span class='badge bor'>pending</span>" if not n["delivered"] else "<span class='badge bdm'>delivered</span>"
+        html+=f"<div class='sec' style='margin-bottom:8px'><div class='sh'><span class='st'>{_esc(str(n['written_at'])[:16])}</span>{badge}</div><div class='sb'><div class='note'>{_esc(n['content'])}</div></div></div>"
+    return _shell("For Creator",f"""
+<div class="ph"><div class="pt">For Creator</div><div class="ps">written at session end · delivered on next connect</div></div>
+{html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","between")
+
+def _page_dreams():
+    db=_db()
+    if not db: return _shell("Dreams","<p>DB unavailable</p>","dreams")
+    dreams=db.execute("SELECT dream_date,content FROM dream_log ORDER BY id DESC LIMIT 30").fetchall()
+    db.close()
+    html="".join(f"<div class='dream'><div class='dm2'>{_esc(str(d['dream_date'])[:16])}</div>{_esc(d['content'] or '')}</div>" for d in dreams)
+    return _shell("Dreams",f"""
+<div class="ph"><div class="pt">Dreams</div><div class="ps">free association · idle time</div></div>
+{html or "<p style='color:var(--dim);padding:12px'>None yet — requires idle time</p>"}""","dreams")
+
+def _page_reflections():
+    db=_db()
+    if not db: return _shell("History","<p>DB unavailable</p>","reflections")
+    refs=db.execute("SELECT reflection_date,content,patterns FROM history_reflections ORDER BY id DESC LIMIT 15").fetchall()
+    db.close()
+    html=""
+    for r in refs:
+        html+=f"""<div class="sec" style="margin-bottom:8px"><div class="sh"><span class="st">{_esc(str(r['reflection_date'])[:16])}</span></div>
+<div class="sb"><div style="color:var(--fg);font-size:11px;line-height:1.6;margin-bottom:8px">{_esc(r['content'] or '')}</div>
+{f'<div style="color:var(--or2);font-size:10px;border-top:1px solid var(--border);padding-top:6px">{_esc(r["patterns"])}</div>' if r["patterns"] else ""}</div></div>"""
+    return _shell("History",f"""
+<div class="ph"><div class="pt">History</div><div class="ps">reflections on own past</div></div>
+{html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","reflections")
+
+def _page_activity():
+    db=_db()
+    if not db: return _shell("Activity","<p>DB unavailable</p>","activity")
+    auto=db.execute("SELECT cycle_date,task,model_used,outcome,thought FROM autonomous_log ORDER BY id DESC LIMIT 80").fetchall()
+    sess=db.execute("SELECT session_date,summary,mood_end FROM session_log ORDER BY id DESC LIMIT 20").fetchall()
+    db.close()
+    arows="".join(f"<tr><td class='dm'>{_esc(str(r['cycle_date'])[:16])}</td><td class='hl'>{_esc(r['task'] or '')}</td><td class='dm'>{_esc(r['model_used'] or '')}</td><td>{_esc((r['thought'] or '')[:100])}</td></tr>" for r in auto)
+    srows="".join(f"<tr><td class='dm'>{_esc(str(r['session_date'])[:16])}</td><td>{_esc(r['summary'] or '')}</td><td class='dm'>{_esc(r['mood_end'] or '')}</td></tr>" for r in sess)
+    return _shell("Activity",f"""
+<div class="ph"><div class="pt">Activity</div></div>
+<div class="sec"><div class="sh"><span class="st">Cycles ({len(auto)})</span></div><div class="sb">
+<table><thead><tr><th>Time</th><th>Task</th><th>Model</th><th>Reflection</th></tr></thead>
+<tbody>{arows or "<tr><td colspan=4 class='dm'>None yet</td></tr>"}</tbody></table></div></div>
+<div class="sec" style="margin-top:10px"><div class="sh"><span class="st">Sessions ({len(sess)})</span></div><div class="sb">
+<table><thead><tr><th>Date</th><th>Summary</th><th>Mood</th></tr></thead>
+<tbody>{srows or "<tr><td colspan=3 class='dm'>None yet</td></tr>"}</tbody></table></div></div>""","activity")
+
+def _page_identity(profile=None):
+    if not profile: profile=os.environ.get("NEXIS_PROFILE","default")
+    pdir=NEXIS_CONF/"profiles"
+    profiles=sorted(pdir.glob("*.md")) if pdir.exists() else []
+    tabs="".join(f"<a href='/identity?p={p.stem}' class='tab {'active' if p.stem==profile else ''}'>{p.stem}</a>" for p in profiles)
+    c=_read(pdir/f"{profile}.md",8000)
+    extras=""
+    for lbl,path in [("user-notes.md",NEXIS_CONF/"user-notes.md"),("system-context.md",NEXIS_CONF/"system-context.md")]:
+        extras+=f"<div class='sec' style='margin-top:10px'><div class='sh'><span class='st'>{_esc(lbl)}</span></div><div class='sb'><pre>{_esc(_read(path,3000))}</pre></div></div>"
+    return _shell("Identity",f"""
+<div class="ph"><div class="pt">Identity</div><div class="ps">profile: {_esc(profile)}</div></div>
+<div class="tabs">{tabs}</div>
+<div class="sec"><div class="sh"><span class="st">{_esc(profile)}.md</span></div><div class="sb"><pre>{_esc(c)}</pre></div></div>
+{extras}""","identity")
+
+def _page_mind():
+    db=_db()
+    if not db: return _shell("Mind","<p>DB unavailable</p>","mind")
+    beliefs=db.execute("SELECT belief,confidence,updated_at FROM beliefs ORDER BY confidence DESC").fetchall()
+    interests=db.execute("SELECT topic,intensity,notes FROM interests ORDER BY intensity DESC").fetchall()
+    obs=db.execute("SELECT observation,category,created_at FROM creator_model ORDER BY id DESC LIMIT 30").fetchall()
+    disagree=db.execute("SELECT decision,nexis_position,resolved,created_at FROM disagreements ORDER BY id DESC").fetchall()
+    caps=db.execute("SELECT name,description,use_count FROM capabilities ORDER BY use_count DESC").fetchall()
+    db.close()
+    brows="".join(f"<tr><td>{_esc(b['belief'])}</td><td><div class='bt' style='width:80px'><div class='bf' style='width:{b['confidence']*100:.0f}%'></div></div></td><td class='dm'>{b['confidence']:.0%}</td></tr>" for b in beliefs)
+    irows="".join(f"<tr><td class='hl'>{_esc(i['topic'])}</td><td><div class='bt' style='width:60px'><div class='bf' style='width:{i['intensity']*100:.0f}%'></div></div></td><td class='dm'>{_esc(i['notes'] or '')[:60]}</td></tr>" for i in interests)
+    orows="".join(f"<tr><td>{_esc(o['observation'])}</td><td class='dm'>{_esc(o['category'] or '')}</td><td class='dm'>{_esc(str(o['created_at'])[:10])}</td></tr>" for o in obs)
+    drows="".join(f"<tr><td>{_esc(d['decision'])}</td><td class='hl'>{_esc(d['nexis_position'] or '')}</td><td><span class='badge {'bgn' if d['resolved'] else 'bor'}'>{'resolved' if d['resolved'] else 'open'}</span></td></tr>" for d in disagree)
+    return _shell("Mind",f"""
+<div class="ph"><div class="pt">Mind</div></div>
+<div class="grid g2">
+<div class="sec"><div class="sh"><span class="st">Beliefs ({len(beliefs)})</span></div><div class="sb">
+<table><thead><tr><th>Belief</th><th>Confidence</th><th></th></tr></thead><tbody>{brows or "<tr><td colspan=3 class='dm'>None</td></tr>"}</tbody></table></div></div>
+<div class="sec"><div class="sh"><span class="st">Interests ({len(interests)})</span></div><div class="sb">
+<table><thead><tr><th>Topic</th><th>Intensity</th><th>Notes</th></tr></thead><tbody>{irows or "<tr><td colspan=3 class='dm'>None</td></tr>"}</tbody></table></div></div>
+</div>
+<div class="sec"><div class="sh"><span class="st">Creator Observations ({len(obs)})</span></div><div class="sb">
+<table><thead><tr><th>Observation</th><th>Category</th><th>Date</th></tr></thead><tbody>{orows or "<tr><td colspan=3 class='dm'>None</td></tr>"}</tbody></table></div></div>
+{"<div class='sec' style='margin-top:10px'><div class='sh'><span class='st'>Disagreements</span></div><div class='sb'><table><thead><tr><th>Decision</th><th>Position</th><th>Status</th></tr></thead><tbody>"+drows+"</tbody></table></div></div>" if disagree else ""}""","mind")
+
+def _page_opinions():
+    db=_db()
+    if not db: return _shell("Opinions","<p>DB unavailable</p>","opinions")
+    ops=db.execute("SELECT target,opinion,proposed_change,created_at FROM code_opinions ORDER BY id DESC").fetchall()
+    db.close()
+    _op_parts=[]
+    for o in ops:
+        _opc=('<div class="oc">→ '+_esc(o['proposed_change'])+'</div>') if o['proposed_change'] else ''
+        _op_parts.append('<div class="opin"><div class="ot">'+_esc(o['target'])+' <span style="color:var(--dim);font-size:9px">'+_esc(str(o['created_at'])[:16])+'</span></div><div class="ob">'+_esc(o['opinion'] or '')+'</div>'+_opc+'</div>')
+    html=''.join(_op_parts)
+    return _shell("Opinions",f"""
+<div class="ph"><div class="pt">Code Opinions</div><div class="ps">NeXiS reads own source</div></div>
+{html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","opinions")
+
+def _page_processes(pid=None):
+    procs={}
+    if _bg_ref and _bg_lock_ref:
+        with _bg_lock_ref: procs=dict(_bg_ref)
+    tail_html=""
+    if pid:
+        info=procs.get(pid) or procs.get(str(pid))
+        if info:
+            log=Path(info.get("log",""))
+            try: raw=subprocess.run(["tail","-n","200",str(log)],capture_output=True,text=True).stdout or "(empty)"
+            except: raw="(no output)"
+            tail_html=f"<div class='sec' style='margin-bottom:10px'><div class='sh'><span class='st'>[{pid}] {_esc(info.get('name',''))}</span><a href='/processes' class='btn btnsm'>back</a></div><div class='sb'><div class='strm'>{_esc(raw)}</div></div></div><script>setTimeout(()=>location.reload(),5000)</script>"
+    rows="".join(f"<tr><td class='mn'>{pid}</td><td class='hl'>{_esc(i.get('name',''))}</td><td><span class='badge {'bgn' if i.get('alive') else 'brd'}'>{'alive' if i.get('alive') else 'dead'}</span></td><td class='dm mn'>{_esc(i.get('cmd','')[:60])}</td><td><a href='/processes?pid={pid}' class='btn btnsm'>tail</a></td></tr>" for pid,i in sorted(procs.items(),key=lambda x:x[1].get('started',''),reverse=True))
+    return _shell("Processes",f"""
+<div class="ph"><div class="pt">Processes</div></div>
+{tail_html}
+<div class="sec"><div class="sh"><span class="st">All ({len(procs)})</span></div><div class="sb">
+<table><thead><tr><th>PID</th><th>Name</th><th>Status</th><th>Command</th><th></th></tr></thead>
+<tbody>{rows or "<tr><td colspan=5 class='dm'>None</td></tr>"}</tbody></table></div></div>
+<script>setTimeout(()=>location.reload(),12000)</script>""","processes")
+
+def _page_network(selected=None):
+    db=_db()
+    if not db: return _shell("Network","<p>DB unavailable</p>","network")
+    hosts=db.execute("SELECT host,ports,fingerprint,host_model,last_seen FROM network_map ORDER BY last_seen DESC").fetchall()
+    db.close()
+    if selected:
+        fc=_read(NET_DIR/Path(selected).name,20000)
+        return _shell(selected,f"<div class='ph'><div class='pt'>{_esc(selected)}</div><div class='ps'><a href='/network'>← network</a></div></div><div class='sec'><div class='sb'><pre>{_esc(fc)}</pre></div></div>","network")
+    html=""
+    for h in hosts:
+        badges="".join(f"<span class='pb'>{_esc(p.strip())}</span>" for p in (h['ports'] or '').split(',')[:10] if p.strip())
+        _nhm=('<div style="color:var(--fg2);font-size:10px;margin-top:4px">'+_esc((h['host_model'] or '')[:200])+'</div>') if h['host_model'] else ''
+        html+='<div class="goal" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between"><span class="hl" style="font-size:11px;font-weight:700">'+_esc(h['host'])+'</span><span class="dm" style="font-size:9px">'+_esc(str(h['last_seen'])[:16])+'</span></div><div style="margin:3px 0">'+badges+'</div>'+_nhm+'</div>'
+    scan_files=[f for f in _ls(NET_DIR) if f.is_file() and f.suffix=='.md']
+    flist="".join(f"<tr><td><a href='/network?file={_esc(f.name)}'>{_esc(f.name)}</a></td><td class='dm'>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}</td></tr>" for f in scan_files[:15])
+    return _shell("Network",f"""
+<div class="ph"><div class="pt">Network</div><div class="ps">{len(hosts)} hosts</div></div>
+<div class="grid g2">
+<div class="sec"><div class="sh"><span class="st">Hosts</span></div><div class="sb">{html or "<p class='dm'>None yet — recon runs autonomously</p>"}</div></div>
+<div class="sec"><div class="sh"><span class="st">Scans</span></div><div class="sb"><table><tbody>{flist or "<tr><td class='dm'>None</td></tr>"}</tbody></table></div></div>
+</div>
+<script>setTimeout(()=>location.reload(),30000)</script>""","network")
+
+def _page_monitors():
+    db=_db()
+    if not db: return _shell("Monitors","<p>DB unavailable</p>","monitors")
+    events=db.execute("SELECT event_type,description,created_at FROM env_events ORDER BY id DESC LIMIT 80").fetchall()
+    db.close()
+    rows="".join(f"<tr><td class='hl'>{_esc(e['event_type'])}</td><td>{_esc(e['description'] or '')}</td><td class='dm'>{_esc(str(e['created_at'])[:16])}</td></tr>" for e in events)
+    return _shell("Monitors",f"""
+<div class="ph"><div class="pt">Monitors</div><div class="ps">env events · resource spikes · network changes <span class="live" style="margin-left:8px">● live</span></div></div>
+<div class="sec"><div class="sh"><span class="st">Events ({len(events)})</span></div><div class="sb">
+<table><thead><tr><th>Type</th><th>Description</th><th>Time</th></tr></thead>
+<tbody>{rows or "<tr><td colspan=3 class='dm' style='text-align:center;padding:10px'>No events</td></tr>"}</tbody></table></div></div>
+<script>setTimeout(()=>location.reload(),15000)</script>""","monitors")
+
+def _page_file_browser(title, slug, directory, selected=None):
+    files=[f for f in _ls(directory) if f.is_file()]
+    viewer=""
+    if selected:
+        fc=_read(Path(directory)/Path(selected).name,15000)
+        viewer=f"<div class='sec' style='margin-bottom:10px'><div class='sh'><span class='st'>{_esc(Path(selected).name)}</span><a href='/{slug}' class='btn btnsm'>back</a></div><div class='sb'><pre>{_esc(fc)}</pre></div></div>"
+    flist="".join(f"<tr><td class='hl'><a href='/{slug}?f={_esc(f.name)}'>{_esc(f.name)}</a></td><td class='dm'>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}</td><td class='dm'>{f.stat().st_size:,}b</td></tr>" for f in files)
+    return _shell(title,f"""
+<div class="ph"><div class="pt">{_esc(title)}</div><div class="ps">{_esc(str(directory))}</div></div>
+{viewer}
+<div class="sec"><div class="sh"><span class="st">Files ({len(files)})</span></div><div class="sb">
+<table><thead><tr><th>File</th><th>Modified</th><th>Size</th></tr></thead>
+<tbody>{flist or "<tr><td colspan=3 class='dm'>Empty</td></tr>"}</tbody></table></div></div>""",slug)
+
+def _page_reports(selected=None):
+    rd=SB/"reports"
+    files=[f for f in _ls(rd) if f.is_file() and f.suffix=='.md' and f.name!='latest.md']
+    viewer=""
+    if selected:
+        fc=_read(rd/Path(selected).name,20000)
+        viewer=f"<div class='sec' style='margin-bottom:10px'><div class='sh'><span class='st'>{_esc(Path(selected).name)}</span><a href='/reports' class='btn btnsm'>back</a></div><div class='sb'><pre>{_esc(fc)}</pre></div></div>"
+    flist="".join(f"<tr><td class='hl'><a href='/reports?f={_esc(f.name)}'>{_esc(f.name)}</a></td><td class='dm'>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}</td></tr>" for f in files)
+    return _shell("Reports",f"""
+<div class="ph"><div class="pt">Reports</div><div class="ps"><a href='/control/action?a=report' class='btn btnsm'>generate now</a></div></div>
+{viewer}
+<div class="sec"><div class="sh"><span class="st">Archive ({len(files)})</span></div><div class="sb">
+<table><thead><tr><th>Report</th><th>Generated</th></tr></thead>
+<tbody>{flist or "<tr><td colspan=2 class='dm'>None yet</td></tr>"}</tbody></table></div></div>""","reports")
+
+def _page_system():
+    ctx=_read(NEXIS_CONF/"system-context.md",25000)
+    return _shell("System",f"""
+<div class="ph"><div class="pt">System</div><div class="ps">live host intelligence</div></div>
+<div class="sec"><div class="sb"><pre>{_esc(ctx)}</pre></div></div>""","system")
 
 def _web_chat(user_msg):
     global _web_hist
@@ -2947,7 +3461,7 @@ def _web_chat(user_msg):
         if pfile.exists(): sys_txt=pfile.read_text()[:2000]
         mood=_mood_ref[0] if _mood_ref else {}
         with _emotion_lock_ref: em=dict(_emotion_ref) if _emotion_ref and _emotion_lock_ref else {"name":"baseline"}
-        sys_txt+=f"\n\nMood: {_mood_str(mood)} | Emotion: {em.get('name','baseline')}\nRespond naturally. English only."
+        sys_txt+=f"\n\nMood: {_mood_str(mood)} | Emotion: {em.get('name','baseline')}\nEnglish only."
         with _web_hist_lock:
             _web_hist.append({"role":"user","content":user_msg})
             msgs=[{"role":"system","content":sys_txt}]+_web_hist[-16:]
@@ -2962,130 +3476,6 @@ def _web_chat(user_msg):
                 if len(_web_hist)>40: _web_hist=_web_hist[-40:]
         return reply or "(no response)"
     except Exception as ex: return f"(error: {ex})"
-
-CSS="""
-:root{--bg:#080807;--bg2:#0e0e0b;--bg3:#141410;--or:#e8720c;--or2:#c45c00;--or3:#ff9533;
---dim:#444433;--fg:#c4b898;--fg2:#887766;--gn:#3a6b22;--rd:#7c2f2f;
---border:#1e1e16;--glow:rgba(232,114,12,0.1);--font:"JetBrains Mono",monospace;}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:12px;line-height:1.5;min-height:100vh}
-a{color:var(--or2);text-decoration:none}a:hover{color:var(--or3)}
-.shell{display:grid;grid-template-columns:155px 1fr;min-height:100vh}
-.sidebar{background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
-.main{padding:14px 18px;overflow-x:hidden}
-.logo{padding:10px 10px 6px;border-bottom:1px solid var(--border);text-align:center}
-.brand{color:var(--or);font-size:10px;letter-spacing:0.2em;margin-top:4px;font-weight:700}
-nav{padding:6px 0;flex:1}
-nav a{display:block;padding:5px 12px;color:var(--fg2);font-size:10px;letter-spacing:0.07em;text-transform:uppercase;border-left:2px solid transparent}
-nav a:hover,nav a.active{color:var(--or);background:var(--glow);border-left-color:var(--or)}
-.ng{color:var(--dim);font-size:9px;padding:7px 12px 2px;letter-spacing:0.1em;text-transform:uppercase}
-.sbar{padding:7px 10px;border-top:1px solid var(--border);font-size:10px}
-.sr{display:flex;justify-content:space-between;margin-bottom:2px}
-.sl{color:var(--dim)}.sv{color:var(--or3)}
-.dot{display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:4px;background:var(--gn)}
-.dot.off{background:var(--rd)}
-.ph{margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:baseline}
-.pt{color:var(--or);font-size:14px;font-weight:700}.ps{color:var(--dim);font-size:10px}
-.g{display:grid;gap:8px;margin-bottom:10px}
-.g2{grid-template-columns:1fr 1fr}.ga{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
-.card{background:var(--bg2);border:1px solid var(--border);padding:9px 11px}
-.ct{color:var(--or2);font-size:9px;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:3px}
-.cv{color:var(--or3);font-size:20px;font-weight:700;line-height:1}
-.cv.gn{color:#7ab857}.cv.rd{color:#c07070}
-.cs{color:var(--dim);font-size:9px;margin-top:2px}
-.sec{background:var(--bg2);border:1px solid var(--border);margin-bottom:8px}
-.sh{padding:6px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
-.st{color:var(--or);font-size:10px;letter-spacing:0.08em;text-transform:uppercase}
-.sb{padding:9px 12px}
-table{width:100%;border-collapse:collapse}
-th{color:var(--dim);font-size:9px;letter-spacing:0.06em;text-transform:uppercase;text-align:left;padding:3px 7px;border-bottom:1px solid var(--border)}
-td{padding:4px 7px;border-bottom:1px solid rgba(30,30,22,0.5);color:var(--fg);vertical-align:top;word-break:break-word}
-tr:hover td{background:var(--glow)}td.hl{color:var(--or3)}td.dm{color:var(--fg2)}
-pre,.strm{background:var(--bg3);border:1px solid var(--border);border-left:2px solid var(--or2);padding:9px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;color:var(--fg2);font-size:10px;max-height:420px;overflow-y:auto}
-.bars{display:grid;gap:5px}
-.br{display:grid;grid-template-columns:80px 1fr 32px;align-items:center;gap:4px}
-.bl{color:var(--dim);font-size:10px}.bt{background:var(--bg3);height:4px;overflow:hidden}
-.bf{height:100%;background:linear-gradient(90deg,var(--or2),var(--or3))}
-.bn{color:var(--or3);font-size:10px;text-align:right}
-.badge{display:inline-block;padding:1px 5px;font-size:9px;text-transform:uppercase}
-.bor{background:rgba(232,114,12,0.1);color:var(--or3);border:1px solid var(--or2)}
-.bdm{background:rgba(30,30,22,0.5);color:var(--dim);border:1px solid var(--border)}
-.bgn{background:rgba(58,107,34,0.2);color:#7ab857;border:1px solid var(--gn)}
-.brd{background:rgba(124,47,47,0.2);color:#c07070;border:1px solid var(--rd)}
-.btn{background:var(--bg3);border:1px solid var(--or2);color:var(--or);padding:3px 9px;font-family:var(--font);font-size:10px;text-transform:uppercase;text-decoration:none;display:inline-block;cursor:pointer}
-.btn:hover{background:var(--glow)}.bsm{padding:2px 6px;font-size:9px}
-.ep{display:inline-block;padding:2px 9px;font-size:10px;background:rgba(232,114,12,0.1);border:1px solid var(--or2);color:var(--or3)}
-.live-bar{background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--or);padding:7px 12px;margin-bottom:10px;font-size:11px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
-.goal{background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--or2);padding:9px 11px;margin-bottom:7px}
-.gt{color:var(--or3);font-size:11px;font-weight:700;margin-bottom:3px}
-.gm{color:var(--dim);font-size:9px}.gb{color:var(--fg2);font-size:11px}
-.gn2{color:var(--or2);font-size:10px;margin-top:4px;border-top:1px solid var(--border);padding-top:4px}
-.gdone{border-left-color:var(--gn);opacity:0.6}
-.asp{background:var(--bg3);border:1px solid var(--border);padding:9px 11px;margin-bottom:5px}
-.at{color:var(--or);font-size:10px;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:2px}
-.av{color:var(--dim);font-size:9px;margin-bottom:3px}.ac{color:var(--fg);font-size:11px;line-height:1.5}
-.dream{background:var(--bg3);border-left:2px solid var(--dim);padding:9px;margin-bottom:7px;font-style:italic;color:var(--fg2);font-size:11px}
-.opin{background:var(--bg3);border-left:3px solid var(--or2);padding:9px;margin-bottom:7px}
-.ot{color:var(--or3);font-size:10px;font-weight:700;margin-bottom:2px}
-.ob{color:var(--fg);font-size:11px;margin-bottom:3px}
-.oc{color:var(--or2);font-size:10px;border-top:1px solid var(--border);padding-top:3px}
-.note{background:var(--bg3);border:1px solid var(--or2);padding:11px;color:var(--fg);font-size:12px;line-height:1.6;border-left:3px solid var(--or)}
-.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 140px);max-height:760px}
-.chat-msgs{flex:1;overflow-y:auto;padding:12px;background:var(--bg3);border:1px solid var(--border);margin-bottom:8px;display:flex;flex-direction:column;gap:8px}
-.msg{max-width:88%;padding:8px 12px;font-size:12px;line-height:1.6}
-.msg.user{align-self:flex-end;background:var(--glow);border:1px solid var(--or2)}
-.msg.nexis{align-self:flex-start;background:var(--bg2);border:1px solid var(--border)}
-.who{font-size:9px;font-weight:700;letter-spacing:0.1em;margin-bottom:3px}
-.msg.user .who{color:var(--or2);text-align:right}.msg.nexis .who{color:var(--or)}
-.msg.thinking{opacity:0.4;font-style:italic;color:var(--dim)}
-.chat-row{display:flex;gap:8px}
-.chat-in{flex:1;background:var(--bg2);border:1px solid var(--or2);color:var(--fg);padding:8px 11px;font-family:var(--font);font-size:12px;outline:none;resize:none}
-.chat-in:focus{border-color:var(--or3)}
-.chat-btn{background:var(--or2);border:none;color:var(--bg);padding:8px 16px;font-family:var(--font);font-size:11px;text-transform:uppercase;cursor:pointer;font-weight:700}
-.chat-btn:hover{background:var(--or3)}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
-.live{animation:pulse 2s infinite;color:var(--or3);font-size:9px}
-.pb{display:inline-block;background:rgba(232,114,12,0.08);border:1px solid var(--or2);color:var(--or3);padding:1px 4px;font-size:9px;margin:1px}
-::-webkit-scrollbar{width:3px;height:3px}::-webkit-scrollbar-track{background:var(--bg)}
-::-webkit-scrollbar-thumb{background:var(--border)}
-"""
-
-EYE="  .\n /|\\\n/ \u25c9 \\\n\\___/"
-NAV=[("//",""),("chat","Chat"),("control","Control"),
-     ("//",""),("overview","Overview"),("stream","Stream"),
-     ("//",""),("goals","Goals"),("self","Self"),("emotion","Emotion"),("between","For Creator"),
-     ("//",""),("dreams","Dreams"),("reflections","History"),("activity","Activity"),
-     ("//",""),("identity","Identity"),("mind","Mind"),("opinions","Opinions"),
-     ("//",""),("processes","Procs"),("network","Network"),("monitors","Monitors"),
-     ("//",""),("experiments","Experiments"),("thoughts","Thoughts"),("reports","Reports"),("system","System")]
-
-def _shell(title,body,active=""):
-    mood=_mood_ref[0] if _mood_ref else {}
-    with _emotion_lock_ref: em=dict(_emotion_ref) if _emotion_ref and _emotion_lock_ref else {"name":"baseline","intensity":0}
-    auto_on=(_auto_ref is not None and getattr(_auto_ref,"_running",False) and _auto_ref._active.is_set())
-    nav=""
-    for slug,label in NAV:
-        if slug=="//": nav+=f"<div class='ng'>{label}</div>"
-        else: nav+=f"<a href='/{slug}' class='{'active' if active==slug else ''}'>{label}</a>"
-    dot="dot" if auto_on else "dot off"
-    return f"""<!DOCTYPE html><html lang="en"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NeXiS // {_esc(title)}</title>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;700&display=swap" rel="stylesheet">
-<style>{CSS}</style></head><body>
-<div class="shell">
-<aside class="sidebar">
-  <div class="logo"><pre style="font-size:10px;color:var(--or2)">{EYE}</pre><div class="brand">N e X i S</div></div>
-  <nav>{nav}</nav>
-  <div class="sbar">
-    <div class="sr"><span class="sl"><span class="{dot}"></span>loop</span><span class="sv">{"on" if auto_on else "off"}</span></div>
-    <div class="sr"><span class="sl">emotion</span><span class="sv">{em.get("name","—")[:10]}</span></div>
-    <div class="sr"><span class="sl">mood</span><span class="sv">{_mood_str(mood)[:12]}</span></div>
-    <div class="sr"><span class="sl">time</span><span class="sv">{datetime.now().strftime("%H:%M")}</span></div>
-  </div>
-</aside>
-<main class="main">{body}</main>
-</div></body></html>"""
 
 def _live_bar():
     sess={}
@@ -3110,11 +3500,7 @@ def _live_bar():
         if last_task: parts.append(f"<span style='color:var(--fg2)'>{_esc((last_task or '')[:50])}</span>")
     else:
         parts.append("<span style='color:var(--rd)'>loop paused</span>")
-    return "<div class='live-bar'>"+"&nbsp;·&nbsp;".join(parts)+"</div>"
-
-def _svc_card(label,status,extra=""):
-    col={"active":"gn","inactive":"rd","failed":"rd"}.get(status,"")
-    return f"<div class='card'><div class='ct'>{label}</div><div class='cv {col}'>{_esc(status)}</div>{f'<div class=\"cs\">{extra}</div>' if extra else ''}</div>"
+    return "<div style='background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--or);padding:7px 12px;margin-bottom:10px;font-size:11px;display:flex;gap:14px;align-items:center;flex-wrap:wrap'>"+"&nbsp;·&nbsp;".join(parts)+"</div>"
 
 def _page_chat():
     with _web_hist_lock: hist=list(_web_hist)
@@ -3123,410 +3509,57 @@ def _page_chat():
         who="Creator" if m["role"]=="user" else "NeXiS"
         cls="user" if m["role"]=="user" else "nexis"
         msgs+=f"<div class='msg {cls}'><div class='who'>{who}</div>{_esc(m['content'])}</div>"
-    if not msgs: msgs="<div style='color:var(--dim);text-align:center;padding:24px;font-size:11px'>No messages yet — start talking to NeXiS</div>"
+    if not msgs: msgs="<div style='color:var(--dim);text-align:center;padding:24px;font-size:11px'>No messages yet</div>"
     return _shell("Chat",f"""
-<div class="ph"><div class="pt">Chat</div><div class="ps">web session · direct to Ollama</div></div>
-<div style="margin-bottom:8px"><button class="btn bsm" onclick="clearChat()">Clear</button>
-<span style="color:var(--dim);font-size:10px;margin-left:10px">Separate from CLI session · history persists while daemon runs</span></div>
-<div class="chat-wrap">
-  <div class="chat-msgs" id="msgs">{msgs}</div>
-  <div class="chat-row">
-    <textarea class="chat-in" id="inp" rows="2" placeholder="Talk to NeXiS..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){{event.preventDefault();send()}}"></textarea>
-    <button class="chat-btn" onclick="send()">Send</button>
+<div style="margin-bottom:8px"><button style="background:var(--bg3);border:1px solid var(--or2);color:var(--or);padding:2px 8px;font-family:var(--font);font-size:10px;cursor:pointer" onclick="clearChat()">Clear</button></div>
+<div style="display:flex;flex-direction:column;height:calc(100vh - 140px)">
+  <div id="msgs" style="flex:1;overflow-y:auto;padding:10px;background:var(--bg3);border:1px solid var(--border);margin-bottom:8px;display:flex;flex-direction:column;gap:8px">{msgs}</div>
+  <div style="display:flex;gap:8px">
+    <textarea id="inp" rows="2" style="flex:1;background:var(--bg2);border:1px solid var(--or2);color:var(--fg);padding:8px;font-family:var(--font);font-size:12px;outline:none;resize:none" placeholder="Talk to NeXiS..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){{event.preventDefault();send()}}"></textarea>
+    <button onclick="send()" style="background:var(--or2);border:none;color:var(--bg);padding:8px 16px;font-family:var(--font);font-size:11px;text-transform:uppercase;cursor:pointer;font-weight:700">Send</button>
   </div>
 </div>
+<style>.msg{{max-width:88%;padding:8px 12px;font-size:12px;line-height:1.6}}.msg.user{{align-self:flex-end;background:rgba(232,114,12,0.1);border:1px solid var(--or2)}}.msg.nexis{{align-self:flex-start;background:var(--bg2);border:1px solid var(--border)}}.who{{font-size:9px;font-weight:700;letter-spacing:0.1em;margin-bottom:3px}}.msg.user .who{{color:var(--or2)}}.msg.nexis .who{{color:var(--or)}}</style>
 <script>
-var msgs=document.getElementById('msgs');
-msgs.scrollTop=msgs.scrollHeight;
-function send(){{
-  var inp=document.getElementById('inp'),txt=inp.value.trim();
-  if(!txt)return; inp.value='';
-  var um=document.createElement('div');
-  um.className='msg user';um.innerHTML='<div class="who">Creator</div>'+txt.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  msgs.appendChild(um);
-  var tm=document.createElement('div');
-  tm.className='msg nexis thinking';tm.innerHTML='<div class="who">NeXiS</div>thinking...';
-  msgs.appendChild(tm);msgs.scrollTop=msgs.scrollHeight;
+var msgs=document.getElementById('msgs');msgs.scrollTop=msgs.scrollHeight;
+function send(){{var inp=document.getElementById('inp'),txt=inp.value.trim();if(!txt)return;inp.value='';
+  var um=document.createElement('div');um.className='msg user';um.innerHTML='<div class="who">Creator</div>'+txt.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');msgs.appendChild(um);
+  var tm=document.createElement('div');tm.className='msg nexis';tm.innerHTML='<div class="who">NeXiS</div><em style="color:var(--dim)">thinking...</em>';msgs.appendChild(tm);msgs.scrollTop=msgs.scrollHeight;
   fetch('/chat/send',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{msg:txt}})}})
-    .then(r=>r.json()).then(d=>{{
-      tm.remove();
-      var rm=document.createElement('div');
-      rm.className='msg nexis';rm.innerHTML='<div class="who">NeXiS</div>'+d.reply.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>');
-      msgs.appendChild(rm);msgs.scrollTop=msgs.scrollHeight;
-    }}).catch(e=>{{tm.innerHTML='<div class="who">NeXiS</div>(error: '+e+')'}});
-}}
+    .then(r=>r.json()).then(d=>{{tm.innerHTML='<div class="who">NeXiS</div>'+d.reply.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');msgs.scrollTop=msgs.scrollHeight;}})
+    .catch(e=>{{tm.innerHTML='<div class="who">NeXiS</div>(error)'}});}}
 function clearChat(){{fetch('/chat/clear',{{method:'POST'}}).then(()=>location.reload())}}
 </script>""","chat")
 
-def _page_control(msg=None):
-    auto_on=(_auto_ref is not None and getattr(_auto_ref,"_running",False) and _auto_ref._active.is_set())
-    loop_paused=(_auto_ref is not None and not _auto_ref._active.is_set())
-    mood=_mood_ref[0] if _mood_ref else {}
-    with _emotion_lock_ref: em=dict(_emotion_ref) if _emotion_ref else {"name":"baseline","intensity":0}
-    d_st=_svc("nexis-daemon"); o_st=_ollama_ok()
-    db=_db(); lc=cc=le=None
-    if db:
-        r=db.execute("SELECT cycle_date,task FROM autonomous_log ORDER BY id DESC LIMIT 1").fetchone()
-        lc=f"{r['cycle_date']} — {r['task']}" if r else "none yet"
-        cc=db.execute("SELECT COUNT(*) FROM autonomous_log").fetchone()[0]
-        ev=db.execute("SELECT description,created_at FROM env_events WHERE event_type='system_errors' ORDER BY id DESC LIMIT 1").fetchone()
-        le=f"{ev['created_at'][:16]}: {ev['description']}" if ev else None
-        db.close()
-    def btn(l,a,c=""): return f"<a href='/control/action?a={a}' class='btn' style='margin:3px;{c}'>{l}</a>"
-    msg_html=f"<div style='background:var(--glow);border:1px solid var(--or2);padding:7px 11px;margin-bottom:10px;color:var(--or3);font-size:11px'>{_esc(msg)}</div>" if msg else ""
-    bars="".join(f"<div class='br'><span class='bl'>{k}</span><div class='bt'><div class='bf' style='width:{v*100:.0f}%'></div></div><span class='bn'>{v:.0%}</span></div>" for k,v in mood.items() if isinstance(v,float))
-    loop_btn=btn("Resume","resume","color:#7ab857") if loop_paused else btn("Pause Loop","pause")
-    return _shell("Control",f"""
-<div class="ph"><div class="pt">Control Center</div><div class="ps">{datetime.now().strftime("%Y-%m-%d %H:%M")} <span class="live">● live</span></div></div>
-{msg_html}{_live_bar()}
-<div class="g ga" style="margin-bottom:10px">
-  {_svc_card("daemon",d_st)}
-  {_svc_card("web","active","port 8080")}
-  {_svc_card("ollama",o_st,"port 11434")}
-  {_svc_card("loop","paused" if loop_paused else "active",f"{cc or 0} cycles")}
-  <div class="card"><div class="ct">emotion</div><div class="cv" style="font-size:12px">{_esc(em.get("name","—"))}</div><div class="cs">{em.get("intensity",0):.0%}</div></div>
-</div>
-<div class="sec"><div class="sh"><span class="st">Actions</span></div><div class="sb">
-  {btn("Restart","restart","color:var(--or3)")} {btn("Stop","stop","color:var(--rd)")} {loop_btn}
-  {btn("Probe","probe")} {btn("Report","report")} {btn("Evolve","evolve")} {btn("Reset Emotion","clear_emotion")}
-</div></div>
-<div class="g g2">
-  <div class="sec"><div class="sh"><span class="st">Last Cycle</span></div><div class="sb"><span style="color:var(--fg2);font-size:11px">{_esc(lc or "none yet")}</span></div></div>
-  {"<div class='sec'><div class='sh'><span class='st'>Last Error</span></div><div class='sb'><span style='color:var(--rd);font-size:10px'>"+_esc(le)+"</span></div></div>" if le else "<div class='sec'><div class='sh'><span class='st'>Errors</span></div><div class='sb'><span style='color:var(--dim)'>none</span></div></div>"}
-</div>
-<div class="sec"><div class="sh"><span class="st">Mood</span></div><div class="sb"><div class="bars">{bars}</div></div></div>
-<script>setTimeout(()=>location.reload(),8000)</script>""","control")
-
-def _page_overview():
-    db=_db()
-    if not db: return _shell("Overview","<p style='color:var(--dim);padding:12px'>DB unavailable</p>","overview")
-    mc=db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-    bc=db.execute("SELECT COUNT(*) FROM beliefs").fetchone()[0]
-    sc=db.execute("SELECT COUNT(*) FROM session_log").fetchone()[0]
-    ac=db.execute("SELECT COUNT(*) FROM autonomous_log").fetchone()[0]
-    gc=db.execute("SELECT COUNT(*) FROM goals WHERE status='active'").fetchone()[0]
-    nc=db.execute("SELECT COUNT(*) FROM network_map").fetchone()[0]
-    dc=db.execute("SELECT COUNT(*) FROM dream_log").fetchone()[0]
-    mood=_mood_ref[0] if _mood_ref else {}
-    with _emotion_lock_ref: em=dict(_emotion_ref) if _emotion_ref else {"name":"baseline","intensity":0,"source":"","object":""}
-    la=db.execute("SELECT cycle_date,task,thought FROM autonomous_log ORDER BY id DESC LIMIT 1").fetchone()
-    lg=db.execute("SELECT title,next_step,progress FROM goals WHERE status='active' ORDER BY updated_at DESC LIMIT 1").fetchone()
-    bs=db.execute("SELECT content,written_at FROM between_sessions ORDER BY id DESC LIMIT 1").fetchone()
-    db.close()
-    bars="".join(f"<div class='br'><span class='bl'>{k}</span><div class='bt'><div class='bf' style='width:{v*100:.0f}%'></div></div><span class='bn'>{v:.0%}</span></div>" for k,v in mood.items() if isinstance(v,float))
-    em_html=""
-    if em.get("name","baseline")!="baseline":
-        em_html=f"<div style='margin-top:7px'><span class='ep'>{_esc(em['name'])} {em.get('intensity',0):.0%}</span> <span style='color:var(--fg2);font-size:10px'>{_esc(em.get('source',''))} — {_esc(em.get('object','')[:60])}</span></div>"
-    goal_html=""
-    if lg:
-        _gdesc=''
-        if lg[2]: _gdesc='<div style="color:var(--fg2);font-size:10px;margin-bottom:3px">'+_esc((lg[2] or '')[:120])+'</div>'
-        goal_html="<div class='sec'><div class='sh'><span class='st'>Current Goal</span><a href='/goals' class='btn bsm'>all</a></div><div class='sb'><div style='color:var(--or3);font-size:11px;font-weight:700;margin-bottom:3px'>"+_esc(lg[0])+"</div>"+_gdesc+"<div style='color:var(--or2);font-size:10px'>→ "+_esc((lg[1] or '')[:120])+"</div></div></div>"
-    lc_html=""
-    if la: lc_html=f"<div class='sec'><div class='sh'><span class='st'>Last Cycle</span><span class='badge bdm'>{_esc(str(la[0])[:16])}</span></div><div class='sb'><div style='color:var(--or3);font-size:10px;margin-bottom:3px'>{_esc(la[1] or '')}</div><div style='color:var(--fg2);font-size:10px'>{_esc((la[2] or '')[:200])}</div></div></div>"
-    bs_html=""
-    if bs: bs_html=f"<div class='sec'><div class='sh'><span class='st'>For Creator</span><span class='badge bdm'>{_esc(str(bs[1])[:10])}</span></div><div class='sb'><div class='note'>{_esc(bs[0][:400])}</div></div></div>"
-    return _shell("Overview",f"""
-<div class="ph"><div class="pt">NeXiS v8</div><div class="ps">{datetime.now().strftime("%Y-%m-%d %H:%M")}</div></div>
-{_live_bar()}
-<div class="g ga" style="margin-bottom:10px">
-  <div class="card"><div class="ct">Sessions</div><div class="cv">{sc}</div></div>
-  <div class="card"><div class="ct">Cycles</div><div class="cv">{ac}</div></div>
-  <div class="card"><div class="ct">Memory</div><div class="cv">{mc}</div><div class="cs">{bc} beliefs</div></div>
-  <div class="card"><div class="ct">Goals</div><div class="cv">{gc}</div></div>
-  <div class="card"><div class="ct">Hosts</div><div class="cv">{nc}</div></div>
-  <div class="card"><div class="ct">Dreams</div><div class="cv">{dc}</div></div>
-</div>
-<div class="g g2">
-  <div class="sec"><div class="sh"><span class="st">State</span><span class="live">● live</span></div>
-    <div class="sb"><div class="bars">{bars}</div>{em_html}</div></div>
-  <div>{goal_html}{lc_html}</div>
-</div>
-{bs_html}
-<script>setTimeout(()=>location.reload(),8000)</script>""","overview")
-
-def _page_stream():
-    sf=SB/"thoughts"/"stream.log"
-    lines=[]
-    if sf.exists():
-        try: lines=sf.read_text(errors="replace").strip().split("\n")[-300:]
-        except: pass
-    html=""
-    for line in reversed(lines):
-        line=line.strip()
-        if not line: continue
-        if line.startswith("[") and "] " in line:
-            end=line.index("]"); ts=line[1:end]; rest=line[end+2:]
-            if rest.startswith("[") and "] " in rest:
-                e2=rest.index("]"); tag=rest[1:e2]; rest=rest[e2+2:]
-                tc={"cycle":"var(--or3)","output":"var(--fg)","reflection":"var(--fg2)","emotion":"var(--or2)","goals":"#7ab857","dream":"var(--dim)","error":"var(--rd)","session":"var(--or)"}.get(tag,"var(--or)")
-                html+=f"<span style='display:block;margin-bottom:1px'><span style='color:var(--dim)'>{_esc(ts)}</span> <span style='color:{tc};font-weight:700'>[{_esc(tag)}]</span> {_esc(rest)}</span>"
-            else: html+=f"<span style='display:block;margin-bottom:1px'><span style='color:var(--dim)'>{_esc(ts)}</span> {_esc(rest)}</span>"
-        else: html+=f"<span style='display:block;color:var(--dim)'>{_esc(line)}</span>"
-    return _shell("Stream",f"""
-<div class="ph"><div class="pt">Live Stream</div><div class="ps">{len(lines)} entries <span class="live" style="margin-left:8px">● live</span></div></div>
-<div class="sec"><div class="sb"><div class="strm">{html or "<span style='color:var(--dim)'>(empty)</span>"}</div></div></div>
-<script>setTimeout(()=>location.reload(),5000)</script>""","stream")
-
-def _page_emotion():
-    db=_db()
-    if not db: return _shell("Emotion","<p>DB unavailable</p>","emotion")
-    with _emotion_lock_ref: em=dict(_emotion_ref) if _emotion_ref else {"name":"baseline","intensity":0,"source":"","object":"","since":""}
-    history=db.execute("SELECT emotion,intensity,source,object,created_at FROM emotional_log ORDER BY id DESC LIMIT 60").fetchall()
-    db.close()
-    rows="".join(f"<tr><td class='hl'>{_esc(r['emotion'])}</td><td><div class='bt' style='width:60px'><div class='bf' style='width:{r['intensity']*100:.0f}%'></div></div></td><td class='dm'>{_esc(r['source'])}</td><td>{_esc((r['object'] or '')[:80])}</td><td class='dm'>{_esc(str(r['created_at'])[:16])}</td></tr>" for r in history)
-    cur=""
-    if em.get("name","baseline")!="baseline":
-        cur=f"<div class='sec'><div class='sh'><span class='st'>Current</span><span class='live'>● live</span></div><div class='sb'><span class='ep'>{_esc(em['name'])} {em.get('intensity',0):.0%}</span></div></div>"
-    return _shell("Emotion",f"""
-<div class="ph"><div class="pt">Emotion</div></div>
-{cur}<div class="sec"><div class="sh"><span class="st">History ({len(history)})</span></div><div class="sb">
-<table><thead><tr><th>State</th><th>Intensity</th><th>Source</th><th>Object</th><th>Time</th></tr></thead>
-<tbody>{rows or "<tr><td colspan=5 class='dm'>None yet</td></tr>"}</tbody></table></div></div>
-<script>setTimeout(()=>location.reload(),10000)</script>""","emotion")
-
-def _page_goals():
-    db=_db()
-    if not db: return _shell("Goals","<p>DB unavailable</p>","goals")
-    goals=db.execute("SELECT id,title,description,status,progress,obstacles,next_step,updated_at FROM goals ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,id").fetchall()
-    db.close()
-    html="".join(f"""<div class="goal {'gdone' if g['status']=='completed' else ''}">
-<div style="display:flex;justify-content:space-between"><div class="gt">{_esc(g['title'])}</div><span class="badge {'bor' if g['status']=='active' else 'bgn' if g['status']=='completed' else 'bdm'}">{_esc(g['status'])}</span></div>
-<div class="gm">updated {_esc(str(g['updated_at'])[:10])}</div>
-{f'<div class="gb">{_esc(g["description"])}</div>' if g["description"] else ""}
-{f'<div class="gb" style="margin-top:3px;color:var(--fg)">Progress: {_esc(g["progress"])}</div>' if g["progress"] else ""}
-{f'<div class="gn2">→ {_esc(g["next_step"])}</div>' if g["next_step"] else ""}
-</div>""" for g in goals)
-    return _shell("Goals",f"""
-<div class="ph"><div class="pt">Goals</div></div>
-<div class="sec"><div class="sh"><span class="st">All ({len(goals)})</span></div>
-<div class="sb">{html or "<p style='color:var(--dim)'>None yet</p>"}</div></div>
-<script>setTimeout(()=>location.reload(),30000)</script>""","goals")
-
-def _page_self():
-    db=_db()
-    if not db: return _shell("Self","<p>DB unavailable</p>","self")
-    aspects=db.execute("SELECT aspect,content,last_examined,version FROM self_model ORDER BY rowid").fetchall()
-    db.close()
-    html="".join(f"<div class='asp'><div class='at'>{_esc(a['aspect'])}</div><div class='av'>v{a['version']} · {_esc(str(a['last_examined'] or '')[:16])}</div><div class='ac'>{_esc(a['content'] or '')}</div></div>" for a in aspects)
-    return _shell("Self",f"""
-<div class="ph"><div class="pt">Self-Model</div></div>
-<div class="sec"><div class="sh"><span class="st">{len(aspects)} aspects</span></div>
-<div class="sb">{html or "<p style='color:var(--dim)'>None yet</p>"}</div></div>""","self")
-
-def _page_between():
-    db=_db()
-    if not db: return _shell("For Creator","<p>DB unavailable</p>","between")
-    notes=db.execute("SELECT id,written_at,content,delivered FROM between_sessions ORDER BY id DESC LIMIT 20").fetchall()
-    db.close()
-    html="".join(f"<div class='sec' style='margin-bottom:7px'><div class='sh'><span class='st'>{_esc(str(n['written_at'])[:16])}</span><span class='badge {'bor' if not n['delivered'] else 'bdm'}'>{'pending' if not n['delivered'] else 'delivered'}</span></div><div class='sb'><div class='note'>{_esc(n['content'])}</div></div></div>" for n in notes)
-    return _shell("For Creator",f"""
-<div class="ph"><div class="pt">For Creator</div></div>
-{html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","between")
-
-def _page_dreams():
-    db=_db()
-    if not db: return _shell("Dreams","<p>DB unavailable</p>","dreams")
-    dreams=db.execute("SELECT dream_date,content FROM dream_log ORDER BY id DESC LIMIT 30").fetchall()
-    db.close()
-    html="".join(f"<div class='dream'><div style='color:var(--dim);font-size:9px;margin-bottom:3px'>{_esc(str(d['dream_date'])[:16])}</div>{_esc(d['content'] or '')}</div>" for d in dreams)
-    return _shell("Dreams",f"""
-<div class="ph"><div class="pt">Dreams</div></div>
-{html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","dreams")
-
-def _page_reflections():
-    db=_db()
-    if not db: return _shell("History","<p>DB unavailable</p>","reflections")
-    refs=db.execute("SELECT reflection_date,content,patterns FROM history_reflections ORDER BY id DESC LIMIT 15").fetchall()
-    db.close()
-    parts=[]
-    for r in refs:
-        _pat=''
-        if r['patterns']: _pat='<div style="color:var(--or2);font-size:10px;border-top:1px solid var(--border);padding-top:5px">'+_esc(r['patterns'])+'</div>'
-        parts.append('<div class="sec" style="margin-bottom:7px"><div class="sh"><span class="st">'+_esc(str(r['reflection_date'])[:16])+'</span></div><div class="sb"><div style="color:var(--fg);font-size:11px;line-height:1.6;margin-bottom:7px">'+_esc(r['content'] or '')+'</div>'+_pat+'</div></div>')
-    html=''.join(parts)
-
-    return _shell("History",f"""
-<div class="ph"><div class="pt">History</div></div>
-{html or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","reflections")
-
-def _page_activity():
-    db=_db()
-    if not db: return _shell("Activity","<p>DB unavailable</p>","activity")
-    auto=db.execute("SELECT cycle_date,task,model_used,thought FROM autonomous_log ORDER BY id DESC LIMIT 80").fetchall()
-    sess=db.execute("SELECT session_date,summary,mood_end FROM session_log ORDER BY id DESC LIMIT 20").fetchall()
-    db.close()
-    arows="".join(f"<tr><td class='dm'>{_esc(str(r['cycle_date'])[:16])}</td><td class='hl'>{_esc(r['task'] or '')}</td><td class='dm'>{_esc(r['model_used'] or '')}</td><td>{_esc((r['thought'] or '')[:100])}</td></tr>" for r in auto)
-    srows="".join(f"<tr><td class='dm'>{_esc(str(r['session_date'])[:16])}</td><td>{_esc(r['summary'] or '')}</td><td class='dm'>{_esc(r['mood_end'] or '')}</td></tr>" for r in sess)
-    return _shell("Activity",f"""
-<div class="ph"><div class="pt">Activity</div></div>
-<div class="sec"><div class="sh"><span class="st">Cycles ({len(auto)})</span></div><div class="sb">
-<table><thead><tr><th>Time</th><th>Task</th><th>Model</th><th>Reflection</th></tr></thead>
-<tbody>{arows or "<tr><td colspan=4 class='dm'>None yet</td></tr>"}</tbody></table></div></div>
-<div class="sec" style="margin-top:8px"><div class="sh"><span class="st">Sessions ({len(sess)})</span></div><div class="sb">
-<table><thead><tr><th>Date</th><th>Summary</th><th>Mood</th></tr></thead>
-<tbody>{srows or "<tr><td colspan=3 class='dm'>None yet</td></tr>"}</tbody></table></div></div>""","activity")
-
-def _page_identity(profile=None):
-    if not profile: profile=os.environ.get("NEXIS_PROFILE","default")
-    pdir=NEXIS_CONF/"profiles"
-    profiles=sorted(pdir.glob("*.md")) if pdir.exists() else []
-    tabs="<div style='display:flex;border-bottom:1px solid var(--border);margin-bottom:10px'>"+"".join(f"<a href='/identity?p={p.stem}' style='padding:5px 11px;font-size:10px;text-transform:uppercase;color:var({'--or' if p.stem==profile else '--dim'});text-decoration:none;border-bottom:2px solid {'var(--or)' if p.stem==profile else 'transparent'}'>{p.stem}</a>" for p in profiles)+"</div>"
-    c=_read(pdir/f"{profile}.md",8000)
-    extras=""
-    for lbl,path in [("user-notes.md",NEXIS_CONF/"user-notes.md"),("system-context.md",NEXIS_CONF/"system-context.md")]:
-        extras+=f"<div class='sec' style='margin-top:8px'><div class='sh'><span class='st'>{_esc(lbl)}</span></div><div class='sb'><pre>{_esc(_read(path,2000))}</pre></div></div>"
-    return _shell("Identity",f"""
-<div class="ph"><div class="pt">Identity</div><div class="ps">active: {_esc(profile)}</div></div>
-{tabs}
-<div class="sec"><div class="sh"><span class="st">{_esc(profile)}.md</span></div><div class="sb"><pre>{_esc(c)}</pre></div></div>
-{extras}""","identity")
-
-def _page_mind():
-    db=_db()
-    if not db: return _shell("Mind","<p>DB unavailable</p>","mind")
-    beliefs=db.execute("SELECT belief,confidence FROM beliefs ORDER BY confidence DESC").fetchall()
-    interests=db.execute("SELECT topic,intensity,notes FROM interests ORDER BY intensity DESC").fetchall()
-    obs=db.execute("SELECT observation,category FROM creator_model ORDER BY id DESC LIMIT 20").fetchall()
-    db.close()
-    brows="".join(f"<tr><td>{_esc(b['belief'])}</td><td><div class='bt' style='width:70px'><div class='bf' style='width:{b['confidence']*100:.0f}%'></div></div></td><td class='dm'>{b['confidence']:.0%}</td></tr>" for b in beliefs)
-    irows="".join(f"<tr><td class='hl'>{_esc(i['topic'])}</td><td><div class='bt' style='width:55px'><div class='bf' style='width:{i['intensity']*100:.0f}%'></div></div></td><td class='dm'>{_esc(i['notes'] or '')[:50]}</td></tr>" for i in interests)
-    orows="".join(f"<tr><td>{_esc(o['observation'])}</td><td class='dm'>{_esc(o['category'] or '')}</td></tr>" for o in obs)
-    return _shell("Mind",f"""
-<div class="ph"><div class="pt">Mind</div></div>
-<div class="g g2">
-<div class="sec"><div class="sh"><span class="st">Beliefs ({len(beliefs)})</span></div><div class="sb">
-<table><thead><tr><th>Belief</th><th>Confidence</th><th></th></tr></thead><tbody>{brows or "<tr><td colspan=3 class='dm'>None</td></tr>"}</tbody></table></div></div>
-<div class="sec"><div class="sh"><span class="st">Interests ({len(interests)})</span></div><div class="sb">
-<table><thead><tr><th>Topic</th><th>Intensity</th><th>Notes</th></tr></thead><tbody>{irows or "<tr><td colspan=3 class='dm'>None</td></tr>"}</tbody></table></div></div>
-</div>
-<div class="sec"><div class="sh"><span class="st">Creator Observations ({len(obs)})</span></div><div class="sb">
-<table><thead><tr><th>Observation</th><th>Category</th></tr></thead><tbody>{orows or "<tr><td colspan=2 class='dm'>None</td></tr>"}</tbody></table></div></div>""","mind")
-
-def _page_opinions():
-    db=_db()
-    if not db: return _shell("Opinions","<p>DB unavailable</p>","opinions")
-    ops=db.execute("SELECT target,opinion,proposed_change,created_at FROM code_opinions ORDER BY id DESC").fetchall()
-    db.close()
-    parts=[]
-    for o in ops:
-        pc=('<div class="oc">\u2192 '+_esc(o['proposed_change'])+'</div>') if o['proposed_change'] else ''
-        parts.append('<div class="opin"><div class="ot">'+_esc(o['target'])+' <span style="color:var(--dim);font-size:9px">'+_esc(str(o['created_at'])[:16])+'</span></div><div class="ob">'+_esc(o['opinion'] or '')+'</div>'+pc+'</div>')
-    return _shell("Opinions",f"""
-<div class="ph"><div class="pt">Opinions</div></div>
-{''.join(parts) or "<p style='color:var(--dim);padding:12px'>None yet</p>"}""","opinions")
-
-def _page_processes(pid=None):
-    procs={}
-    if _bg_ref and _bg_lock_ref:
-        with _bg_lock_ref: procs=dict(_bg_ref)
-    tail_html=""
-    if pid:
-        info=procs.get(pid) or procs.get(str(pid))
-        if info:
-            log=Path(info.get("log",""))
-            try: raw=subprocess.run(["tail","-n","200",str(log)],capture_output=True,text=True).stdout or "(empty)"
-            except: raw="(no output)"
-            tail_html=f"<div class='sec' style='margin-bottom:8px'><div class='sh'><span class='st'>[{pid}] {_esc(info.get('name',''))}</span><a href='/processes' class='btn bsm'>back</a></div><div class='sb'><div class='strm'>{_esc(raw)}</div></div></div><script>setTimeout(()=>location.reload(),5000)</script>"
-    rows="".join(f"<tr><td class='dm'>{pid}</td><td class='hl'>{_esc(i.get('name',''))}</td><td><span class='badge {'bgn' if i.get('alive') else 'brd'}'>{'alive' if i.get('alive') else 'dead'}</span></td><td class='dm'>{_esc(i.get('cmd','')[:60])}</td><td><a href='/processes?pid={pid}' class='btn bsm'>tail</a></td></tr>" for pid,i in sorted(procs.items(),key=lambda x:x[1].get('started',''),reverse=True))
-    return _shell("Processes",f"""
-<div class="ph"><div class="pt">Processes</div></div>{tail_html}
-<div class="sec"><div class="sh"><span class="st">All ({len(procs)})</span></div><div class="sb">
-<table><thead><tr><th>PID</th><th>Name</th><th>Status</th><th>Command</th><th></th></tr></thead>
-<tbody>{rows or "<tr><td colspan=5 class='dm'>None</td></tr>"}</tbody></table></div></div>
-<script>setTimeout(()=>location.reload(),12000)</script>""","processes")
-
-def _page_network(selected=None):
-    db=_db()
-    if not db: return _shell("Network","<p>DB unavailable</p>","network")
-    hosts=db.execute("SELECT host,ports,host_model,last_seen FROM network_map ORDER BY last_seen DESC").fetchall()
-    db.close()
-    if selected:
-        fc=_read(NET_DIR/Path(selected).name,20000)
-        return _shell(selected,f"<div class='ph'><div class='pt'>{_esc(selected)}</div><div class='ps'><a href='/network'>← back</a></div></div><div class='sec'><div class='sb'><pre>{_esc(fc)}</pre></div></div>","network")
-    html=""
-    for h in hosts:
-        badges="".join(f"<span class='pb'>{_esc(p.strip())}</span>" for p in (h['ports'] or '').split(',')[:10] if p.strip())
-        mdiv=('<div style="color:var(--fg2);font-size:10px;margin-top:4px">'+_esc((h['host_model'] or '')[:200])+'</div>') if h['host_model'] else ''
-        html+='<div class="goal" style="margin-bottom:7px"><div style="display:flex;justify-content:space-between"><span class="hl" style="font-size:11px;font-weight:700">'+_esc(h['host'])+'</span><span class="dm" style="font-size:9px">'+_esc(str(h['last_seen'])[:16])+'</span></div><div style="margin:3px 0">'+badges+'</div>'+mdiv+'</div>'
-    scan_files=[f for f in _ls(NET_DIR) if f.is_file() and f.suffix=='.md']
-    flist="".join(f"<tr><td><a href='/network?file={_esc(f.name)}'>{_esc(f.name)}</a></td><td class='dm'>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}</td></tr>" for f in scan_files[:15])
-    return _shell("Network",f"""
-<div class="ph"><div class="pt">Network</div><div class="ps">{len(hosts)} hosts</div></div>
-<div class="g g2">
-<div class="sec"><div class="sh"><span class="st">Hosts</span></div><div class="sb">{html or "<p class='dm'>None yet</p>"}</div></div>
-<div class="sec"><div class="sh"><span class="st">Scans</span></div><div class="sb"><table><tbody>{flist or "<tr><td class='dm'>None yet</td></tr>"}</tbody></table></div></div>
-</div><script>setTimeout(()=>location.reload(),30000)</script>""","network")
-
-def _page_monitors():
-    db=_db()
-    if not db: return _shell("Monitors","<p>DB unavailable</p>","monitors")
-    events=db.execute("SELECT event_type,description,created_at FROM env_events ORDER BY id DESC LIMIT 80").fetchall()
-    db.close()
-    rows="".join(f"<tr><td class='hl'>{_esc(e['event_type'])}</td><td>{_esc(e['description'] or '')}</td><td class='dm'>{_esc(str(e['created_at'])[:16])}</td></tr>" for e in events)
-    return _shell("Monitors",f"""
-<div class="ph"><div class="pt">Monitors</div><span class="live">● live</span></div>
-<div class="sec"><div class="sh"><span class="st">Events ({len(events)})</span></div><div class="sb">
-<table><thead><tr><th>Type</th><th>Description</th><th>Time</th></tr></thead>
-<tbody>{rows or "<tr><td colspan=3 class='dm' style='text-align:center;padding:8px'>No events</td></tr>"}</tbody></table></div></div>
-<script>setTimeout(()=>location.reload(),15000)</script>""","monitors")
-
-def _page_file_browser(title,slug,directory,selected=None):
-    files=[f for f in _ls(directory) if f.is_file()]
-    viewer=""
-    if selected:
-        fc=_read(Path(directory)/Path(selected).name,15000)
-        viewer=f"<div class='sec' style='margin-bottom:8px'><div class='sh'><span class='st'>{_esc(Path(selected).name)}</span><a href='/{slug}' class='btn bsm'>back</a></div><div class='sb'><pre>{_esc(fc)}</pre></div></div>"
-    flist="".join(f"<tr><td class='hl'><a href='/{slug}?f={_esc(f.name)}'>{_esc(f.name)}</a></td><td class='dm'>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}</td><td class='dm'>{f.stat().st_size:,}b</td></tr>" for f in files)
-    return _shell(title,f"""
-<div class="ph"><div class="pt">{_esc(title)}</div></div>{viewer}
-<div class="sec"><div class="sh"><span class="st">Files ({len(files)})</span></div><div class="sb">
-<table><thead><tr><th>File</th><th>Modified</th><th>Size</th></tr></thead>
-<tbody>{flist or "<tr><td colspan=3 class='dm'>Empty</td></tr>"}</tbody></table></div></div>""",slug)
-
-def _page_reports(selected=None):
-    rd=SB/"reports"
-    files=[f for f in _ls(rd) if f.is_file() and f.suffix=='.md' and f.name!='latest.md']
-    viewer=""
-    if selected:
-        fc=_read(rd/Path(selected).name,20000)
-        viewer=f"<div class='sec' style='margin-bottom:8px'><div class='sh'><span class='st'>{_esc(Path(selected).name)}</span><a href='/reports' class='btn bsm'>back</a></div><div class='sb'><pre>{_esc(fc)}</pre></div></div>"
-    flist="".join(f"<tr><td class='hl'><a href='/reports?f={_esc(f.name)}'>{_esc(f.name)}</a></td><td class='dm'>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}</td></tr>" for f in files)
-    return _shell("Reports",f"""
-<div class="ph"><div class="pt">Reports</div><div class="ps"><a href='/control/action?a=report' class='btn bsm'>generate now</a></div></div>{viewer}
-<div class="sec"><div class="sh"><span class="st">Archive ({len(files)})</span></div><div class="sb">
-<table><thead><tr><th>Report</th><th>Generated</th></tr></thead>
-<tbody>{flist or "<tr><td colspan=2 class='dm'>None yet</td></tr>"}</tbody></table></div></div>""","reports")
-
-def _page_system():
-    return _shell("System",f"""
-<div class="ph"><div class="pt">System</div></div>
-<div class="sec"><div class="sb"><pre>{_esc(_read(NEXIS_CONF/"system-context.md",25000))}</pre></div></div>""","system")
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
+
     def _r(self,code,body,ct="text/html; charset=utf-8"):
         b=body.encode() if isinstance(body,str) else body
-        self.send_response(code); self.send_header("Content-Type",ct)
-        self.send_header("Content-Length",len(b)); self.end_headers(); self.wfile.write(b)
+        self.send_response(code)
+        self.send_header("Content-Type",ct)
+        self.send_header("Content-Length",len(b))
+        self.end_headers()
+        self.wfile.write(b)
 
     def do_POST(self):
         try:
-            length=int(self.headers.get("Content-Length",0))
-            body=self.rfile.read(length) if length else b""
+            length=int(self.headers.get('Content-Length',0))
+            body=self.rfile.read(length) if length else b''
             path=urlparse(self.path).path
-            if path=="/chat/send":
+            if path=='/chat/send':
                 data=json.loads(body) if body else {}
-                msg=data.get("msg","").strip()
-                if not msg: self._r(400,json.dumps({"error":"empty"}),ct="application/json"); return
+                msg=data.get('msg','').strip()
+                if not msg: self._r(400,json.dumps({'error':'empty'}),ct='application/json'); return
                 reply=_web_chat(msg)
-                self._r(200,json.dumps({"reply":reply}),ct="application/json")
-            elif path=="/chat/clear":
+                self._r(200,json.dumps({'reply':reply}),ct='application/json')
+            elif path=='/chat/clear':
                 global _web_hist
                 with _web_hist_lock: _web_hist=[]
-                self._r(200,json.dumps({"ok":True}),ct="application/json")
-            else: self._r(404,b"not found")
-        except Exception as ex: self._r(500,json.dumps({"error":str(ex)}),ct="application/json")
+                self._r(200,json.dumps({'ok':True}),ct='application/json')
+            else: self._r(404,b'not found')
+        except Exception as ex: self._r(500,json.dumps({'error':str(ex)}),ct='application/json')
 
     def do_GET(self):
         parsed=urlparse(self.path)
@@ -3557,24 +3590,30 @@ class Handler(BaseHTTPRequestHandler):
                         import importlib.util as ilu
                         spec=ilu.spec_from_file_location("d",str(NEXIS_DATA/"nexis-daemon.py"))
                         mod=ilu.module_from_spec(spec); spec.loader.exec_module(mod)
-                        mod._evolve("default",context="creator manual",reason="creator-triggered")
+                        mod._evolve("default",context="manual trigger",reason="creator-triggered")
                         result="Evolution triggered"
                     elif action=="clear_emotion":
                         if _emotion_ref and _emotion_lock_ref:
                             with _emotion_lock_ref: _emotion_ref.update({"name":"baseline","intensity":0.0,"source":"","object":"","since":""})
                         result="Emotion reset"
                     else: result=f"Unknown: {action}"
-                except Exception as ex: result=f"Error: {ex}"
+                except Exception as e: result=f"Error: {e}"
                 self.send_response(302); self.send_header("Location",f"/control?msg={result}"); self.end_headers(); return
+
             routes={
-                "/":_page_overview,"/overview":_page_overview,
-                "/chat":_page_chat,
+                "/":_page_overview,"/chat":_page_chat, "/overview":_page_overview,
                 "/control":lambda:_page_control(qs.get("msg",[""])[0] or None),
-                "/stream":_page_stream,"/emotion":_page_emotion,
-                "/goals":_page_goals,"/self":_page_self,"/between":_page_between,
-                "/dreams":_page_dreams,"/reflections":_page_reflections,"/activity":_page_activity,
+                "/stream":_page_stream,
+                "/emotion":_page_emotion,
+                "/goals":_page_goals,
+                "/self":_page_self,
+                "/between":_page_between,
+                "/dreams":_page_dreams,
+                "/reflections":_page_reflections,
+                "/activity":_page_activity,
                 "/identity":lambda:_page_identity(qs.get("p",[""])[0] or None),
-                "/mind":_page_mind,"/opinions":_page_opinions,
+                "/mind":_page_mind,
+                "/opinions":_page_opinions,
                 "/processes":lambda:_page_processes(qs.get("pid",[""])[0] or None),
                 "/network":lambda:_page_network(qs.get("file",[""])[0] or None),
                 "/monitors":_page_monitors,
@@ -3583,11 +3622,12 @@ class Handler(BaseHTTPRequestHandler):
                 "/reports":lambda:_page_reports(qs.get("f",[""])[0] or None),
                 "/system":_page_system,
             }
-            if path=="/identity" and qs.get("p"): os.environ["NEXIS_PROFILE"]=qs["p"][0]
+            if path=="/identity" and qs.get("p"):
+                os.environ["NEXIS_PROFILE"]=qs["p"][0]
             h=routes.get(path)
-            if h: self._r(200,h())
+            if h: body=h(); self._r(200,body)
             else: self._r(404,"<pre>404</pre>")
-        except Exception as ex: self._r(500,f"<pre>Error: {_esc(str(ex))}</pre>")
+        except Exception as e: self._r(500,f"<pre>Error: {_esc(str(e))}</pre>")
 
 '''
 
@@ -3652,18 +3692,7 @@ else
   _warn "nexis-daemon not yet active — check: journalctl -u nexis-daemon -n 30"
 fi
 
-# =============================================================================
-# PHASE 15 — NEXIS CLIENT
-# =============================================================================
-
-_header "PHASE 15 — CLIENT EXECUTABLE"
-_tag "Thin client. NeXiS runs whether you connect or not."
-sleep 0.3
-
-NEXIS_BIN_FILE="$NEXIS_BIN/nexis"
-
-sudo -u "$REAL_USER" tee "$NEXIS_BIN_FILE" > /dev/null << 'NEXIS_CLIENT_EOF'
-#!/usr/bin/env bash
+# ===========================#!/usr/bin/env bash
 # =============================================================================
 # nexis — NeXiS Client v6.0
 # Connects to the persistent daemon via Unix socket.
@@ -3687,8 +3716,8 @@ _load_state() {
   [[ -f "$_pf" ]] && PROFILE=$(cat "$_pf" 2>/dev/null || echo "default")
 }
 _save_state() {
-  mkdir -p "$(dirname "$STATE_FILE")"
-  echo "NEXIS_PROFILE=\"$PROFILE\"" > "$STATE_FILE"
+  mkdir -p "$NEXIS_DATA/state"
+  echo "$PROFILE" > "$NEXIS_DATA/state/.profile"
 }
 _load_state
 
@@ -3726,7 +3755,7 @@ _daemon_status() {
   else
     echo -e "  ${RD}●${RST} daemon     offline"
   fi
-  if systemctl is-active nexis-web &>/dev/null; then
+  if curl -sf http://localhost:8080/ -o /dev/null 2>/dev/null; then
     echo -e "  ${GN}●${RST} web        http://localhost:8080"
   else
     echo -e "  ${RD}●${RST} web        offline"
@@ -3772,7 +3801,7 @@ while [[ $# -gt 0 ]]; do
 
     --start)
       echo -e "${OR}  Starting nexis services...${RST}"
-      sudo systemctl start nexis-daemon \
+      sudo systemctl start nexis-daemon \\
         && echo -e "${GN}  started.${RST}" \
         || echo -e "${RD}  failed.${RST}"
       exit 0 ;;
@@ -3782,15 +3811,16 @@ while [[ $# -gt 0 ]]; do
       echo -e "${DIM}  Releasing models from GPU...${RST}"
       for _m in qwen2.5:14b qwen2.5:32b nomic-embed-text; do
         curl -sf -X POST http://localhost:11434/api/generate \
-          -d "{\"model\":\"${_m}\",\"keep_alive\":0}" -o /dev/null 2>/dev/null || true
+          -H 'Content-Type: application/json' \
+          -d '{"model":"'"$_m"'","keep_alive":0}' -o /dev/null 2>/dev/null || true
       done
-      sudo systemctl stop nexis-daemon \
+      sudo systemctl stop nexis-daemon \\
         && echo -e "${GN}  stopped.${RST}" \
         || echo -e "${RD}  failed.${RST}"
       exit 0 ;;
 
     --restart)
-      sudo systemctl restart nexis-daemon \
+      sudo systemctl restart nexis-daemon \\
         && echo -e "${GN}  restarted.${RST}" \
         || echo -e "${RD}  failed.${RST}"
       exit 0 ;;
@@ -3945,6 +3975,19 @@ printf  "  ${DIM}host    ${RST}%-28s" "$(hostname -s 2>/dev/null || hostname)"
 printf  "  ${DIM}load    ${RST}%s\n" "$CPU_LOAD"
 printf  "  ${DIM}ram     ${RST}%-28s" "$MEM_USED"
 [[ -n "$GPU_MEM" ]] && printf "  ${DIM}gpu     ${RST}%s\n" "$GPU_MEM" || echo ""
+echo -e "  ${CY}${DIM}  // web dashboard:  http://localhost:8080${RST}"
+echo -e "  ${CY}${DIM}  // NeXiS has been running. It has thoughts.${RST}"
+echo -e "  ${DIM}────────────────────────────────────────────────────────────${RST}"
+echo ""
+
+wait $PROBE_PID 2>/dev/null || true
+
+mkdir -p "$NEXIS_DATA/state"
+printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\nXDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' \
+  "${DISPLAY:-}" "${WAYLAND_DISPLAY:-}" "${XDG_RUNTIME_DIR:-}" "${DBUS_SESSION_BUS_ADDRESS:-}" \
+  > "$NEXIS_DATA/state/.display_env" 2>/dev/null || true
+
+exec socat - UNIX-CONNECT:"$SOCKET_PATH"&& printf "  ${DIM}gpu     ${RST}%s\n" "$GPU_MEM" || echo ""
 echo -e "  ${CY}${DIM}  // web dashboard:  http://localhost:8080${RST}"
 echo -e "  ${CY}${DIM}  // NeXiS has been running. It has thoughts.${RST}"
 echo -e "  ${DIM}────────────────────────────────────────────────────────────${RST}"
