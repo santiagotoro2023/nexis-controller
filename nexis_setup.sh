@@ -3999,12 +3999,10 @@ echo ""
 wait $PROBE_PID 2>/dev/null || true
 
 mkdir -p "$NEXIS_DATA/state"
-printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\nXDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' \
-  "${DISPLAY:-}" "${WAYLAND_DISPLAY:-}" "${XDG_RUNTIME_DIR:-}" "${DBUS_SESSION_BUS_ADDRESS:-}" \
-  > "$NEXIS_DATA/state/.display_env" 2>/dev/null || true
+{ echo "DISPLAY=${DISPLAY:-}"; echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}"; echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"; echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-}"; } > "$NEXIS_DATA/state/.display_env" 2>/dev/null || true
 
 exec socat - UNIX-CONNECT:"$SOCKET_PATH"
-XIS_CLIENT_EOF
+NEXIS_CLIENT_EOF
 
 chmod +x "$NEXIS_BIN_FILE"
 chown "$REAL_USER:$(id -gn "$REAL_USER")" "$NEXIS_BIN_FILE"
