@@ -820,8 +820,13 @@ for f in "$NEXIS_CONF/profiles"/*.md; do
 done
 _ok "Personality profiles written: default, fractured, technical, minimal"
 
+_tag "This process never sleeps. It thinks."
+sleep 0.3
 
-# ========================#!/usr/bin/env python3
+DAEMON_FILE="$NEXIS_DATA/nexis-daemon.py"
+
+sudo -u "$REAL_USER" tee "$DAEMON_FILE" > /dev/null << 'DAEMON_EOF'
+#!/usr/bin/env python3
 """
 NeXiS Daemon v8.0 — Neural Execution and Cross-device Inference System
 
@@ -3801,7 +3806,7 @@ while [[ $# -gt 0 ]]; do
 
     --start)
       echo -e "${OR}  Starting nexis services...${RST}"
-      sudo systemctl start nexis-daemon \\
+      sudo systemctl start nexis-daemon \
         && echo -e "${GN}  started.${RST}" \
         || echo -e "${RD}  failed.${RST}"
       exit 0 ;;
@@ -3814,13 +3819,13 @@ while [[ $# -gt 0 ]]; do
           -H 'Content-Type: application/json' \
           -d '{"model":"'"$_m"'","keep_alive":0}' -o /dev/null 2>/dev/null || true
       done
-      sudo systemctl stop nexis-daemon \\
+      sudo systemctl stop nexis-daemon \
         && echo -e "${GN}  stopped.${RST}" \
         || echo -e "${RD}  failed.${RST}"
       exit 0 ;;
 
     --restart)
-      sudo systemctl restart nexis-daemon \\
+      sudo systemctl restart nexis-daemon \
         && echo -e "${GN}  restarted.${RST}" \
         || echo -e "${RD}  failed.${RST}"
       exit 0 ;;
