@@ -2762,11 +2762,6 @@ def main():
         _chat([{'role':'user','content':'hi'}],model=MODEL_14B,num_ctx=2048)
         _log('Model warm')
     except Exception as _we: _log(f'Warm: {_we}','WARN')
-    try:
-        _log('Pre-warming model...')
-        _chat([{'role':'user','content':'hi'}],model=MODEL_14B,num_ctx=2048)
-        _log('Model warm')
-    except Exception as _we: _log(f'Warm: {_we}','WARN')
     _gen_ssh_pass()
 
     profile_ref=[os.environ.get('NEXIS_PROFILE','default')]
@@ -2830,19 +2825,6 @@ def main():
 if __name__=='__main__':
     main()
 
-    while True:
-        try:
-            csock,_=srv.accept()
-            db=_db()
-            s=Session(csock,db,mood_ref,auto)
-            threading.Thread(target=s.run,daemon=True).start()
-        except OSError: break
-        except Exception as e: _log(f'Accept: {e}','ERROR')
-    auto.stop(); env_mon.stop()
-    _log('Daemon stopped')
-
-if __name__=='__main__':
-    main()
 DAEMON_EOF
 
 chmod +x "$DAEMON_FILE"
