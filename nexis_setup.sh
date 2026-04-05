@@ -2898,7 +2898,8 @@ content = r'''
 #!/usr/bin/env python3
 """NeXiS Web Dashboard v8.1 — dense, fast, informative"""
 
-import json, sqlite3, os, re, subprocess
+import json, sqlite3, os, re, subprocess, threading
+import urllib.request, urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
@@ -2906,6 +2907,13 @@ from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 HOME        = Path.home()
+OLLAMA_BASE = "http://localhost:11434"
+
+def _ollama_ok():
+    try:
+        with urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=2) as r: return "active"
+    except: return "inactive"
+
 NEXIS_DATA  = HOME / ".local/share/nexis"
 NEXIS_CONF  = HOME / ".config/nexis"
 MEM_DB      = NEXIS_DATA / "memory" / "nexis_memory.db"
@@ -3087,7 +3095,7 @@ def _page_control(msg=None):
     loop_paused = (_auto_ref is not None and not _auto_ref._active.is_set())
     mood = _mood_ref[0] if _mood_ref else {}
     with _emotion_lock_ref: em = dict(_emotion_ref) if _emotion_ref else {"name":"baseline","intensity":0}
-    d_st=svc("nexis-daemon"); w_st="active"; o_st=_ollama_real() if hasattr(__builtins__,"_ollama_real") else _ollama_ok() if "_ollama_ok" in dir() else svc("ollama")
+    d_st=svc("nexis-daemon"); w_st="active"; o_st=_ollama_ok()
     db=_db(); lc=cc=le=None
     if db:
         r=db.execute("SELECT cycle_date,task FROM autonomous_log ORDER BY id DESC LIMIT 1").fetchone()
@@ -3697,7 +3705,10 @@ else
   _warn "nexis-daemon not yet active — check: journalctl -u nexis-daemon -n 30"
 fi
 
-# ===========================#!/usr/bin/env bash
+NEXIS_BIN_FILE="$NEXIS_BIN/nexis"
+
+sudo -u "$REAL_USER" tee "$NEXIS_BIN_FILE" > /dev/null << 'NEXIS_CLIENT_EOF'
+#!/usr/bin/env bash
 # =============================================================================
 # nexis — NeXiS Client v6.0
 # Connects to the persistent daemon via Unix socket.
@@ -3991,14 +4002,6 @@ mkdir -p "$NEXIS_DATA/state"
 printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\nXDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' \
   "${DISPLAY:-}" "${WAYLAND_DISPLAY:-}" "${XDG_RUNTIME_DIR:-}" "${DBUS_SESSION_BUS_ADDRESS:-}" \
   > "$NEXIS_DATA/state/.display_env" 2>/dev/null || true
-
-exec socat - UNIX-CONNECT:"$SOCKET_PATH"&& printf "  ${DIM}gpu     ${RST}%s\n" "$GPU_MEM" || echo ""
-echo -e "  ${CY}${DIM}  // web dashboard:  http://localhost:8080${RST}"
-echo -e "  ${CY}${DIM}  // NeXiS has been running. It has thoughts.${RST}"
-echo -e "  ${DIM}────────────────────────────────────────────────────────────${RST}"
-echo ""
-
-wait $PROBE_PID 2>/dev/null || true
 
 exec socat - UNIX-CONNECT:"$SOCKET_PATH"
 NEXIS_CLIENT_EOF
