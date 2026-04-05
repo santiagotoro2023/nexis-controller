@@ -2784,13 +2784,17 @@ def main():
         import importlib.util
         spec=importlib.util.spec_from_file_location('nexis_web',str(NEXIS_DATA/'nexis_web.py'))
         mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-        wt=threading.Thread(target=mod.start_web,
-            args=(_db,mood_ref,auto,_bg_procs,_bg_lock,_emotion,_emotion_lock,_session_state,_session_lock),
-            daemon=True,name='web')
+        def _web_target():
+            try: mod.start_web(_db,mood_ref,auto,_bg_procs,_bg_lock,_emotion,_emotion_lock,_session_state,_session_lock)
+            except Exception as _we:
+                import traceback
+                _log(f'Web thread crashed: {_we}\n{traceback.format_exc()[:800]}','ERROR')
+        wt=threading.Thread(target=_web_target,daemon=True,name='web')
         wt.start()
         _log('Web dashboard started')
     except Exception as e:
-        _log(f'Web start: {e}','WARN')
+        import traceback
+        _log(f'Web start FAILED: {e} — {traceback.format_exc()[:500]}','ERROR')
 
     def _shutdown(sig,frame):
         _log('Shutdown'); _stream('[system] Daemon shutting down')
@@ -2883,9 +2887,19 @@ def start_web(db_factory,mood_ref,auto_ref,bg_procs,bg_lock,emotion,emotion_lock
     _db_ref=db_factory;_mood_ref=mood_ref;_auto_ref=auto_ref
     _bg_ref=bg_procs;_bg_lock_ref=bg_lock
     _emotion_ref=emotion;_emotion_lock_ref=emotion_lock
+    import socket as _sock
     class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
-    ThreadedHTTPServer(("0.0.0.0",8080),Handler).serve_forever()
+        allow_reuse_address = True
+    for _port in (8080, 8081, 8082):
+        try:
+            srv = ThreadedHTTPServer(("0.0.0.0", _port), Handler)
+            print(f'NeXiS web serving on port {_port}', flush=True)
+            srv.serve_forever()
+            break
+        except OSError as _e:
+            print(f'Port {_port} unavailable: {_e}', flush=True)
+            continue
 
 def _db():
     try:
