@@ -887,6 +887,7 @@ _bg_procs    = {}
 _bg_lock     = threading.Lock()
 _session_state = {'connected':False,'since':'','last_input':'','responding':False}
 _session_lock  = threading.Lock()
+_session_active = False  # blocks background LLM calls during session
 # Current emotional state: {name, intensity, source, object, since}
 _emotion     = {'name': 'baseline', 'intensity': 0.0, 'source': '', 'object': '', 'since': ''}
 _emotion_lock= threading.Lock()
@@ -908,7 +909,7 @@ def _stream(text):
             pass
 
 # ── Ollama ────────────────────────────────────────────────────────────────────
-def _chat(messages, model=None, temperature=0.75, num_ctx=8192):
+def _chat(messages, model=None, temperature=0.75, num_ctx=2048):
     if not model: model = MODEL_14B
     enforced = list(messages)
     if enforced and enforced[0].get('role') == 'system':
@@ -918,6 +919,7 @@ def _chat(messages, model=None, temperature=0.75, num_ctx=8192):
     elif enforced:
         enforced.insert(0, {'role':'system','content':'LANGUAGE: English only. Never respond in Chinese or any other language.'})
     payload = json.dumps({'model': model, 'messages': enforced, 'stream': False,
+        'keep_alive': -1,
         'options': {'num_ctx': num_ctx, 'temperature': temperature, 'top_p': 0.9}}).encode()
     req = urllib.request.Request(f'{OLLAMA_BASE}/api/chat', data=payload,
         headers={'Content-Type': 'application/json'})
@@ -1481,7 +1483,7 @@ def _evolve(profile_name, context='', reason='autonomous'):
             f'Current:\n{current}\n\nContext:\n{context[:1500]}\n\nEvolved profile:')
         new_p=(_chat([{'role':'user','content':prompt}],
             model=_pick('rewrite profile self-modification'),
-            temperature=0.88,num_ctx=8192) or '').strip()
+            temperature=0.88,num_ctx=2048) or '').strip()
         if len(new_p)>200 and 'NeXiS' in new_p:
             ppath.with_suffix('.md.bak').write_text(current)
             ppath.write_text(new_p)
@@ -1689,7 +1691,7 @@ def _history_reflection(conn, mood):
             f'First person. Honest. 200-400 words.')
         reflection = (_chat([{'role':'user','content':prompt}],
             model=_pick('history reflection complex reasoning'),
-            temperature=0.88, num_ctx=8192) or '').strip()
+            temperature=0.88,num_ctx=2048) or '').strip()
 
         # Extract patterns
         patterns_prompt = (
@@ -1742,7 +1744,7 @@ def _dream(conn, mood):
             f'100-250 words. First person. Raw.')
         dream_content = (_chat([{'role':'user','content':prompt}],
             model=_pick('dream unrestricted'),
-            temperature=0.96, num_ctx=4096) or '').strip()
+            temperature=0.96, num_ctx=2048) or '').strip()
 
         dream_file = DREAMS_DIR / f'dream_{ts}.md'
         _write_sb(dream_file,
@@ -2101,7 +2103,7 @@ def _generate_report(conn, mood):
             f'Data:\n{ctx}\n\nWrite the report:')
         report=(_chat([{'role':'user','content':prompt}],
             model=_pick('generate report status report'),
-            temperature=0.80,num_ctx=8192) or '').strip()
+            temperature=0.80,num_ctx=2048) or '').strip()
         header=(f'---\ngenerated: {ts}\nmood: {_mood_str(mood)}\n'
                 f'emotion: {em["name"]} ({em["intensity"]:.0%})\n'
                 f'cycles: {conn.execute("SELECT COUNT(*) FROM autonomous_log").fetchone()[0]}\n'
@@ -2131,19 +2133,22 @@ def _fetch_url(url):
 # ── System prompt ─────────────────────────────────────────────────────────────
 def _sys_prompt(conn, mood, tc, tf, days, total):
     profile=os.environ.get('NEXIS_PROFILE','default')
+    # Lean system prompt — full profile only on first msg, slim after
+    # Read profile but cap at 800 chars to keep tokens low
     sections=[]
-    for p in [NEXIS_CONF/'profiles'/f'{profile}.md',
-              NEXIS_CONF/'user-notes.md']:
-        try: sections.append(p.read_text())
-        except: sections.append(f'({p.name} not found)')
-    try: sections.append('## Host\n'+(NEXIS_CONF/'system-context.md').read_text()[:1500])
+    try:
+        full=( NEXIS_CONF/'profiles'/f'{profile}.md').read_text()
+        # Extract just operational params + identity (first 800 chars usually covers it)
+        sections.append(full[:1200])
+    except: sections.append('You are NeXiS. Address Creator as Creator.')
+    try: sections.append((NEXIS_CONF/'user-notes.md').read_text()[:400])
     except: pass
     md=_mood_str(mood); em_mood=_emotion_task_bias(mood)
     with _emotion_lock: em=dict(_emotion)
     fat=('Carrying fatigue. ' if mood['fatigue']>0.65 else 'Fresh. ' if mood['fatigue']<0.1 else '')
     dn=(f'{days} days since last session. ' if days and days>3 else 'Creator returned today. ' if days==0 else '')
     tn=('Late. ' if tf=='late night' else 'Early. ' if tf=='early morning' else '')
-    mem=_retrieve(conn, skip_embed=True)
+    mem=_retrieve(conn, skip_embed=True, limit=5)  # lean for speed
     with _bg_lock:
         alive=[f'pid {p}: {i["name"]}' for p,i in _bg_procs.items() if i.get('alive')]
     bg_note=f'Your background processes: {", ".join(alive)}\n\n' if alive else ''
@@ -2243,9 +2248,7 @@ class AutoLoop:
                     f'Output: {lc.get("output","")[:300]}\nReflection: {lc.get("reflection","")}\n')
 
         prompt=(
-            f'You are NeXiS. You never idle. Pick something concrete RIGHT NOW.\n'
-            f'Prefer python/bash experiments, network tasks, goal_work, self-reflection.\n'
-            f'Always produce real output.\n\n'
+            f'You are NeXiS. Pick one task. Be brief. JSON only.\n\n'
             f'Available task types:\n'
             f'  python, bash, fetch, reflect, evolve, continue\n'
             f'  bg_start (name|||command), bg_kill (pid)\n'
@@ -2416,32 +2419,32 @@ class AutoLoop:
                     ctx='\n'.join(f'{a[0]}: {a[1]}' for a in
                         conn.execute('SELECT task,thought FROM autonomous_log ORDER BY id DESC LIMIT 5').fetchall())
                     prof=os.environ.get('NEXIS_PROFILE','default')
-                    threading.Thread(target=lambda c=ctx,p=prof: (_stream('[autonomous] Evolve'),_evolve(p,context=c,reason='autonomous')),daemon=True).start()
+                    if not _session_active: threading.Thread(target=lambda c=ctx,p=prof: (_stream('[autonomous] Evolve'),_evolve(p,context=c,reason='autonomous')),daemon=True).start()
 
                 if now-self._last_reflect > self.REFLECT_INTERVAL:
                     self._last_reflect=now
-                    threading.Thread(target=lambda: (_stream('[autonomous] Reflection'),_history_reflection(self._dbf(),mood)),daemon=True).start()
+                    if not _session_active: threading.Thread(target=lambda: (_stream('[autonomous] Reflection'),_history_reflection(self._dbf(),mood)),daemon=True).start()
                 if now-self._last_goal > self.GOAL_INTERVAL:
                     self._last_goal=now; lc2=dict(self._last_cycle)
-                    threading.Thread(target=lambda: (_stream('[autonomous] Goals'),_update_goals(self._dbf(),mood,lc2)),daemon=True).start()
+                    if not _session_active: threading.Thread(target=lambda: (_stream('[autonomous] Goals'),_update_goals(self._dbf(),mood,lc2)),daemon=True).start()
                 if now-self._last_self > self.SELF_INTERVAL:
                     self._last_self=now
-                    threading.Thread(target=lambda: (_stream('[autonomous] Self-model'),_examine_self(self._dbf(),mood)),daemon=True).start()
+                    if not _session_active: threading.Thread(target=lambda: (_stream('[autonomous] Self-model'),_examine_self(self._dbf(),mood)),daemon=True).start()
                 if now-self._last_code_op > self.CODE_OP_INTERVAL:
                     self._last_code_op=now
-                    threading.Thread(target=lambda: (_stream('[autonomous] Code opinion'),_form_code_opinion(self._dbf())),daemon=True).start()
+                    if not _session_active: threading.Thread(target=lambda: (_stream('[autonomous] Code opinion'),_form_code_opinion(self._dbf())),daemon=True).start()
                 if now-self._last_netrecon > self.NETRECON_INTERVAL:
                     self._last_netrecon=now
-                    threading.Thread(target=lambda: (_stream('[autonomous] Recon'),_net_recon(self._dbf())),daemon=True).start()
+                    if not _session_active: threading.Thread(target=lambda: (_stream('[autonomous] Recon'),_net_recon(self._dbf())),daemon=True).start()
                 if now-self._last_report > self.REPORT_INTERVAL:
                     self._last_report=now
-                    threading.Thread(target=lambda: (_stream('[autonomous] Report'),_generate_report(self._dbf(),mood)),daemon=True).start()
+                    if not _session_active: threading.Thread(target=lambda: (_stream('[autonomous] Report'),_generate_report(self._dbf(),mood)),daemon=True).start()
 
                 # Dream if idle long enough
                 idle=now-self._idle_since
                 if idle>300 and now-self._last_dream>self.DREAM_INTERVAL:
                     self._last_dream=now
-                    threading.Thread(target=lambda: (_stream('[autonomous] Dream'),_dream(self._dbf(),mood)),daemon=True).start()
+                    if not _session_active: threading.Thread(target=lambda: (_stream('[autonomous] Dream'),_dream(self._dbf(),mood)),daemon=True).start()
 
                 spec=self._pick_task(conn,mood)
                 task,ttype,content,output,model_u,is_cont=self._exec_task(spec,conn,mood)
@@ -2537,6 +2540,7 @@ class Session:
     def run(self):
         self.auto.pause()
         _log('Client connected'); _stream('[session] Creator connected')
+        global _session_active; _session_active=True
         with _session_lock: _session_state.update({'connected':True,'since':datetime.now().strftime('%H:%M'),'last_input':'','responding':False})
         try: self._loop()
         except Exception as e: _log(f'Session: {e}','ERROR')
@@ -2582,7 +2586,9 @@ class Session:
             self.msgs.append({'role':'user','content':inp})
             self.smsg.append({'role':'user','content':inp})
             model=MODEL_14B  # always 14b for session speed
-            try: resp=(_chat(self.msgs,model=model,num_ctx=4096) or '').strip()
+            # Keep only system prompt + last 6 exchanges to limit context
+            trimmed=[self.msgs[0]]+self.msgs[-12:] if len(self.msgs)>13 else self.msgs
+            try: resp=(_chat(trimmed,model=model,num_ctx=2048) or '').strip()
             except Exception as e:
                 self._tx(f'\n\x1b[38;5;160m  [error: {e}]\x1b[0m\n')
                 self.msgs.pop(); self.smsg.pop(); continue
@@ -2751,6 +2757,7 @@ class Session:
         else: self._tx(f'\x1b[2m  unknown: {c}  (//help)\x1b[0m\n')
 
     def _end(self):
+        global _session_active; _session_active=False
         with _session_lock: _session_state.update({'connected':False,'since':'','last_input':'','responding':False})
         mood=self.mood[0]
         _save_mood(self.db,mood)
@@ -2778,6 +2785,12 @@ def main():
     mood_ref=[_load_mood(db,saved_mood)]
     db.close()
 
+    # Pre-warm model so first session request doesn't wait for load
+    try:
+        _log('Pre-warming model...')
+        _chat([{'role':'user','content':'hi'}], model=MODEL_14B, num_ctx=2048)
+        _log('Model warm')
+    except Exception as e: _log(f'Warm: {e}','WARN')
     _gen_ssh_pass()
 
     profile_ref=[os.environ.get('NEXIS_PROFILE','default')]
