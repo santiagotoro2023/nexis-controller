@@ -3685,6 +3685,7 @@ _load_state() {
   PROFILE="${NEXIS_PROFILE:-default}"
   local _pf="$NEXIS_DATA/state/.profile"
   [[ -f "$_pf" ]] && PROFILE=$(cat "$_pf" 2>/dev/null || echo "default")
+}
 _save_state() {
   mkdir -p "$(dirname "$STATE_FILE")"
   echo "NEXIS_PROFILE=\"$PROFILE\"" > "$STATE_FILE"
