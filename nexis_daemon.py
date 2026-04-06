@@ -1176,6 +1176,7 @@ def _process_tools(text, conn, on_status=None, user_text=''):
 class Session:
     def __init__(self, sock, db):
         self.sock = sock; self.db = db; self.hist = []
+        self._session_id = 'cli_' + datetime.now().strftime('%Y%m%d_%H%M%S')
 
     def _tx(self, s):
         try:
@@ -1338,6 +1339,15 @@ class Session:
                     self._tx('\x1b[2m  skipped.\x1b[0m\n')
 
             self.hist.append({'role':'assistant','content': clean or resp})
+            # Persist to chat_history DB
+            try:
+                self.db.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
+                    (self._session_id, 'user', user_msg))
+                self.db.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
+                    (self._session_id, 'assistant', clean or resp))
+                self.db.commit()
+            except Exception as e:
+                _log(f'CLI chat history save: {e}', 'WARN')
 
         self._end()
 
@@ -1373,6 +1383,26 @@ class Session:
         elif c in ('exit','quit','bye','disconnect'):
             self._tx('\x1b[38;5;172m  disconnecting...\x1b[0m\n')
             raise StopIteration
+        elif c == 'history':
+            rows = self.db.execute(
+                'SELECT DISTINCT session_id, MIN(created_at) as started '
+                'FROM chat_history GROUP BY session_id ORDER BY started DESC LIMIT 10'
+            ).fetchall()
+            if not rows:
+                self._tx('\x1b[2m  no chat history yet\x1b[0m\n')
+            else:
+                for s in rows:
+                    sid = s['session_id']
+                    ts = str(s['started'])[:16]
+                    msgs = self.db.execute(
+                        'SELECT role, content FROM chat_history WHERE session_id=? ORDER BY id LIMIT 2',
+                        (sid,)).fetchall()
+                    preview = ''
+                    for m in msgs:
+                        who = 'Creator' if m['role'] == 'user' else 'NeXiS'
+                        preview += f' {who}: {m["content"][:60]}'
+                    src = '(cli)' if sid.startswith('cli_') else '(web)'
+                    self._tx(f'\x1b[2m  {ts} {src}{preview}\x1b[0m\n')
         elif c == 'sources':
             if hasattr(self, '_sources') and self._sources:
                 self._tx('\x1b[2m  Last research sources:\x1b[0m\n')
@@ -1390,6 +1420,7 @@ class Session:
                 '  //probe            system information\n'
                 '  //search <query>   web search\n'
                 '  //sources          show research sources from last query\n'
+                '  //history          show recent chat sessions\n'
                 '  //exit             disconnect\n'
                 '  //help             this\n'
                 '\n'
@@ -1743,23 +1774,12 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
             for tok in buf: yield tok
     else:
         for tok in buf: yield tok
+    # Store final response for post-stream persistence
+    _web_chat_stream._last = (user_content, clean or resp)
     with _web_lock:
         _web_hist.append({'role':'user','content':user_content})
         _web_hist.append({'role':'assistant','content':clean or resp})
         if len(_web_hist)>40: _web_hist[:]=_web_hist[-60:]
-    # Persist to DB outside the lock
-    try:
-        dbc = _db()
-        dbc.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
-            (_web_session_id, 'user', user_content))
-        dbc.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
-            (_web_session_id, 'assistant', clean or resp))
-        dbc.commit(); dbc.close()
-    except Exception as e:
-        _log(f'Chat history save: {e}', 'WARN')
-    threading.Thread(target=_store_memory,args=(_db(),
-        [{'role':'user','content':user_content},
-         {'role':'assistant','content':clean or resp}]),daemon=True).start()
 
 def _start_web():
     from http.server import HTTPServer,BaseHTTPRequestHandler
@@ -1802,6 +1822,23 @@ def _start_web():
                         self.wfile.write(b'data: [DONE]\n\n')
                         self.wfile.flush()
                     except Exception as e: _log(f'Stream write: {e}','WARN')
+                    # Persist chat history + memory AFTER stream completes
+                    try:
+                        last = getattr(_web_chat_stream, '_last', None)
+                        if last:
+                            uc, ar = last
+                            dbc = _db()
+                            dbc.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
+                                (_web_session_id, 'user', uc))
+                            dbc.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
+                                (_web_session_id, 'assistant', ar))
+                            dbc.commit()
+                            dbc.close()
+                            threading.Thread(target=_store_memory, args=(_db(),
+                                [{'role':'user','content':uc},
+                                 {'role':'assistant','content':ar}]), daemon=True).start()
+                            _web_chat_stream._last = None
+                    except Exception as e: _log(f'Chat persist: {e}','WARN')
                 elif path=='/api/clear':
                     global _web_hist
                     with _web_lock: _web_hist=[]
