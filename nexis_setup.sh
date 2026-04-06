@@ -111,6 +111,8 @@ if [[ "${1:-}" == "--uninstall" ]]; then
 
   userdel -r nexis 2>/dev/null && _ok "nexis user removed" || _warn "nexis user not found"
   groupdel nexis 2>/dev/null || true
+  # Force remove home if userdel left it
+  rm -rf /home/nexis
   gpasswd -d "$REAL_USER" nexis 2>/dev/null || true
 
   rm -f "$REAL_HOME/.local/bin/nexis"
@@ -1791,10 +1793,19 @@ class Session:
     def _rx(self):
         buf = b''
         try:
+            self.sock.settimeout(300)
             while True:
                 ch = self.sock.recv(1)
-                if not ch or ch == b'\n': break
+                if not ch: return 'exit'
                 if ch == b'\x04': return 'exit'
+                if ch in (b'\n', b'\r'):
+                    if ch == b'\r':
+                        try:
+                            nxt = self.sock.recv(1)
+                            if nxt not in (b'\n', b'\r') and nxt:
+                                buf += nxt
+                        except Exception: pass
+                    break
                 buf += ch
         except Exception: return 'exit'
         return buf.decode('utf-8', 'replace').strip()
@@ -1834,15 +1845,18 @@ class Session:
         try: self._loop()
         except Exception as e: _log(f'Session error: {e}', 'ERROR')
         finally:
-            self.auto.resume()
             _session_active = False
             with _session_lock:
                 _session_state.update({
                     'connected': False, 'since': '',
                     'last_input': '', 'responding': False
                 })
-            self._end()
-            _stream('[session] Creator disconnected')
+            try: self._end()
+            except Exception as e: _log(f'Session end error: {e}', 'WARN')
+            try: self.sock.close()
+            except Exception: pass
+            self.auto.resume()
+            _stream('[session] Creator disconnected — loop resumed')
 
     def _loop(self):
         mood = self.mood[0]
