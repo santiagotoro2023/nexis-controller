@@ -615,7 +615,6 @@ def _chat(messages, model=None, temperature=0.75, num_ctx=2048, keep_alive='24h'
             'num_ctx': num_ctx,
             'temperature': temperature,
             'top_p': 0.9,
-            'num_gpu': 99,   # use all GPU layers (NVIDIA)
         }
     }).encode()
 
@@ -635,7 +634,7 @@ def _chat(messages, model=None, temperature=0.75, num_ctx=2048, keep_alive='24h'
                     data=json.dumps({
                         'model': MODEL_FAST, 'messages': enforced,
                         'stream': False, 'keep_alive': keep_alive,
-                        'options': {'num_ctx': num_ctx, 'temperature': temperature, 'num_gpu': 99}
+                        'options': {'num_ctx': num_ctx, 'temperature': temperature, 'top_p': 0.9}
                     }).encode(),
                     headers={'Content-Type': 'application/json'})
                 with urllib.request.urlopen(req2, timeout=120) as r2:
@@ -2711,7 +2710,7 @@ def _web_chat_send(msg):
         payload = json.dumps({
             'model': 'qwen2.5:14b', 'messages': msgs,
             'stream': False, 'keep_alive': '24h',
-            'options': {'num_ctx': 2048, 'temperature': 0.75, 'num_gpu': 99}
+            'options': {'num_ctx': 2048, 'temperature': 0.75}
         }).encode()
         req = urllib.request.Request('http://localhost:11434/api/chat',
             data=payload, headers={'Content-Type': 'application/json'})
