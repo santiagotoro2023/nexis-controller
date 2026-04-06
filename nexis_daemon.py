@@ -840,13 +840,23 @@ def _pre_research(text, on_status=None, hist=None):
             r'thanks|thank you|thx|ok|okay|sure|yes|yep|nah|bye|'
             r'exit|quit|help|lol|haha|hah|hmm|cool|nice|great)(\s*$|[!.,]?\s*$)',
             text_clean, re.IGNORECASE)
+        # Skip questions directed at NeXiS itself (not external facts)
+        _is_self_question = bool(re.search(
+            r'\b(your|you)\b.{0,20}\b(directive|purpose|name|function|role|mission|'
+            r'goal|job|task|capabilities|abilities|personality|opinion|think|feel|'
+            r'remember|memory|memories|know about me|think of me)\b',
+            text_clean, re.IGNORECASE)) or bool(re.match(
+            r'(?i)^(who are you|what are you|what can you do|how do you work|'
+            r'what do you think|do you remember|what have you learned|'
+            r'what did you learn|how are you|are you okay|are you there)',
+            text_clean))
         # Also skip pure desktop commands like "open steam" but NOT "open an online guide..."
         _is_desktop_cmd = bool(re.match(
             r'^(open|launch|close|start)\s+\S+\s*$',
             text_clean, re.IGNORECASE))
         is_too_short = len(text_clean.split()) <= 2 and not re.search(r'[A-Z]{2,}', text_clean)
 
-        if not _SKIP_SEARCH and not _is_desktop_cmd and not correction and not is_too_short:
+        if not _SKIP_SEARCH and not _is_self_question and not _is_desktop_cmd and not correction and not is_too_short:
             # Build search query
             q = re.sub(
                 r"(?i)^(hey|hi|please|can you|could you|tell me|find out|look up|"
