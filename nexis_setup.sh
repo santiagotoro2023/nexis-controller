@@ -1,1 +1,2 @@
-SETUP_CONTENT
+#!/usr/bin/env bash
+# placeholder will be replaced
