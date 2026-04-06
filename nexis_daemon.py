@@ -928,8 +928,21 @@ def _pre_research(text, on_status=None, hist=None):
 
     if not results:
         return ''
+    # Extract and store source URLs for citation
+    sources = []
+    for r in results:
+        for url in re.findall(r'https?://[^\s\n\]>),"]+', r):
+            if url not in sources and len(url) > 15:
+                sources.append(url)
+    with _last_sources_lock:
+        global _last_sources
+        _last_sources = sources[:15]  # Keep max 15 sources
     sep = '\n\n--- Research context (use this; do not quote verbatim) ---\n'
-    return sep + '\n\n'.join(results)
+    # Append source list for the LLM to reference
+    source_block = ''
+    if sources:
+        source_block = '\n\n--- Sources used ---\n' + '\n'.join(f'[{i+1}] {u}' for i, u in enumerate(sources[:10]))
+    return sep + '\n\n'.join(results) + source_block
 
 
 def _load_personality():
@@ -971,6 +984,8 @@ def _build_system(conn):
         '\n- NEVER begin a response with prose like \'In the shadows of...\' or \'As the digital winds...\'.'
         '\n- Respond ONLY in English. Never use Chinese, Japanese, Korean, or any other language.'
         '\n- If Research context is provided, use it as your primary source. You may add brief context from your knowledge, but NEVER invent specific facts, URLs, or dates.'
+        '\n- When Research context includes a "Sources used" section, remember these sources. If Creator asks where you found information, cite the relevant source URLs.'
+        '\n- If Creator asks for sources, cite the numbered URLs from the Sources used section.'
         '\n- If Research context says no results or search failed, say: "I could not find information about that." NEVER guess or invent.'
         '\n- NEVER invent video titles, URLs, dates, company descriptions, or factual claims.'
         '\n- NEVER make up URLs. Only use URLs verbatim from Research context.'
@@ -1217,6 +1232,8 @@ class Session:
             # Pre-research: gather info BEFORE the LLM speaks
             def on_status(msg): self._tx(f'\x1b[2m  ↻ {msg}\x1b[0m\n')
             pre_ctx = _pre_research(user_msg, on_status, hist=self.hist)
+            with _last_sources_lock:
+                self._sources = list(_last_sources)
             self.hist.append({'role':'user','content': user_msg})
             msgs = [{'role':'system','content':sys_p}] + self.hist[-30:]
             if pre_ctx:
@@ -1330,6 +1347,13 @@ class Session:
         elif c in ('exit','quit','bye','disconnect'):
             self._tx('\x1b[38;5;172m  disconnecting...\x1b[0m\n')
             raise StopIteration
+        elif c == 'sources':
+            if hasattr(self, '_sources') and self._sources:
+                self._tx('\x1b[2m  Last research sources:\x1b[0m\n')
+                for i, s in enumerate(self._sources, 1):
+                    self._tx(f'\x1b[2m  [{i}] {s}\x1b[0m\n')
+            else:
+                self._tx('\x1b[2m  no sources from last query\x1b[0m\n')
         elif c == 'help':
             self._tx(
                 '\x1b[2m'
@@ -1339,6 +1363,7 @@ class Session:
                 '  //status           session info\n'
                 '  //probe            system information\n'
                 '  //search <query>   web search\n'
+                '  //sources          show research sources from last query\n'
                 '  //exit             disconnect\n'
                 '  //help             this\n'
                 '\n'
@@ -1358,6 +1383,8 @@ class Session:
 # ── Web ────────────────────────────────────────────────────────────────────────
 _web_hist = []; _web_lock = threading.Lock()
 _web_session_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+_last_sources = []  # URLs/sources from the most recent research
+_last_sources_lock = threading.Lock()
 
 _CSS = (
     ":root{--bg:#080807;--bg2:#0d0d0a;--bg3:#131310;--or:#e8720c;--or2:#c45c00;"
@@ -1534,6 +1561,14 @@ function renderMd(t){
   t=t.replace(/\n/g,'<br>');
   return t;
 }
+function showSrc(){
+  fetch('/api/sources').then(function(r){return r.json()}).then(function(d){
+    if(!d.sources||!d.sources.length){alert('No sources from last query.');return;}
+    var s='Sources used:\n\n';
+    for(var i=0;i<d.sources.length;i++) s+='['+(i+1)+'] '+d.sources[i]+'\n';
+    alert(s);
+  });
+}
 function clr(){fetch('/api/clear',{method:'POST'}).then(function(){location.reload()});}
 document.addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey&&document.activeElement.id==='inp'){
@@ -1581,6 +1616,7 @@ def _page_chat():
         '<span id=fb class=fbadge></span>'
         '<textarea id=inp rows=2 placeholder="Speak."></textarea>'
         '<button class=btn onclick=send()>Send</button>'
+        "<button class='btn sec' onclick=showSrc()>Sources</button>"
         "<button class='btn sec' onclick=clr()>Clear</button>"
         '</div></div>'
         f'<script>{_CHAT_JS}</script>'
@@ -1756,6 +1792,10 @@ def _start_web():
                 elif path=='/memory': self._send(200,_page_memory(db))
                 elif path=='/status': self._send(200,_page_status(db))
                 elif path=='/history': self._send(200,_page_history(db))
+                elif path=='/api/sources':
+                    with _last_sources_lock:
+                        src = list(_last_sources)
+                    self._send(200, json.dumps({'sources': src}), 'application/json')
                 else: self._send(404,'<pre>404</pre>')
             except Exception as e: self._send(500,f'<pre>{_esc(str(e))}</pre>')
             finally: db.close()
