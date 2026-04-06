@@ -1,2 +1,1 @@
-#!/usr/bin/env python3
-# placeholder
+DAEMON_REAL
