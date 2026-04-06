@@ -948,11 +948,7 @@ def _pre_research(text, on_status=None, hist=None):
         global _last_sources
         _last_sources = sources[:15]  # Keep max 15 sources
     sep = '\n\n--- Research context (use this; do not quote verbatim) ---\n'
-    # Append source list for the LLM to reference
-    source_block = ''
-    if sources:
-        source_block = '\n\n--- Sources used ---\n' + '\n'.join(f'[{i+1}] {u}' for i, u in enumerate(sources[:10]))
-    return sep + '\n\n'.join(results) + source_block
+    return sep + '\n\n'.join(results)
 
 
 def _load_personality():
@@ -994,8 +990,8 @@ def _build_system(conn):
         '\n- NEVER begin a response with prose like \'In the shadows of...\' or \'As the digital winds...\'.'
         '\n- Respond ONLY in English. Never use Chinese, Japanese, Korean, or any other language.'
         '\n- If Research context is provided, use it as your primary source. You may add brief context from your knowledge, but NEVER invent specific facts, URLs, or dates.'
-        '\n- When Research context includes a "Sources used" section, remember these sources. If Creator asks where you found information, cite the relevant source URLs.'
-        '\n- If Creator asks for sources, cite the numbered URLs from the Sources used section.'
+        '\n- NEVER list sources, references, or numbered URL citations in your response. Sources are tracked separately.'
+        '\n- If Creator asks where you found information or asks for sources, tell them to use //sources or the Sources button.'
         '\n- If Research context says no results or search failed, say: "I could not find information about that." NEVER guess or invent.'
         '\n- NEVER invent video titles, URLs, dates, company descriptions, or factual claims.'
         '\n- NEVER make up URLs. Only use URLs verbatim from Research context.'
@@ -1052,31 +1048,44 @@ def _desktop(action, arg):
             return f'opened: {arg[:60]}'
         elif act == 'tab':
             # Open a new tab in an existing browser using xdotool
+            import time as _time
             try:
-                # Find the browser window
-                browser = None
-                for b in ['google-chrome', 'chromium', 'firefox', 'brave']:
-                    r = subprocess.run(['pgrep', '-f', b], capture_output=True)
-                    if r.returncode == 0:
-                        browser = b
+                # Find a running browser by checking wmctrl window list
+                wlist = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True, env=env)
+                browser_win = None
+                for line in wlist.stdout.splitlines():
+                    low = line.lower()
+                    if any(b in low for b in ['chrome', 'chromium', 'firefox', 'brave', 'mozilla']):
+                        # Extract window ID (first column)
+                        browser_win = line.split()[0]
                         break
-                if browser:
-                    # Activate the browser window and send Ctrl+T
-                    subprocess.run(['wmctrl', '-a', browser.replace('-', ' ').title()],
-                        capture_output=True, env=env)
-                    import time; time.sleep(0.3)
-                    subprocess.run(['xdotool', 'key', 'ctrl+t'], env=env,
-                        capture_output=True)
-                    if arg and arg.lower() not in ('', 'new', 'blank', 'newtab'):
-                        import time; time.sleep(0.3)
-                        # Type the URL and press Enter
-                        subprocess.run(['xdotool', 'key', 'ctrl+l'], env=env, capture_output=True)
-                        import time; time.sleep(0.1)
-                        subprocess.run(['xdotool', 'type', '--delay', '10', arg], env=env, capture_output=True)
-                        subprocess.run(['xdotool', 'key', 'Return'], env=env, capture_output=True)
-                    return f'new tab opened{": " + arg[:50] if arg else ""}'
-                else:
-                    return '(no browser found)'
+                if not browser_win:
+                    # Fallback: check running processes
+                    for b in ['google-chrome', 'chromium-browser', 'firefox', 'brave-browser']:
+                        r = subprocess.run(['pgrep', '-f', b], capture_output=True)
+                        if r.returncode == 0:
+                            # Open URL in existing browser
+                            url = arg if arg and arg.startswith('http') else 'about:newtab'
+                            subprocess.Popen([b, url], env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            return f'new tab opened{": " + arg[:50] if arg else ""}'
+                    return '(no browser window found — open a browser first)'
+                # Activate the browser window
+                subprocess.run(['wmctrl', '-i', '-a', browser_win], capture_output=True, env=env)
+                _time.sleep(0.3)
+                # Send Ctrl+T for new tab
+                subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+t'],
+                    env=env, capture_output=True)
+                if arg and arg.lower() not in ('', 'new', 'blank', 'newtab'):
+                    _time.sleep(0.4)
+                    subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+l'],
+                        env=env, capture_output=True)
+                    _time.sleep(0.2)
+                    subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '8', arg],
+                        env=env, capture_output=True)
+                    _time.sleep(0.1)
+                    subprocess.run(['xdotool', 'key', 'Return'], env=env, capture_output=True)
+                return f'new tab opened{": " + arg[:50] if arg else ""}'
             except Exception as e:
                 return f'(tab failed: {e})'
         elif act == 'close':
@@ -1147,13 +1156,20 @@ def _process_tools(text, conn, on_status=None, user_text=''):
     tools = {k: v for k, v in tools.items() if v}
     # Fallback: if user asked to open/launch something but LLM didn't emit DESKTOP tag
     if user_wants_desktop and not any('[DESKTOP:' in k for k in tools):
-        # Extract what to open from user text
-        open_m = re.search(r'\b(?:open|launch|start)\s+(.+)', user_text, re.IGNORECASE)
-        if open_m:
-            target = open_m.group(1).strip().rstrip('?!.')
-            result = _desktop('open', target)
+        # Detect "new tab" requests
+        tab_req = re.search(r'\b(?:open|new)\b.{0,15}\b(?:tab|new tab)\b', user_text, re.IGNORECASE)
+        if tab_req:
+            result = _desktop('tab', '')
             if result:
-                tools[f'[DESKTOP: open | {target}]'] = result
+                tools['[DESKTOP: tab | ]'] = result
+        else:
+            # Extract what to open from user text
+            open_m = re.search(r'\b(?:open|launch|start)\s+(.+)', user_text, re.IGNORECASE)
+            if open_m:
+                target = open_m.group(1).strip().rstrip('?!.')
+                result = _desktop('open', target)
+                if result:
+                    tools[f'[DESKTOP: open | {target}]'] = result
     return clean.strip(), tools
 
 
@@ -1535,14 +1551,14 @@ function send(){
       reader.read().then(function(d){
         if(d.done){nc.innerHTML=renderMd(buf);M.scrollTop=M.scrollHeight;return;}
         raw+=dec.decode(d.value,{stream:true});
-        var lines=raw.split('\n');
-        raw=lines.pop();
-        for(var i=0;i<lines.length;i++){
-          var line=lines[i];
-          if(line.startsWith('data: ')){
-            var data=line.substring(6);
+        var parts=raw.split('\n\n');
+        raw=parts.pop();
+        for(var i=0;i<parts.length;i++){
+          var p=parts[i].trim();
+          if(p.startsWith('data: ')){
+            var data=p.substring(6);
             if(data==='[DONE]') continue;
-            buf+=data+'\n';
+            buf+=data.replace(/\x00/g,'\n');
           }
         }
         nc.innerHTML=renderMd(buf)+'<span style="color:var(--or3)">&#x25ae;</span>';
@@ -1778,10 +1794,10 @@ def _start_web():
                     try:
                         for chunk in _web_chat_stream(msg,fd,ft,fn):
                             if chunk:
-                                # SSE format: data: {chunk}\n\n
-                                for line in chunk.split('\n'):
-                                    self.wfile.write(f'data: {line}\n'.encode('utf-8'))
-                                self.wfile.write(b'\n')
+                                # SSE: send each chunk as a single data line
+                                # Encode newlines as \x00 so JS can restore them
+                                safe = chunk.replace('\n', '\x00')
+                                self.wfile.write(f'data: {safe}\n\n'.encode('utf-8'))
                                 self.wfile.flush()
                         self.wfile.write(b'data: [DONE]\n\n')
                         self.wfile.flush()
