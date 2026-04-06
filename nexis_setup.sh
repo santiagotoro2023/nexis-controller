@@ -56,12 +56,12 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   systemctl daemon-reload 2>/dev/null || true
   _ok "Service stopped"
 
-  read -rp "$(echo -e "${OR}  Keep memories? (y=keep, N=wipe) [y/N]: ")" KEEP_MEM
+  read -rp "$(echo -e "${OR}  Keep memories and chat history? (y=keep, N=wipe) [y/N]: ")" KEEP_MEM
   if [[ "$KEEP_MEM" =~ ^[Yy]$ ]]; then
     if [[ -f "$DB_PATH" ]]; then
       BACKUP="$REAL_HOME/nexis_memories_backup_$(date +%Y%m%d_%H%M%S).db"
       cp "$DB_PATH" "$BACKUP"
-      _ok "Memories backed up: $BACKUP"
+      _ok "Memories and chat history backed up: $BACKUP"
     else
       _warn "No memory DB found"
     fi

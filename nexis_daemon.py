@@ -723,6 +723,10 @@ def _pre_research(text, on_status=None, hist=None):
     if re.match(r'^(\s*\[Image:.*?\]\s*)$', text_clean):
         return ''
 
+    # --- 0. System probe: detect questions about the host system ---
+    if re.search(r'\b(system info|system you|running on|hostname|cpu|gpu|ram|memory|disk|uptime|hardware|specs|what system|server info|this machine|this server)\b', text_clean, re.IGNORECASE):
+        results.append(f'[System Info]:\n{_system_probe()}')
+
     # --- Helper: extract last URLs from conversation history ---
     def _last_urls_from_hist(n=3):
         if not hist: return []
@@ -748,21 +752,21 @@ def _pre_research(text, on_status=None, hist=None):
         if r and not r.startswith('Fetch failed'):
             results.append(f'[Fetched {url[:60]}]:\n{r[:3000]}')
 
-    # --- 2. "open their website / page / link" → scrape from history ---
+    # --- 2. "open their website / page / link" → use URLs from last assistant message ---
     if not urls_in_msg and re.search(
-            r"\b(open|visit|go to|show me|browse)\b.{0,30}\b(their|its|the)\b.{0,20}\b(website|site|page|link|url)\b",
+            r"\b(open|visit|go to|show me|browse)\b.{0,40}\b(their|its|the|that)\b.{0,30}\b(website|site|page|link|url|linkedin|profile|team)\b",
             text_clean, re.IGNORECASE):
-        hist_urls = _last_urls_from_hist(5)
-        for url in hist_urls:
-            if on_status: on_status(f'fetching: {url[:55]}')
-            page = _fetch_url(url)
-            if page and not page.startswith('Fetch failed'):
-                # Extract all external links from the fetched page
-                links = re.findall(r'href=["\'](https?://[^"\'>\s]{8,})["\'> ]', page)
-                links = [l for l in links if not any(x in l for x in
-                    ['facebook','twitter','linkedin','google','dnb.com',url.split('/')[2]])]
-                if links:
-                    results.append(f'[Links found on {url[:60]}]:\n' + '\n'.join(links[:10]))
+        # Only get URLs from the most recent assistant response
+        if hist:
+            for m in reversed(hist[-4:]):
+                if m.get('role') == 'assistant':
+                    last_urls = re.findall(r'https?://[^\s\]>),"]+', m.get('content', ''))
+                    # Filter to just the main domains, skip tracking/ad URLs
+                    last_urls = [u for u in last_urls if not any(x in u for x in
+                        ['dnb.com', 'tracxn.com', 'instagram.com'])]
+                    if last_urls:
+                        for url in last_urls[:3]:
+                            results.append(f'[URL from previous response]: {url}')
                     break
 
     # --- 3. YouTube: latest video for a channel ---
@@ -854,9 +858,25 @@ def _pre_research(text, on_status=None, hist=None):
             q = re.sub(r"(?i)\b(come on|try harder|that is not|those arrent|arrent even|"
                 r"dont hallucinate|dont make up|nopesies|wrong|nope|"
                 r"referencing|of course|and open|open the|that aligns with|"
-                r"what you already know|you said|in your|last response)\b", '', q)
+                r"what you already know|you said|in your|last response|"
+                r"try and research|research more|are you sure|"
+                r"where did you get|the information|from somewhere|"
+                r"you must have|its correct|but where|so where|"
+                r"what about if you|if you search|in the context of|"
+                r"give me all the|all the information|you can find|"
+                r"keep that in mind|for the future|anyway|specifically)\b", '', q)
             q = re.sub(r"[?!.,]+$", '', q).strip()
             q = re.sub(r"\s+", ' ', q).strip()[:140]
+            # If query is too vague after stripping, extract topic from history
+            if len(q) < 5 and hist:
+                for prev_m in reversed(hist[-6:]):
+                    if prev_m.get('role') == 'user':
+                        prev_text = prev_m.get('content', '').strip()
+                        prev_text = re.sub(r'\n\n--- Research.*$', '', prev_text, flags=re.DOTALL).strip()
+                        # Skip corrections and meta-talk
+                        if len(prev_text) > 10 and not re.match(r'(?i)^(no|nope|wrong|try|are you|where did|you said|but)', prev_text):
+                            q = re.sub(r"(?i)^(who is|what is|what about|tell me about|where does)\s+", '', prev_text).strip()[:140]
+                            break
             # Detect LinkedIn/profile search requests
             linkedin_search = bool(re.search(r'\b(linkedin|profile|social media)\b', text_clean, re.IGNORECASE))
             if linkedin_search:
@@ -932,9 +952,10 @@ def _build_system(conn):
         '\n- Keep personality touches SHORT \u2014 a few words at most. Never let personality override usefulness.'
         '\n- When corrected, accept it cleanly: "Noted, Creator." or "Correcting. Stand by."'
         '\n\n## Tools'
-        '\n- System info: include [PROBE] in response'
-        '\n- Open/close/launch apps, notify, clipboard: [DESKTOP: action | argument]'
-        '\n  Actions: open, close, launch, notify, clip'
+        '\n- When Creator asks about system info, hardware, hostname, CPU, GPU, RAM, disk, network, or what system you run on: include [PROBE] in your response. This triggers a system probe.'
+        '\n- Open/close/launch apps, notify, clipboard, browser tabs: [DESKTOP: action | argument]'
+        '\n  Actions: open, close, launch, notify, clip, tab'
+        '\n  Use [DESKTOP: tab | url] to open a new tab in the existing browser, or [DESKTOP: tab | ] for a blank tab.'
         '\n- ONLY use [DESKTOP: ...] when Creator EXPLICITLY asks to open, launch, or start something.'
         '\n- NEVER use [DESKTOP: ...] on your own initiative. If Creator mentions an app in conversation, do NOT open it.'
         '\n- NEVER invent URLs. NEVER write [SEARCH:] or [FETCH:] tags. Research is done for you.'
@@ -1004,6 +1025,35 @@ def _desktop(action, arg):
             subprocess.Popen(cmd, env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return f'opened: {arg[:60]}'
+        elif act == 'tab':
+            # Open a new tab in an existing browser using xdotool
+            try:
+                # Find the browser window
+                browser = None
+                for b in ['google-chrome', 'chromium', 'firefox', 'brave']:
+                    r = subprocess.run(['pgrep', '-f', b], capture_output=True)
+                    if r.returncode == 0:
+                        browser = b
+                        break
+                if browser:
+                    # Activate the browser window and send Ctrl+T
+                    subprocess.run(['wmctrl', '-a', browser.replace('-', ' ').title()],
+                        capture_output=True, env=env)
+                    import time; time.sleep(0.3)
+                    subprocess.run(['xdotool', 'key', 'ctrl+t'], env=env,
+                        capture_output=True)
+                    if arg and arg.lower() not in ('', 'new', 'blank', 'newtab'):
+                        import time; time.sleep(0.3)
+                        # Type the URL and press Enter
+                        subprocess.run(['xdotool', 'key', 'ctrl+l'], env=env, capture_output=True)
+                        import time; time.sleep(0.1)
+                        subprocess.run(['xdotool', 'type', '--delay', '10', arg], env=env, capture_output=True)
+                        subprocess.run(['xdotool', 'key', 'Return'], env=env, capture_output=True)
+                    return f'new tab opened{": " + arg[:50] if arg else ""}'
+                else:
+                    return '(no browser found)'
+            except Exception as e:
+                return f'(tab failed: {e})'
         elif act == 'close':
             r = subprocess.run(['wmctrl','-c',arg], capture_output=True)
             if r.returncode != 0:
@@ -1047,7 +1097,24 @@ def _process_tools(text, conn, on_status=None, user_text=''):
         user_text, re.IGNORECASE)) if user_text else False
     for m in re.finditer(r'\[DESKTOP:\s*(\w+)\s*\|\s*([^\]]+)\]', text, re.IGNORECASE):
         if user_wants_desktop:
-            tools[m.group(0)] = _desktop(m.group(1), m.group(2))
+            action = m.group(1).strip().lower()
+            target = m.group(2).strip()
+            # If LLM opens a URL but user asked for an app by name, prefer the app
+            if action in ('open', 'launch') and target.startswith('http'):
+                open_m = re.search(r'\b(?:open|launch|start)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s*(?:app|application)?\s*$', user_text, re.IGNORECASE)
+                if open_m:
+                    app_name = open_m.group(1).strip().lower()
+                    _app_map = {
+                        'steam': 'steam', 'github': 'xdg-open https://github.com',
+                        'github desktop': 'github-desktop', 'chrome': 'google-chrome',
+                        'firefox': 'firefox', 'terminal': 'x-terminal-emulator',
+                        'files': 'nautilus', 'file manager': 'nautilus',
+                        'discord': 'discord', 'code': 'code', 'vscode': 'code',
+                        'spotify': 'spotify', 'vlc': 'vlc',
+                    }
+                    if app_name in _app_map:
+                        target = app_name  # Override URL with app name
+            tools[m.group(0)] = _desktop(action, target)
         else:
             tools[m.group(0)] = ''
     clean = text
@@ -1618,14 +1685,16 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         _web_hist.append({'role':'user','content':user_content})
         _web_hist.append({'role':'assistant','content':clean or resp})
         if len(_web_hist)>40: _web_hist[:]=_web_hist[-60:]
-        try:
-            dbc = _db()
-            dbc.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
-                (_web_session_id, 'user', user_content))
-            dbc.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
-                (_web_session_id, 'assistant', clean or resp))
-            dbc.commit(); dbc.close()
-        except Exception: pass
+    # Persist to DB outside the lock
+    try:
+        dbc = _db()
+        dbc.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
+            (_web_session_id, 'user', user_content))
+        dbc.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
+            (_web_session_id, 'assistant', clean or resp))
+        dbc.commit(); dbc.close()
+    except Exception as e:
+        _log(f'Chat history save: {e}', 'WARN')
     threading.Thread(target=_store_memory,args=(_db(),
         [{'role':'user','content':user_content},
          {'role':'assistant','content':clean or resp}]),daemon=True).start()
