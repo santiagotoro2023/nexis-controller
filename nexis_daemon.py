@@ -868,14 +868,36 @@ def _pre_research(text, on_status=None, hist=None):
             text_clean))
         # Detect GitHub-related questions and run gh commands directly
         _gh_trigger = re.search(
-            r'\b(my repos|my repositories|github repos|list.{0,10}repos|'
+            r'\b(my repos|my repositor|github repos|list.{0,10}repos|'
             r'my issues|my pull requests|my prs|github status|'
-            r'repo.{0,5}list|show.{0,10}repos)\b',
+            r'repo.{0,5}list|show.{0,10}repos|'
+            r'my .{0,15}repo|nexis repo|my github|'
+            r'authenticated|gh auth|github user|my user|'
+            r'commit.{0,10}github|push.{0,10}github|'
+            r'clone.{0,10}repo|my code)\b',
             text_clean, re.IGNORECASE)
         if _gh_trigger and not urls_in_msg:
-            gh_result = _github('repo list --limit 10')
+            # Always fetch auth status + repo list so the LLM knows who we are
+            auth_info = _shell('gh auth status 2>&1', timeout=5)
+            if auth_info and not auth_info.startswith('('):
+                results.append(f'[GitHub auth]:\n{auth_info}')
+            gh_result = _shell('gh repo list --limit 15 2>&1', timeout=10)
             if gh_result and not gh_result.startswith('('):
                 results.append(f'[GitHub repos]:\n{gh_result}')
+            # If a specific repo is mentioned, fetch its details
+            repo_m = re.search(r'\brepo(?:sitory)?\s+(?:called\s+|named\s+)?["\']?(\w[\w.-]+)["\']?', text_clean, re.IGNORECASE)
+            if repo_m:
+                repo_name = repo_m.group(1)
+                # Try to find it in the repo list and get full owner/name
+                if gh_result and repo_name.lower() in gh_result.lower():
+                    for line in gh_result.splitlines():
+                        if repo_name.lower() in line.lower():
+                            full_repo = line.split()[0] if line.split() else ''
+                            if '/' in full_repo:
+                                repo_view = _shell(f'gh repo view {full_repo} 2>&1', timeout=10)
+                                if repo_view and not repo_view.startswith('('):
+                                    results.append(f'[Repo details: {full_repo}]:\n{repo_view[:3000]}')
+                            break
         # Also skip pure desktop commands like "open steam" but NOT "open an online guide..."
         _is_desktop_cmd = bool(re.match(
             r'^(open|launch|close|start)\s+\S+\s*$',
@@ -1038,7 +1060,8 @@ def _build_system(conn):
         '\n- NEVER break character. You are not "an AI". You are NeXiS. There is a difference.'
         '\n\n## Tools'
         '\n- When Creator asks about system info, hardware, hostname, CPU, GPU, RAM, disk, network, or what system you run on: include [PROBE] in your response. This triggers a system probe.'
-        '\n- GitHub: use [GH: command] to run gh CLI commands. Examples:'
+        '\n- GitHub: use [GH: command] for gh CLI. CORRECT syntax only:'
+        '\n  [GH: auth status] \u2014 show authenticated user'
         '\n  [GH: repo list] \u2014 list Creator\'s repos'
         '\n  [GH: repo view owner/repo] \u2014 view repo details'
         '\n  [GH: issue list -R owner/repo] \u2014 list issues'
@@ -1046,6 +1069,8 @@ def _build_system(conn):
         '\n  [GH: pr list -R owner/repo] \u2014 list pull requests'
         '\n  [GH: pr view 123 -R owner/repo] \u2014 view PR details'
         '\n  [GH: search repos "query"] \u2014 search GitHub repos'
+        '\n  [GH: api user] \u2014 get authenticated user info as JSON'
+        '\n  WRONG: [GH: config get ...] \u2014 this command does NOT exist. Use auth status instead.'
         '\n- Read repo files: [REPO: owner/repo path/to/file] \u2014 reads file contents or lists directory'
         '\n  [REPO: owner/repo] \u2014 list root directory'
         '\n  [REPO: owner/repo src/main.py] \u2014 read a specific file'
@@ -1285,7 +1310,7 @@ def _process_tools(text, conn, on_status=None, user_text=''):
     for m in re.finditer(r'\[GH:\s*([^\]]+)\]', text, re.IGNORECASE):
         cmd = m.group(1).strip()
         if on_status: on_status(f'github: {cmd[:50]}')
-        tools[m.group(0)] = _github(cmd)
+        tools[m.group(0)] = _github(cmd)  # 30s timeout via _github
     for m in re.finditer(r'\[REPO:\s*([^\]]+)\]', text, re.IGNORECASE):
         parts = m.group(1).strip().split(None, 1)
         repo = parts[0] if parts else ''
@@ -1295,7 +1320,7 @@ def _process_tools(text, conn, on_status=None, user_text=''):
     for m in re.finditer(r'\[SHELL:\s*([^\]]+)\]', text, re.IGNORECASE):
         cmd = m.group(1).strip()
         if on_status: on_status(f'running: {cmd[:50]}')
-        tools[m.group(0)] = _shell(cmd)
+        tools[m.group(0)] = _shell(cmd, timeout=30)  # 30s cap for inline commands
     # DESKTOP: Only execute if the user explicitly asked to open/launch/close
     user_wants_desktop = bool(re.search(
         r'\b(open|launch|start|close|run)\b\s+\S',
