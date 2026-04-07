@@ -116,6 +116,17 @@ _hdr "DEPENDENCIES"
 apt-get update -qq 2>/dev/null || true
 apt-get install -y curl python3-pip python3-venv socat \
   xclip xdg-utils libnotify-bin wmctrl 2>/dev/null || _warn "Some packages unavailable"
+# Install GitHub CLI if not present
+if ! command -v gh &>/dev/null; then
+  echo "  installing gh CLI..."
+  (type -p wget >/dev/null || sudo apt-get install wget -y) \
+    && sudo mkdir -p -m 755 /etc/apt/keyrings \
+    && out=$(mktemp) && wget -nv -O"$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && cat "$out" | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && sudo apt-get update -qq && sudo apt-get install gh -y -qq
+fi
 _ok "Dependencies ready"
 
 _hdr "DIRECTORIES"
@@ -135,6 +146,20 @@ if [[ -n "$BACKUP_DB" ]]; then
   fi
 fi
 _ok "Directories ready"
+
+# ── GITHUB ──
+echo -e "${OR}  ══ GITHUB ══${NC}"
+if command -v gh &>/dev/null; then
+  if sudo -u "$REAL_USER" gh auth status &>/dev/null 2>&1; then
+    _ok "gh authenticated"
+  else
+    echo -e "${OR}  gh CLI installed but not authenticated.${NC}"
+    echo -e "${OR}  Run as your user: gh auth login${NC}"
+    _warn "gh not authenticated (GitHub features will be limited)"
+  fi
+else
+  _warn "gh CLI not installed (GitHub features disabled)"
+fi
 
 _hdr "PYTHON ENVIRONMENT"
 sudo -u "$REAL_USER" "$PYTHON_BIN" -m venv "$VENV"

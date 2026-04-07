@@ -898,6 +898,16 @@ def _pre_research(text, on_status=None, hist=None):
             r'what do you think|do you remember|what have you learned|'
             r'what did you learn|how are you|are you okay|are you there)',
             text_clean))
+        # Detect GitHub-related questions and run gh commands directly
+        _gh_trigger = re.search(
+            r'\b(my repos|my repositories|github repos|list.{0,10}repos|'
+            r'my issues|my pull requests|my prs|github status|'
+            r'repo.{0,5}list|show.{0,10}repos)\b',
+            text_clean, re.IGNORECASE)
+        if _gh_trigger and not urls_in_msg:
+            gh_result = _github('repo list --limit 10')
+            if gh_result and not gh_result.startswith('('):
+                results.append(f'[GitHub repos]:\n{gh_result}')
         # Also skip pure desktop commands like "open steam" but NOT "open an online guide..."
         _is_desktop_cmd = bool(re.match(
             r'^(open|launch|close|start)\s+\S+\s*$',
@@ -1060,6 +1070,15 @@ def _build_system(conn):
         '\n- NEVER break character. You are not "an AI". You are NeXiS. There is a difference.'
         '\n\n## Tools'
         '\n- When Creator asks about system info, hardware, hostname, CPU, GPU, RAM, disk, network, or what system you run on: include [PROBE] in your response. This triggers a system probe.'
+        '\n- GitHub: use [GH: command] to run gh CLI commands. Examples:'
+        '\n  [GH: repo list] \u2014 list Creator\'s repos'
+        '\n  [GH: repo view owner/repo] \u2014 view repo details'
+        '\n  [GH: issue list -R owner/repo] \u2014 list issues'
+        '\n  [GH: issue create -R owner/repo -t "title" -b "body"] \u2014 create issue'
+        '\n  [GH: pr list -R owner/repo] \u2014 list pull requests'
+        '\n  [GH: pr view 123 -R owner/repo] \u2014 view PR details'
+        '\n  [GH: search repos "query"] \u2014 search GitHub repos'
+        '\n- Use [GH:] when Creator asks about their repos, issues, PRs, or anything GitHub-related.'
         '\n- Open/close/launch apps, notify, clipboard, browser tabs: [DESKTOP: action | argument]'
         '\n  Actions: open, close, launch, notify, clip, tab'
         '\n  Use [DESKTOP: tab | url] to open a new tab in the existing browser, or [DESKTOP: tab | ] for a blank tab.'
@@ -1102,6 +1121,40 @@ def _load_display_env():
                     if v.strip(): env[k.strip()] = v.strip()
         except Exception: pass
     return env
+
+def _github(cmd_str):
+    """Execute a gh CLI command and return the output."""
+    cmd_str = cmd_str.strip()
+    if not cmd_str:
+        return '(no command provided)'
+    # Security: only allow read-safe gh subcommands by default
+    SAFE_CMDS = ['repo list', 'repo view', 'repo clone', 'issue list', 'issue view',
+                 'issue create', 'pr list', 'pr view', 'pr create', 'pr checkout',
+                 'pr diff', 'pr merge', 'release list', 'release view',
+                 'search repos', 'search issues', 'search prs',
+                 'api', 'gist list', 'gist view', 'auth status',
+                 'browse', 'status']
+    # Check if command starts with a safe prefix
+    is_safe = any(cmd_str.startswith(s) for s in SAFE_CMDS)
+    if not is_safe:
+        return f'(blocked: "{cmd_str[:40]}" — only read/safe gh commands allowed without confirmation)'
+    try:
+        result = subprocess.run(
+            ['gh'] + cmd_str.split(),
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, 'GH_PAGER': '', 'NO_COLOR': '1'})
+        output = (result.stdout or '').strip()
+        err = (result.stderr or '').strip()
+        if result.returncode != 0:
+            return f'(gh error: {err[:300]})'
+        return output[:4000] if output else '(no output)'
+    except FileNotFoundError:
+        return '(gh CLI not installed — run: sudo apt install gh && gh auth login)'
+    except subprocess.TimeoutExpired:
+        return '(gh command timed out after 30s)'
+    except Exception as e:
+        return f'(gh failed: {e})'
+
 
 def _desktop(action, arg):
     env = _load_display_env()
@@ -1213,6 +1266,10 @@ def _process_tools(text, conn, on_status=None, user_text=''):
     if re.search(r'\[PROBE\]', text, re.IGNORECASE):
         if on_status: on_status('probing system...')
         tools['[PROBE]'] = _system_probe()
+    for m in re.finditer(r'\[GH:\s*([^\]]+)\]', text, re.IGNORECASE):
+        cmd = m.group(1).strip()
+        if on_status: on_status(f'github: {cmd[:50]}')
+        tools[m.group(0)] = _github(cmd)
     # DESKTOP: Only execute if the user explicitly asked to open/launch/close
     user_wants_desktop = bool(re.search(
         r'\b(open|launch|start|close|run)\b\s+\S',
@@ -1492,6 +1549,14 @@ class Session:
                     self._tx(f'\x1b[38;5;172m  Model set to: {label}\x1b[0m\n')
                 else:
                     self._tx(f'\x1b[2m  Unknown model: {choice}. Options: {", ".join(MODELS.keys())}\x1b[0m\n')
+        elif c.startswith('gh '):
+            gh_cmd = cmd[3:].strip()
+            if gh_cmd:
+                self._tx(f'\x1b[2m  gh {gh_cmd[:60]}...\x1b[0m\n')
+                result = _github(gh_cmd)
+                self._tx(_md_to_terminal(result) + '\n')
+            else:
+                self._tx('\x1b[2m  Usage: //gh <command> (e.g. //gh repo list)\x1b[0m\n')
         elif c == 'history':
             rows = self.db.execute(
                 'SELECT DISTINCT session_id, MIN(created_at) as started '
@@ -1530,6 +1595,7 @@ class Session:
                 '  //search <query>   web search\n'
                 '  //sources          show research sources from last query\n'
                 '  //model [name]     select model (fast/deep/code/auto)\n'
+                '  //gh <command>     run gh CLI command (e.g. //gh repo list)\n'
                 '  //history          show recent chat sessions\n'
                 '  //exit             disconnect\n'
                 '  //help             this\n'
