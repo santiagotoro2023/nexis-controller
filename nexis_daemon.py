@@ -1050,7 +1050,13 @@ def _build_system(conn):
         '\n  [REPO: owner/repo] \u2014 list root directory'
         '\n  [REPO: owner/repo src/main.py] \u2014 read a specific file'
         '\n- Use [GH:] and [REPO:] when Creator asks about repos, code, issues, PRs, or files on GitHub.'
-        '\n- Write operations (issue create, pr create, pr merge) will ask Creator for confirmation before executing.'
+        '\n- Shell commands: [SHELL: command] — execute any shell command on the system.'
+        '\n  [SHELL: git add . && git commit -m "message" && git push origin master] — commit and push'
+        '\n  [SHELL: cat /etc/hostname] — read system files'
+        '\n  [SHELL: ls -la /path] — list files'
+        '\n  [SHELL: sed -i "s/old/new/g" file.py] — edit files'
+        '\n- Use [SHELL:] for git operations, file editing, system commands, package management, etc.'
+        '\n- Destructive commands (rm, reboot, shutdown) will ask Creator for confirmation.'
         '\n- Open/close/launch apps, notify, clipboard, browser tabs: [DESKTOP: action | argument]'
         '\n  Actions: open, close, launch, notify, clip, tab'
         '\n  Use [DESKTOP: tab | url] to open a new tab in the existing browser, or [DESKTOP: tab | ] for a blank tab.'
@@ -1094,48 +1100,42 @@ def _load_display_env():
         except Exception: pass
     return env
 
-def _github(cmd_str, confirm_fn=None):
-    """Execute a gh CLI command and return the output."""
+def _shell(cmd_str, confirm_fn=None, timeout=60):
+    """Execute a shell command. Destructive commands need confirmation."""
     cmd_str = cmd_str.strip()
     if not cmd_str:
         return '(no command provided)'
-    # Read-only commands: always safe
-    READ_CMDS = ['repo list', 'repo view', 'repo clone', 'issue list', 'issue view',
-                 'pr list', 'pr view', 'pr diff', 'pr checkout',
-                 'release list', 'release view',
-                 'search repos', 'search issues', 'search prs',
-                 'api', 'gist list', 'gist view', 'auth status',
-                 'browse', 'status']
-    # Write commands: need confirmation
-    WRITE_CMDS = ['issue create', 'pr create', 'pr merge', 'pr close',
-                  'issue close', 'release create', 'gist create',
-                  'repo create', 'repo delete', 'repo edit']
-    is_read = any(cmd_str.startswith(s) for s in READ_CMDS)
-    is_write = any(cmd_str.startswith(s) for s in WRITE_CMDS)
-    if not is_read and not is_write:
-        return f'(blocked: "{cmd_str[:40]}" — unrecognised gh command)'
-    if is_write and confirm_fn:
-        if not confirm_fn(f'gh {cmd_str[:80]}'):
+    # Destructive commands that need Creator confirmation
+    DESTRUCTIVE = ['rm ', 'rm -', 'rmdir ', 'mkfs', 'dd if=', 'reboot',
+                   'shutdown', 'poweroff', 'init 0', 'init 6',
+                   'chmod -R 777', ':(){', 'mv / ', '> /dev/']
+    is_destructive = any(cmd_str.strip().startswith(d) or d in cmd_str for d in DESTRUCTIVE)
+    if is_destructive and confirm_fn:
+        if not confirm_fn(cmd_str[:100]):
             return '(cancelled by Creator)'
     try:
-        # Use shlex for proper argument parsing (handles quotes)
-        import shlex
-        args = shlex.split(cmd_str)
         result = subprocess.run(
-            ['gh'] + args,
-            capture_output=True, text=True, timeout=30,
-            env={**os.environ, 'GH_PAGER': '', 'NO_COLOR': '1'})
+            cmd_str, shell=True, capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, 'GH_PAGER': '', 'NO_COLOR': '1', 'GIT_TERMINAL_PROMPT': '0'})
         output = (result.stdout or '').strip()
         err = (result.stderr or '').strip()
-        if result.returncode != 0:
-            return f'(gh error: {err[:300]})'
-        return output[:4000] if output else '(no output)'
-    except FileNotFoundError:
-        return '(gh CLI not installed — run: sudo apt install gh && gh auth login)'
+        combined = output
+        if err:
+            combined = f'{output}\n{err}' if output else err
+        if result.returncode != 0 and not combined:
+            return f'(command failed with exit code {result.returncode})'
+        return combined[:6000] if combined else '(no output)'
     except subprocess.TimeoutExpired:
-        return '(gh command timed out after 30s)'
+        return f'(command timed out after {timeout}s)'
     except Exception as e:
-        return f'(gh failed: {e})'
+        return f'(shell failed: {e})'
+
+def _github(cmd_str, confirm_fn=None):
+    """Execute a gh CLI command via shell."""
+    cmd_str = cmd_str.strip()
+    if not cmd_str:
+        return '(no command provided)'
+    return _shell(f'gh {cmd_str}', confirm_fn=confirm_fn, timeout=30)
 
 def _github_repo_contents(owner_repo, path='', ref=''):
     """Read files/directories from a GitHub repo."""
@@ -1292,6 +1292,10 @@ def _process_tools(text, conn, on_status=None, user_text=''):
         path = parts[1] if len(parts) > 1 else ''
         if on_status: on_status(f'reading: {repo}/{path}')
         tools[m.group(0)] = _github_repo_contents(repo, path)
+    for m in re.finditer(r'\[SHELL:\s*([^\]]+)\]', text, re.IGNORECASE):
+        cmd = m.group(1).strip()
+        if on_status: on_status(f'running: {cmd[:50]}')
+        tools[m.group(0)] = _shell(cmd)
     # DESKTOP: Only execute if the user explicitly asked to open/launch/close
     user_wants_desktop = bool(re.search(
         r'\b(open|launch|start|close|run)\b\s+\S',
@@ -1577,6 +1581,17 @@ class Session:
                     self._tx(f'\x1b[38;5;172m  Model set to: {label}\x1b[0m\n')
                 else:
                     self._tx(f'\x1b[2m  Unknown model: {choice}. Options: {", ".join(MODELS.keys())}\x1b[0m\n')
+        elif c.startswith('sh ') or c.startswith('shell '):
+            sh_cmd = cmd[3:].strip() if c.startswith('sh ') else cmd[6:].strip()
+            if sh_cmd:
+                def _cli_sh_confirm(action):
+                    self._tx(f'\x1b[38;5;208m  // {action}? [y/N]:\x1b[0m  ')
+                    return self._rx().strip().lower() in ('y', 'yes')
+                self._tx(f'\x1b[2m  $ {sh_cmd[:80]}\x1b[0m\n')
+                result = _shell(sh_cmd, confirm_fn=_cli_sh_confirm)
+                self._tx(_md_to_terminal(result) + '\n')
+            else:
+                self._tx('\x1b[2m  Usage: //sh <command> (e.g. //sh git status)\x1b[0m\n')
         elif c.startswith('gh '):
             gh_cmd = cmd[3:].strip()
             if gh_cmd:
@@ -1636,6 +1651,7 @@ class Session:
                 '  //search <query>   web search\n'
                 '  //sources          show research sources from last query\n'
                 '  //model [name]     select model (fast/deep/code/auto)\n'
+                '  //sh <command>     run shell command (e.g. //sh git status)\n'
                 '  //gh <command>     run gh CLI command (e.g. //gh repo list)\n'
                 '  //repo <r> [path]  read GitHub repo files (e.g. //repo user/repo src/)\n'
                 '  //history          show recent chat sessions\n'
