@@ -878,10 +878,10 @@ def _pre_research(text, on_status=None, hist=None):
             text_clean, re.IGNORECASE)
         if _gh_trigger and not urls_in_msg:
             # Always fetch auth status + repo list so the LLM knows who we are
-            auth_info = _shell('gh auth status 2>&1', timeout=5)
+            auth_info = _run_cmd('gh auth status 2>&1', timeout=5)
             if auth_info and not auth_info.startswith('('):
                 results.append(f'[GitHub auth]:\n{auth_info}')
-            gh_result = _shell('gh repo list --limit 15 2>&1', timeout=10)
+            gh_result = _run_cmd('gh repo list --limit 15 2>&1', timeout=10)
             if gh_result and not gh_result.startswith('('):
                 results.append(f'[GitHub repos]:\n{gh_result}')
             # If a specific repo is mentioned, fetch its details
@@ -894,7 +894,7 @@ def _pre_research(text, on_status=None, hist=None):
                         if repo_name.lower() in line.lower():
                             full_repo = line.split()[0] if line.split() else ''
                             if '/' in full_repo:
-                                repo_view = _shell(f'gh repo view {full_repo} 2>&1', timeout=10)
+                                repo_view = _run_cmd(f'gh repo view {full_repo} 2>&1', timeout=10)
                                 if repo_view and not repo_view.startswith('('):
                                     results.append(f'[Repo details: {full_repo}]:\n{repo_view[:3000]}')
                             break
@@ -1125,7 +1125,7 @@ def _load_display_env():
         except Exception: pass
     return env
 
-def _shell(cmd_str, confirm_fn=None, timeout=60):
+def _run_cmd(cmd_str, confirm_fn=None, timeout=60):
     """Execute a shell command. Destructive commands need confirmation."""
     cmd_str = cmd_str.strip()
     if not cmd_str:
@@ -1141,6 +1141,7 @@ def _shell(cmd_str, confirm_fn=None, timeout=60):
     try:
         result = subprocess.run(
             cmd_str, shell=True, capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL,  # prevent interactive prompts from hanging
             env={**os.environ, 'GH_PAGER': '', 'NO_COLOR': '1', 'GIT_TERMINAL_PROMPT': '0'})
         output = (result.stdout or '').strip()
         err = (result.stderr or '').strip()
@@ -1160,7 +1161,7 @@ def _github(cmd_str, confirm_fn=None):
     cmd_str = cmd_str.strip()
     if not cmd_str:
         return '(no command provided)'
-    return _shell(f'gh {cmd_str}', confirm_fn=confirm_fn, timeout=30)
+    return _run_cmd(f'gh {cmd_str}', confirm_fn=confirm_fn, timeout=30)
 
 def _github_repo_contents(owner_repo, path='', ref=''):
     """Read files/directories from a GitHub repo."""
@@ -1320,7 +1321,7 @@ def _process_tools(text, conn, on_status=None, user_text=''):
     for m in re.finditer(r'\[SHELL:\s*([^\]]+)\]', text, re.IGNORECASE):
         cmd = m.group(1).strip()
         if on_status: on_status(f'running: {cmd[:50]}')
-        tools[m.group(0)] = _shell(cmd, timeout=30)  # 30s cap for inline commands
+        tools[m.group(0)] = _run_cmd(cmd, timeout=30)  # 30s cap for inline commands
     # DESKTOP: Only execute if the user explicitly asked to open/launch/close
     user_wants_desktop = bool(re.search(
         r'\b(open|launch|start|close|run)\b\s+\S',
@@ -1613,7 +1614,7 @@ class Session:
                     self._tx(f'\x1b[38;5;208m  // {action}? [y/N]:\x1b[0m  ')
                     return self._rx().strip().lower() in ('y', 'yes')
                 self._tx(f'\x1b[2m  $ {sh_cmd[:80]}\x1b[0m\n')
-                result = _shell(sh_cmd, confirm_fn=_cli_sh_confirm)
+                result = _run_cmd(sh_cmd, confirm_fn=_cli_sh_confirm)
                 self._tx(_md_to_terminal(result) + '\n')
             else:
                 self._tx('\x1b[2m  Usage: //sh <command> (e.g. //sh git status)\x1b[0m\n')
