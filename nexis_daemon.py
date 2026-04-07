@@ -1078,7 +1078,11 @@ def _build_system(conn):
         '\n  [GH: pr list -R owner/repo] \u2014 list pull requests'
         '\n  [GH: pr view 123 -R owner/repo] \u2014 view PR details'
         '\n  [GH: search repos "query"] \u2014 search GitHub repos'
-        '\n- Use [GH:] when Creator asks about their repos, issues, PRs, or anything GitHub-related.'
+        '\n- Read repo files: [REPO: owner/repo path/to/file] \u2014 reads file contents or lists directory'
+        '\n  [REPO: owner/repo] \u2014 list root directory'
+        '\n  [REPO: owner/repo src/main.py] \u2014 read a specific file'
+        '\n- Use [GH:] and [REPO:] when Creator asks about repos, code, issues, PRs, or files on GitHub.'
+        '\n- Write operations (issue create, pr create, pr merge) will ask Creator for confirmation before executing.'
         '\n- Open/close/launch apps, notify, clipboard, browser tabs: [DESKTOP: action | argument]'
         '\n  Actions: open, close, launch, notify, clip, tab'
         '\n  Use [DESKTOP: tab | url] to open a new tab in the existing browser, or [DESKTOP: tab | ] for a blank tab.'
@@ -1122,25 +1126,35 @@ def _load_display_env():
         except Exception: pass
     return env
 
-def _github(cmd_str):
+def _github(cmd_str, confirm_fn=None):
     """Execute a gh CLI command and return the output."""
     cmd_str = cmd_str.strip()
     if not cmd_str:
         return '(no command provided)'
-    # Security: only allow read-safe gh subcommands by default
-    SAFE_CMDS = ['repo list', 'repo view', 'repo clone', 'issue list', 'issue view',
-                 'issue create', 'pr list', 'pr view', 'pr create', 'pr checkout',
-                 'pr diff', 'pr merge', 'release list', 'release view',
+    # Read-only commands: always safe
+    READ_CMDS = ['repo list', 'repo view', 'repo clone', 'issue list', 'issue view',
+                 'pr list', 'pr view', 'pr diff', 'pr checkout',
+                 'release list', 'release view',
                  'search repos', 'search issues', 'search prs',
                  'api', 'gist list', 'gist view', 'auth status',
                  'browse', 'status']
-    # Check if command starts with a safe prefix
-    is_safe = any(cmd_str.startswith(s) for s in SAFE_CMDS)
-    if not is_safe:
-        return f'(blocked: "{cmd_str[:40]}" — only read/safe gh commands allowed without confirmation)'
+    # Write commands: need confirmation
+    WRITE_CMDS = ['issue create', 'pr create', 'pr merge', 'pr close',
+                  'issue close', 'release create', 'gist create',
+                  'repo create', 'repo delete', 'repo edit']
+    is_read = any(cmd_str.startswith(s) for s in READ_CMDS)
+    is_write = any(cmd_str.startswith(s) for s in WRITE_CMDS)
+    if not is_read and not is_write:
+        return f'(blocked: "{cmd_str[:40]}" — unrecognised gh command)'
+    if is_write and confirm_fn:
+        if not confirm_fn(f'gh {cmd_str[:80]}'):
+            return '(cancelled by Creator)'
     try:
+        # Use shlex for proper argument parsing (handles quotes)
+        import shlex
+        args = shlex.split(cmd_str)
         result = subprocess.run(
-            ['gh'] + cmd_str.split(),
+            ['gh'] + args,
             capture_output=True, text=True, timeout=30,
             env={**os.environ, 'GH_PAGER': '', 'NO_COLOR': '1'})
         output = (result.stdout or '').strip()
@@ -1154,6 +1168,40 @@ def _github(cmd_str):
         return '(gh command timed out after 30s)'
     except Exception as e:
         return f'(gh failed: {e})'
+
+def _github_repo_contents(owner_repo, path='', ref=''):
+    """Read files/directories from a GitHub repo."""
+    try:
+        import shlex
+        cmd = f'api repos/{owner_repo}/contents/{path}'
+        if ref:
+            cmd += f'?ref={ref}'
+        result = subprocess.run(
+            ['gh'] + shlex.split(cmd),
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, 'GH_PAGER': '', 'NO_COLOR': '1'})
+        if result.returncode != 0:
+            return f'(error: {result.stderr[:200]})'
+        import json as _json
+        data = _json.loads(result.stdout)
+        # If it's a file, decode content
+        if isinstance(data, dict) and data.get('type') == 'file':
+            content = data.get('content', '')
+            encoding = data.get('encoding', '')
+            if encoding == 'base64':
+                import base64 as _b64
+                return _b64.b64decode(content).decode('utf-8', errors='replace')[:8000]
+            return content[:8000]
+        # If it's a directory listing
+        if isinstance(data, list):
+            entries = []
+            for item in data:
+                t = '📁' if item.get('type') == 'dir' else '📄'
+                entries.append(f'{t} {item.get("name", "?")} ({item.get("size", 0)} bytes)')
+            return '\n'.join(entries)
+        return str(data)[:4000]
+    except Exception as e:
+        return f'(repo read failed: {e})'
 
 
 def _desktop(action, arg):
@@ -1270,6 +1318,12 @@ def _process_tools(text, conn, on_status=None, user_text=''):
         cmd = m.group(1).strip()
         if on_status: on_status(f'github: {cmd[:50]}')
         tools[m.group(0)] = _github(cmd)
+    for m in re.finditer(r'\[REPO:\s*([^\]]+)\]', text, re.IGNORECASE):
+        parts = m.group(1).strip().split(None, 1)
+        repo = parts[0] if parts else ''
+        path = parts[1] if len(parts) > 1 else ''
+        if on_status: on_status(f'reading: {repo}/{path}')
+        tools[m.group(0)] = _github_repo_contents(repo, path)
     # DESKTOP: Only execute if the user explicitly asked to open/launch/close
     user_wants_desktop = bool(re.search(
         r'\b(open|launch|start|close|run)\b\s+\S',
@@ -1464,24 +1518,29 @@ class Session:
             if model_used != MODEL_FAST:
                 self._tx(f'\x1b[2m\x1b[38;5;240m  [deep model]\x1b[0m\n')
 
-            # Code execution gate
-            for cm in re.finditer(r'```(\w+)?\n(.*?)```', resp, re.DOTALL):
-                lang = cm.group(1) or 'shell'; code = cm.group(2).strip()
-                self._tx(f'\n\x1b[38;5;208m  // run on your system? ({lang}) [y/N]:\x1b[0m  ')
-                ans = self._rx().strip().lower()
-                if ans in ('y','yes'):
-                    try:
-                        r = subprocess.run(code, shell=True, capture_output=True, text=True, timeout=60)
-                        out = (r.stdout+r.stderr).strip()
-                        if out:
-                            self._tx('\x1b[2m')
-                            for ln in out.split('\n')[:40]: self._tx(f'    {ln}\n')
-                            self._tx('\x1b[0m\n')
-                        self.hist.append({'role':'user','content':f'[executed]\n{out}'})
-                    except Exception as e:
-                        self._tx(f'\x1b[38;5;160m  [{e}]\x1b[0m\n')
-                else:
-                    self._tx('\x1b[2m  skipped.\x1b[0m\n')
+            # Code execution gate — only offer when Creator explicitly asked to run/execute
+            user_wants_exec = bool(re.search(
+                r'\b(run|execute|test|try|do)\b.{0,20}\b(this|that|it|the|script|code|command)\b',
+                inp, re.IGNORECASE)) or bool(re.search(
+                r'\b(run it|execute it|try it|test it)\b', inp, re.IGNORECASE))
+            if user_wants_exec:
+                for cm in re.finditer(r'```(\w+)?\n(.*?)```', resp, re.DOTALL):
+                    lang = cm.group(1) or 'shell'; code = cm.group(2).strip()
+                    self._tx(f'\n\x1b[38;5;208m  // run on your system? ({lang}) [y/N]:\x1b[0m  ')
+                    ans = self._rx().strip().lower()
+                    if ans in ('y','yes'):
+                        try:
+                            r = subprocess.run(code, shell=True, capture_output=True, text=True, timeout=60)
+                            out = (r.stdout+r.stderr).strip()
+                            if out:
+                                self._tx('\x1b[2m')
+                                for ln in out.split('\n')[:40]: self._tx(f'    {ln}\n')
+                                self._tx('\x1b[0m\n')
+                            self.hist.append({'role':'user','content':f'[executed]\n{out}'})
+                        except Exception as e:
+                            self._tx(f'\x1b[38;5;160m  [{e}]\x1b[0m\n')
+                    else:
+                        self._tx('\x1b[2m  skipped.\x1b[0m\n')
 
             self.hist.append({'role':'assistant','content': clean or resp})
             # Persist to chat_history DB
@@ -1552,11 +1611,24 @@ class Session:
         elif c.startswith('gh '):
             gh_cmd = cmd[3:].strip()
             if gh_cmd:
+                def _cli_confirm(action):
+                    self._tx(f'\x1b[38;5;208m  // {action}? [y/N]:\x1b[0m  ')
+                    return self._rx().strip().lower() in ('y', 'yes')
                 self._tx(f'\x1b[2m  gh {gh_cmd[:60]}...\x1b[0m\n')
-                result = _github(gh_cmd)
+                result = _github(gh_cmd, confirm_fn=_cli_confirm)
                 self._tx(_md_to_terminal(result) + '\n')
             else:
                 self._tx('\x1b[2m  Usage: //gh <command> (e.g. //gh repo list)\x1b[0m\n')
+        elif c.startswith('repo '):
+            parts = cmd[5:].strip().split(None, 1)
+            repo = parts[0] if parts else ''
+            path = parts[1] if len(parts) > 1 else ''
+            if repo:
+                self._tx(f'\x1b[2m  reading {repo}/{path}...\x1b[0m\n')
+                result = _github_repo_contents(repo, path)
+                self._tx(_md_to_terminal(result) + '\n')
+            else:
+                self._tx('\x1b[2m  Usage: //repo owner/name [path] (e.g. //repo santiagotoro2023/nexis nexis_daemon.py)\x1b[0m\n')
         elif c == 'history':
             rows = self.db.execute(
                 'SELECT DISTINCT session_id, MIN(created_at) as started '
@@ -1596,6 +1668,7 @@ class Session:
                 '  //sources          show research sources from last query\n'
                 '  //model [name]     select model (fast/deep/code/auto)\n'
                 '  //gh <command>     run gh CLI command (e.g. //gh repo list)\n'
+                '  //repo <r> [path]  read GitHub repo files (e.g. //repo user/repo src/)\n'
                 '  //history          show recent chat sessions\n'
                 '  //exit             disconnect\n'
                 '  //help             this\n'
