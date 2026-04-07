@@ -21,7 +21,20 @@ LOG_PATH  = DATA / 'logs' / 'daemon.log'
 OLLAMA     = 'http://localhost:11434'
 MODEL_FAST   = 'qwen2.5:14b'
 MODEL_DEEP   = 'hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M'
-MODEL_VISION = 'qwen2.5vl:7b'  # vision-capable; fallback to llava if not installed
+MODEL_CODE   = 'qwen3-coder-next'
+MODEL_VISION = 'qwen2.5vl:7b'
+
+# All available models for selection
+MODELS = {
+    'fast':   {'name': MODEL_FAST,   'label': 'Qwen 14B (Fast)',       'desc': 'Quick responses, general use'},
+    'deep':   {'name': MODEL_DEEP,   'label': 'Omega Darker 22B (Deep)', 'desc': 'Complex reasoning, slower'},
+    'code':   {'name': MODEL_CODE,   'label': 'Qwen3 Coder (Code)',    'desc': 'Best code quality, 80B MoE'},
+    'auto':   {'name': None,         'label': 'Auto',                   'desc': 'Automatic model selection'},
+}
+
+_model_override = 'auto'  # Current selected model mode
+_model_override_lock = threading.Lock()
+
 AVAILABLE  = []
 _log_lock  = threading.Lock()
 
@@ -147,6 +160,23 @@ def _enforce_english(msgs):
 
 def _smart_chat(messages, temperature=0.75, num_ctx=16384,
                 on_token=None, images=None, force_deep=False):
+    # Check for model override
+    with _model_override_lock:
+        override = _model_override
+    if override != 'auto' and override in MODELS and MODELS[override]['name']:
+        model = MODELS[override]['name']
+        if _model_ok(model):
+            msgs = _enforce_english(list(messages))
+            if override == 'code':
+                # For code model, still enforce personality
+                msgs = _enforce_english(msgs)
+            result = _stream_chat(msgs, model, temperature, num_ctx,
+                on_token=on_token, images=images if 'vl' in model.lower() or 'vision' in model.lower() else None)
+            if result and result.strip():
+                return result, model
+            # Fall through to auto if override model fails
+            _log(f'Override model {model} failed, falling back to auto', 'WARN')
+
     # Images: use vision model if available, warn if not
     if images:
         if _model_ok(MODEL_VISION):
@@ -1283,7 +1313,7 @@ class Session:
             '  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n'
             f'  session  #{sc+1:<8} time  {datetime.now().strftime("%H:%M")}\n'
             f'  memory   {mc} stored facts\n'
-            '  web      http://localhost:8080\n'
+            f'  web      http://{_socket.gethostname()}:8080\n'
             '  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n'
             '  //exit to disconnect  \xb7  // for commands\n'
             '  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n'
@@ -1410,6 +1440,7 @@ class Session:
         self._end()
 
     def _cmd(self, cmd):
+        global _model_override
         parts = cmd.split(); c = parts[0].lower() if parts else ''
         if c == 'memory':
             mems = _get_memories(self.db, 30)
@@ -1441,6 +1472,26 @@ class Session:
         elif c in ('exit','quit','bye','disconnect'):
             self._tx('\x1b[38;5;172m  disconnecting...\x1b[0m\n')
             raise StopIteration
+        elif c == 'model' or c.startswith('model '):
+            parts = cmd.strip().split(None, 1)
+            if len(parts) < 2:
+                with _model_override_lock:
+                    current = _model_override
+                self._tx('\x1b[2m  Model selection:\x1b[0m\n')
+                for k, v in MODELS.items():
+                    marker = ' ←' if k == current else ''
+                    installed = '✓' if v['name'] is None or _model_ok(v['name']) else '✗'
+                    self._tx(f'\x1b[2m  [{k}] {installed} {v["label"]} — {v["desc"]}{marker}\x1b[0m\n')
+                self._tx('\x1b[2m  Usage: //model <fast|deep|code|auto>\x1b[0m\n')
+            else:
+                choice = parts[1].strip().lower()
+                if choice in MODELS:
+                    with _model_override_lock:
+                        _model_override = choice
+                    label = MODELS[choice]['label']
+                    self._tx(f'\x1b[38;5;172m  Model set to: {label}\x1b[0m\n')
+                else:
+                    self._tx(f'\x1b[2m  Unknown model: {choice}. Options: {", ".join(MODELS.keys())}\x1b[0m\n')
         elif c == 'history':
             rows = self.db.execute(
                 'SELECT DISTINCT session_id, MIN(created_at) as started '
@@ -1478,6 +1529,7 @@ class Session:
                 '  //probe            system information\n'
                 '  //search <query>   web search\n'
                 '  //sources          show research sources from last query\n'
+                '  //model [name]     select model (fast/deep/code/auto)\n'
                 '  //history          show recent chat sessions\n'
                 '  //exit             disconnect\n'
                 '  //help             this\n'
@@ -1676,6 +1728,23 @@ function renderMd(t){
   t=t.replace(/\n/g,'<br>');
   return t;
 }
+function setModel(m){
+  fetch('/api/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})})
+  .then(function(r){return r.json()}).then(function(d){
+    if(d.ok){document.getElementById('msel').textContent=d.label;document.getElementById('msel').title=d.desc;}
+  });
+}
+function showModels(){
+  fetch('/api/models').then(function(r){return r.json()}).then(function(d){
+    var s='';
+    for(var i=0;i<d.models.length;i++){
+      var m=d.models[i];
+      s+=(m.current?'\u2192 ':'  ')+m.key+': '+m.label+(m.installed?' \u2713':' \u2717')+'\n';
+    }
+    var c=prompt('Select model:\n\n'+s+'\nType: fast, deep, code, or auto','auto');
+    if(c) setModel(c.trim().toLowerCase());
+  });
+}
 function showSrc(){
   fetch('/api/sources').then(function(r){return r.json()}).then(function(d){
     if(!d.sources||!d.sources.length){alert('No sources from last query.');return;}
@@ -1731,6 +1800,7 @@ def _page_chat():
         '<span id=fb class=fbadge></span>'
         '<textarea id=inp rows=2 placeholder="Speak."></textarea>'
         '<button class=btn onclick=send()>Send</button>'
+        "<button id=msel class='btn sec' onclick=showModels() title='Auto model selection'>Auto</button>"
         "<button class='btn sec' onclick=showSrc()>Sources</button>"
         "<button class='btn sec' onclick=clr()>Clear</button>"
         '</div></div>'
@@ -1854,6 +1924,7 @@ def _start_web():
             self.send_header('Content-Length',len(b))
             self.end_headers(); self.wfile.write(b)
         def do_POST(self):
+            global _model_override, _web_hist
             ln=int(self.headers.get('Content-Length',0))
             body=self.rfile.read(ln) if ln else b''
             path=urlparse(self.path).path
@@ -1897,8 +1968,17 @@ def _start_web():
                                  {'role':'assistant','content':ar}]), daemon=True).start()
                             _web_chat_stream._last = None
                     except Exception as e: _log(f'Chat persist: {e}','WARN')
+                elif path=='/api/model':
+                    data = json.loads(body) if body else {}
+                    choice = data.get('model', 'auto').lower()
+                    if choice in MODELS:
+                        with _model_override_lock:
+                            _model_override = choice
+                        self._send(200, json.dumps({'ok': True, 'label': MODELS[choice]['label'],
+                            'desc': MODELS[choice]['desc']}), 'application/json')
+                    else:
+                        self._send(400, json.dumps({'error': f'Unknown model: {choice}'}), 'application/json')
                 elif path=='/api/clear':
-                    global _web_hist
                     with _web_lock: _web_hist=[]
                     self._send(200,json.dumps({'ok':True}),'application/json')
                 else: self._send(404,b'not found')
@@ -1913,6 +1993,15 @@ def _start_web():
                 elif path=='/memory': self._send(200,_page_memory(db))
                 elif path=='/status': self._send(200,_page_status(db))
                 elif path=='/history': self._send(200,_page_history(db))
+                elif path=='/api/models':
+                    with _model_override_lock:
+                        current = _model_override
+                    mlist = []
+                    for k, v in MODELS.items():
+                        installed = v['name'] is None or _model_ok(v['name'])
+                        mlist.append({'key': k, 'label': v['label'], 'desc': v['desc'],
+                            'installed': installed, 'current': k == current})
+                    self._send(200, json.dumps({'models': mlist}), 'application/json')
                 elif path=='/api/sources':
                     with _last_sources_lock:
                         src = list(_last_sources)

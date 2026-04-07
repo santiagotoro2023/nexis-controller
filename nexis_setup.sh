@@ -157,6 +157,9 @@ read -rp "$(echo -e "${OR}  Pull models? [Y/n]: ")" PULL
 PULL="${PULL:-Y}"
 if [[ "$PULL" =~ ^[Yy]$ ]]; then
   ollama pull qwen2.5:14b && _ok "qwen2.5:14b ready" || _err "Model pull failed"
+  echo -n "  pulling qwen3-coder-next..."
+  sudo -u "$REAL_USER" ollama pull qwen3-coder-next 2>&1 | tail -1
+  _ok "qwen3-coder-next ready"
   ollama pull "hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M" \
     && _ok "Omega-Darker ready" || _warn "Omega-Darker unavailable"
 fi
