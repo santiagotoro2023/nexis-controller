@@ -148,13 +148,13 @@ fi
 _ok "Directories ready"
 
 # ── GITHUB ──
-echo -e "${OR}  ══ GITHUB ══${NC}"
+_hdr "GITHUB"
 if command -v gh &>/dev/null; then
   if sudo -u "$REAL_USER" gh auth status &>/dev/null 2>&1; then
     _ok "gh authenticated"
   else
-    echo -e "${OR}  gh CLI installed but not authenticated.${NC}"
-    echo -e "${OR}  Run as your user: gh auth login${NC}"
+    echo -e "${OR}  gh CLI installed but not authenticated.${RST}"
+    echo -e "${OR}  Run as your user: gh auth login${RST}"
     _warn "gh not authenticated (GitHub features will be limited)"
   fi
 else
