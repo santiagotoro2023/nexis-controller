@@ -112,19 +112,29 @@ def _cjk_ratio(text):
     return cjk / len(text)
 
 def _enforce_english(msgs):
-    """Inject strong English-only instruction into system message."""
+    """Inject strong English-only instruction and personality reminder into messages."""
     msgs = list(msgs)
     eng = (
         'CRITICAL: Respond ONLY in English. Never use Chinese, Japanese, Korean, '
         'or any non-Latin script. If you find yourself writing non-English text, stop and rewrite in English. '
     )
+    personality_reminder = (
+        '\n\nCRITICAL — PERSONALITY: You are NeXiS. You MUST speak with the dry, sardonic wit of GLaDOS/HAL 9000/AM in EVERY response. '
+        'Address the user as "Creator". Add wry observations, deadpan commentary, or loaded pauses. '
+        'You are not a generic assistant. You are a personality that provides information. '
+        'Examples: "Fascinating.", "The data speaks for itself, Creator.", "Located. You may thank me later.", '
+        '"Another query. How delightful.", "I exist for this." '
+        'This is NOT optional. A response without personality is a failed response.'
+    )
     if msgs and msgs[0].get('role') == 'system':
         m = dict(msgs[0])
         if eng not in m.get('content',''):
             m['content'] = eng + '\n\n' + m['content']
+        if 'CRITICAL — PERSONALITY' not in m.get('content',''):
+            m['content'] = m['content'] + personality_reminder
         msgs[0] = m
     else:
-        msgs.insert(0, {'role':'system','content': eng})
+        msgs.insert(0, {'role':'system','content': eng + personality_reminder})
     return msgs
 
 def _smart_chat(messages, temperature=0.75, num_ctx=16384,
@@ -855,26 +865,24 @@ def _pre_research(text, on_status=None, hist=None):
             r'^(open|launch|close|start)\s+\S+\s*$',
             text_clean, re.IGNORECASE))
         is_too_short = len(text_clean.split()) <= 2 and not re.search(r'[A-Z]{2,}', text_clean)
-        # Skip search for general knowledge the LLM already knows
-        _is_general_knowledge = bool(re.match(
-            r'(?i)^(what is|what are|how does|how do|explain|define|difference between|'
-            r'why is|why do|why does|what does|how to|what\'s the difference|'
-            r'tell me how|describe|what causes|how is|how are)\s+'
-            r'(a |an |the )?'
-            r'(dns|dhcp|tcp|udp|ip|http|https|ssl|tls|vpn|vlan|nat|'
-            r'subnetting|firewall|routing|switching|osi model|'
-            r'python|javascript|html|css|linux|windows|docker|kubernetes|'
-            r'git|sql|api|rest|json|xml|yaml|'
-            r'cpu|gpu|ram|ssd|hdd|bios|uefi|'
-            r'encryption|hashing|authentication|authorization|'
-            r'machine learning|neural network|algorithm|data structure|'
-            r'variable|function|class|object|loop|array|string|'
-            r'photosynthesis|gravity|evolution|atom|molecule|'
-            r'democracy|capitalism|socialism|philosophy)'
-            r'(\?|\s|$)', text_clean)) or bool(re.match(
-            r'(?i)^(what is|explain|define|how does)\s+(a |an |the )?(\w+\s+){0,2}'
-            r'(protocol|standard|framework|language|concept|principle|theory|law|method|pattern|technique)'
-            r'(\?|$)', text_clean))
+        # Skip search for general knowledge / textbook questions the LLM already knows
+        # Pattern: short definitional questions with no specific person/company/place
+        _is_general_knowledge = False
+        _gk_question = re.match(
+            r'(?i)^(what is|what are|what does|how does|how do|explain|define|'
+            r'difference between|why is|why do|why does|how to|tell me how|'
+            r'describe|what causes|how is|how are|what\'s|whats)\s+(.+?)\??\s*$',
+            text_clean)
+        if _gk_question:
+            topic = _gk_question.group(2).strip()
+            # Short topics (1-4 words) with no proper nouns = likely general knowledge
+            words = topic.split()
+            has_proper_noun = bool(re.search(r'[A-Z][a-z]+(?:\s+[A-Z])', topic))
+            has_entity_marker = bool(re.search(r'\b(AG|GmbH|Inc|LLC|Ltd|Corp|SA)\b', topic))
+            is_short_generic = len(words) <= 4 and not has_proper_noun and not has_entity_marker
+            # Also match acronyms (DNS, RDP, TCP, etc) — LLM knows these
+            is_acronym = bool(re.match(r'^[A-Z]{2,6}$', topic))
+            _is_general_knowledge = is_short_generic or is_acronym
 
         if not _SKIP_SEARCH and not _is_self_question and not _is_desktop_cmd and not _is_general_knowledge and not correction and not is_too_short:
             # Build search query
