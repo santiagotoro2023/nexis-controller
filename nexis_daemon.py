@@ -24,15 +24,14 @@ MODEL_DEEP   = 'hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_
 MODEL_CODE   = 'qwen3-coder-next'
 MODEL_VISION = 'qwen2.5vl:7b'
 
-# All available models for selection
+# All available models for selection — Creator chooses, no automatic switching
 MODELS = {
     'fast':   {'name': MODEL_FAST,   'label': 'Qwen 14B (Fast)',       'desc': 'Quick responses, general use'},
     'deep':   {'name': MODEL_DEEP,   'label': 'Omega Darker 22B (Deep)', 'desc': 'Complex reasoning, slower'},
     'code':   {'name': MODEL_CODE,   'label': 'Qwen3 Coder (Code)',    'desc': 'Best code quality, 80B MoE'},
-    'auto':   {'name': None,         'label': 'Auto',                   'desc': 'Automatic model selection'},
 }
 
-_model_override = 'auto'  # Current selected model mode
+_model_override = 'fast'  # Creator chooses via //model or web UI
 _model_override_lock = threading.Lock()
 
 AVAILABLE  = []
@@ -160,85 +159,54 @@ def _enforce_english(msgs):
 
 def _smart_chat(messages, temperature=0.75, num_ctx=16384,
                 on_token=None, images=None, force_deep=False):
-    # Check for model override
+    """Use the Creator-selected model. No automatic switching."""
     with _model_override_lock:
-        override = _model_override
-    if override != 'auto' and override in MODELS and MODELS[override]['name']:
-        model = MODELS[override]['name']
-        if _model_ok(model):
-            msgs = _enforce_english(list(messages))
-            if override == 'code':
-                # For code model, still enforce personality
-                msgs = _enforce_english(msgs)
-            result = _stream_chat(msgs, model, temperature, num_ctx,
-                on_token=on_token, images=images if 'vl' in model.lower() or 'vision' in model.lower() else None)
-            if result and result.strip():
-                return result, model
-            # Fall through to auto if override model fails
-            _log(f'Override model {model} failed, falling back to auto', 'WARN')
+        selected = _model_override
 
-    # Images: use vision model if available, warn if not
+    # Resolve model name
+    if selected not in MODELS:
+        _log(f'Invalid model selection: {selected}, using fast', 'WARN')
+        selected = 'fast'
+    model = MODELS[selected]['name']
+
+    # Images: temporarily use vision model, then return to selected model
     if images:
         if _model_ok(MODEL_VISION):
             msgs_v = _enforce_english(list(messages))
-            buf_v = []
             result = _stream_chat(msgs_v, MODEL_VISION, temperature, num_ctx,
-                                  lambda t: buf_v.append(t), images)
-            if result.strip() and _cjk_ratio(result) < 0.05:
-                if on_token:
-                    for t in buf_v: on_token(t)
+                                  on_token=on_token, images=images)
+            if result and result.strip():
                 return result, MODEL_VISION
-        else:
-            if on_token:
-                on_token('[Vision model not installed. Run: ollama pull qwen2.5vl:7b]\n')
-            images = None
+        elif on_token:
+            on_token('[Vision model not installed. Run: ollama pull qwen2.5vl:7b]\n')
+        images = None
 
-    if force_deep and _model_ok(MODEL_DEEP):
-        msgs_d = _enforce_english(list(messages))
-        buf_d = []
-        result = _stream_chat(msgs_d, MODEL_DEEP, temperature, num_ctx,
-                              lambda t: buf_d.append(t), images)
-        if result.strip():
-            if on_token:
-                for t in buf_d: on_token(t)
-            return result, MODEL_DEEP
+    # Check model is installed
+    if not _model_ok(model):
+        if on_token:
+            on_token(f'[Model {MODELS[selected]["label"]} not installed. Run: ollama pull {model}]\n')
+        return '', model
 
-    if _model_ok(MODEL_FAST) and not force_deep:
-        msgs_f = _enforce_english(list(messages))
-        buf_f = []
-        result = _stream_chat(msgs_f, MODEL_FAST, temperature, num_ctx,
-                              lambda t: buf_f.append(t), images)
-        # Check for refusal or Chinese output - if so, suppress and hand off to deep
-        refused = any(p in result.lower()[:300] for p in _REFUSALS)
-        cjk_heavy = _cjk_ratio(result) > 0.05
-        if result.strip() and not refused and not cjk_heavy:
-            if on_token:
-                for t in buf_f: on_token(t)
-            return result, MODEL_FAST
-        _log(f'Fast {"refused" if refused else "switched to Chinese" if cjk_heavy else "empty"} — handing off to deep', 'INFO')
+    # Prepare messages
+    msgs = _enforce_english(list(messages))
 
-    if _model_ok(MODEL_DEEP):
-        msgs_d = _enforce_english(list(messages))
-        # Inject anti-narrative reminder as final user turn for Omega
-        # Omega is a creative fine-tune - needs explicit override at inference time
+    # For Omega Darker: inject anti-narrative reminder
+    if selected == 'deep':
         _anti_narrative = (
             'IMPORTANT: You are NeXiS, a precise assistant. '
             'Do NOT use narrative, story, or literary prose style. '
             'Answer directly and concisely in plain English. '
             'No metaphors, no dramatic openings, no book-style writing.'
         )
-        if msgs_d and msgs_d[0].get('role') == 'system':
-            m = dict(msgs_d[0])
+        if msgs and msgs[0].get('role') == 'system':
+            m = dict(msgs[0])
             m['content'] = _anti_narrative + '\n\n' + m['content']
-            msgs_d[0] = m
-        buf_d2 = []
-        result = _stream_chat(msgs_d, MODEL_DEEP, temperature, num_ctx,
-                              lambda t: buf_d2.append(t), images)
-        if on_token:
-            for t in buf_d2: on_token(t)
-        return result, MODEL_DEEP
+            msgs[0] = m
 
-    return '', MODEL_FAST
+    # Run the selected model
+    result = _stream_chat(msgs, model, temperature, num_ctx,
+                          on_token=on_token, images=None)
+    return result or '', model
 
 def _warmup():
     try:
@@ -1515,8 +1483,9 @@ class Session:
                 # No tools: emit the clean response
                 emit_stream(clean or resp)
 
-            if model_used != MODEL_FAST:
-                self._tx(f'\x1b[2m\x1b[38;5;240m  [deep model]\x1b[0m\n')
+            # Show which model was used
+            model_label = next((v['label'] for v in MODELS.values() if v['name'] == model_used), model_used)
+            self._tx(f'\x1b[2m\x1b[38;5;240m  [{model_label}]\x1b[0m\n')
 
             # Code execution gate — only offer when Creator explicitly asked to run/execute
             user_wants_exec = bool(re.search(
@@ -1939,7 +1908,7 @@ def _page_chat():
         '<span id=fb class=fbadge></span>'
         '<textarea id=inp rows=2 placeholder="Speak."></textarea>'
         '<button class=btn onclick=send()>Send</button>'
-        "<button id=msel class='btn sec' onclick=showModels() title='Auto model selection'>Auto</button>"
+        "<button id=msel class='btn sec' onclick=showModels() title='Quick responses, general use'>Fast</button>"
         "<button class='btn sec' onclick=showSrc()>Sources</button>"
         "<button class='btn sec' onclick=clr()>Clear</button>"
         '</div></div>'
