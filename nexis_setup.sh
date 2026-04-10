@@ -193,25 +193,43 @@ if [[ "$PULL" =~ ^[Yy]$ ]]; then
 fi
 
 _hdr "VOICE"
-# espeak-ng is primary (robotic formant synth) — already installed above
-command -v espeak-ng &>/dev/null && _ok "espeak-ng ready (primary voice engine)" || _warn "espeak-ng missing — Piper fallback will be used"
+# espeak-ng is installed above via apt; confirm
+command -v espeak-ng &>/dev/null && _ok "espeak-ng ready (robotic voice backend)" || _warn "espeak-ng missing — install manually: apt install espeak-ng"
 
-_hdr "VOICE MODEL (Piper fallback)"
+_hdr "VOICE MODELS (Piper neural TTS)"
 VOICE_DIR="$NEXIS_DATA/voice"
 sudo -u "$REAL_USER" mkdir -p "$VOICE_DIR"
+
+# Primary voice model
+GLADOS_ONNX="$VOICE_DIR/glados_piper_medium.onnx"
+GLADOS_JSON="$VOICE_DIR/glados_piper_medium.onnx.json"
+HF_GLADOS="https://huggingface.co/DavesArmoury/GLaDOS_TTS/resolve/main"
+if [[ -f "$GLADOS_ONNX" && -f "$GLADOS_JSON" ]]; then
+  _ok "Default voice model already present"
+else
+  echo -e "${DIM}  Downloading default voice model (~63 MB)...${RST}"
+  sudo -u "$REAL_USER" curl -fL --progress-bar \
+    "$HF_GLADOS/glados_piper_medium.onnx" -o "$GLADOS_ONNX" \
+    && sudo -u "$REAL_USER" curl -fL --progress-bar \
+    "$HF_GLADOS/glados_piper_medium.onnx.json" -o "$GLADOS_JSON" \
+    && _ok "Default voice model downloaded" \
+    || _warn "Default voice model download failed — robotic fallback will be used"
+fi
+
+# Fallback voice model (en_US-ryan-high)
 PIPER_ONNX="$VOICE_DIR/en_US-ryan-high.onnx"
 PIPER_JSON="$VOICE_DIR/en_US-ryan-high.onnx.json"
-HF_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high"
+HF_RYAN="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high"
 if [[ -f "$PIPER_ONNX" && -f "$PIPER_JSON" ]]; then
-  _ok "Voice model already present"
+  _ok "Fallback voice model already present"
 else
-  echo -e "${DIM}  Downloading en_US-ryan-high voice model (~65 MB)...${RST}"
-  sudo -u "$REAL_USER" curl -L --progress-bar \
-    "$HF_BASE/en_US-ryan-high.onnx" -o "$PIPER_ONNX" \
-    && sudo -u "$REAL_USER" curl -L --progress-bar \
-    "$HF_BASE/en_US-ryan-high.onnx.json" -o "$PIPER_JSON" \
-    && _ok "Voice model downloaded (HAL9000/GlaDOS male voice)" \
-    || _warn "Voice model download failed — voice will be unavailable until model is present"
+  echo -e "${DIM}  Downloading fallback voice model (~65 MB)...${RST}"
+  sudo -u "$REAL_USER" curl -fL --progress-bar \
+    "$HF_RYAN/en_US-ryan-high.onnx" -o "$PIPER_ONNX" \
+    && sudo -u "$REAL_USER" curl -fL --progress-bar \
+    "$HF_RYAN/en_US-ryan-high.onnx.json" -o "$PIPER_JSON" \
+    && _ok "Fallback voice model downloaded" \
+    || _warn "Fallback voice model download failed"
 fi
 
 _hdr "PERSONALITY"
@@ -432,7 +450,7 @@ echo -e "  ${GN}  ✓${RST}  web             http://localhost:8080  (Chat · Mem
 echo -e "  ${GN}  ✓${RST}  streaming       tokens appear as generated"
 echo -e "  ${GN}  ✓${RST}  markdown        rendered in CLI and web"
 echo -e "  ${GN}  ✓${RST}  models          qwen2.5:14b fast · qwen2.5vl:7b vision · Omega-Darker deep"
-echo -e "  ${GN}  ✓${RST}  voice           HAL9000/GlaDOS synthesis (off by default — //voice on)"
+echo -e "  ${GN}  ✓${RST}  voice           synthetic voice · off by default · //voice on to enable"
 echo -e "  ${GN}  ✓${RST}  smart routing   auto-switches to deep if fast refuses"
 echo -e "  ${GN}  ✓${RST}  web search      DuckDuckGo, no API key"
 echo -e "  ${GN}  ✓${RST}  file analysis   text + images (inline path or upload)"

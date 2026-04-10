@@ -27,6 +27,36 @@ MODEL_VISION = 'qwen2.5vl:7b'
 
 # Voice / TTS
 VOICE_DIR   = DATA / 'voice'
+
+# Voice model registry — 'key': {label, desc, onnx, json, backend, fx}
+VOICE_MODELS = {
+    'default': {
+        'label': 'Default',
+        'desc':  'Synthetic character voice (recommended)',
+        'onnx':  str(VOICE_DIR / 'glados_piper_medium.onnx'),
+        'json':  str(VOICE_DIR / 'glados_piper_medium.onnx.json'),
+        'backend': 'piper',
+        'fx':    'character',
+    },
+    'robotic': {
+        'label': 'Robotic',
+        'desc':  'Raw formant synthesizer, maximum synthetic quality',
+        'onnx':  None,
+        'json':  None,
+        'backend': 'espeak',
+        'fx':    'heavy',
+    },
+    'custom': {
+        'label': 'Custom',
+        'desc':  'User-provided Piper ONNX model',
+        'onnx':  None,  # set via config
+        'json':  None,
+        'backend': 'piper',
+        'fx':    'character',
+    },
+}
+
+# Backwards-compat alias for old code paths still referencing PIPER_MODEL
 PIPER_MODEL = str(VOICE_DIR / 'en_US-ryan-high.onnx')
 PIPER_CFG   = str(VOICE_DIR / 'en_US-ryan-high.onnx.json')
 
@@ -276,11 +306,14 @@ def _warmup():
 
 _VOICE_ENABLED  = False
 _voice_lk       = threading.Lock()
+_VOICE_MODEL    = 'default'
+_voice_model_lk = threading.Lock()
 _audio_store    = {}          # seq_id -> wav_bytes served to WebUI JS
 _audio_store_lk = threading.Lock()
 _audio_seq      = [0]
 _audio_seq_lk   = threading.Lock()
-_tts_voice_obj  = [None]
+_tts_voice_obj  = [None]      # cached PiperVoice for current model
+_tts_voice_key  = [None]      # model key of cached voice (invalidate on change)
 _tts_voice_obj_lk = threading.Lock()
 _cli_tts_q      = _queue.Queue(maxsize=4)
 
@@ -291,35 +324,67 @@ def _voice_set(on: bool):
     global _VOICE_ENABLED
     with _voice_lk: _VOICE_ENABLED = on
 
+def _voice_model():
+    with _voice_model_lk: return _VOICE_MODEL
+
+def _voice_set_model(key: str):
+    global _VOICE_MODEL
+    with _voice_model_lk: _VOICE_MODEL = key
+    with _tts_voice_obj_lk:
+        _tts_voice_obj[0] = None  # invalidate cache on model change
+        _tts_voice_key[0] = None
+
 def _next_audio_seq():
     with _audio_seq_lk:
         _audio_seq[0] += 1
         return _audio_seq[0]
 
 def _tts_available():
-    """True if any TTS backend is usable: espeak-ng OR piper+model."""
-    if shutil.which('espeak-ng'):
-        return True
+    """True if any TTS backend is usable for the current voice model."""
+    m = VOICE_MODELS.get(_voice_model(), VOICE_MODELS['default'])
+    backend = m.get('backend', 'piper')
+    if backend == 'espeak':
+        return bool(shutil.which('espeak-ng'))
+    # piper backend — check model files first, then fall back to espeak
+    onnx = m.get('onnx') or ''
+    cfg  = m.get('json') or ''
+    if onnx and cfg and Path(onnx).exists() and Path(cfg).exists():
+        try:
+            import piper.voice  # noqa
+            return True
+        except ImportError:
+            pass
+    # Fallback: check ryan-high piper model
     if Path(PIPER_MODEL).exists() and Path(PIPER_CFG).exists():
         try:
             import piper.voice  # noqa
             return True
         except ImportError:
             pass
-    return False
+    # Last resort: espeak
+    return bool(shutil.which('espeak-ng'))
 
 def _tts_load_voice():
-    """Load (or return cached) PiperVoice. Returns None if piper unavailable."""
+    """Load (or return cached) PiperVoice for the current model. Returns None on failure."""
+    mk = _voice_model()
+    m  = VOICE_MODELS.get(mk, VOICE_MODELS['default'])
+    onnx = m.get('onnx') or ''
+    cfg  = m.get('json') or ''
+    # Fall back to ryan-high if custom/default model not downloaded yet
+    if not (onnx and cfg and Path(onnx).exists() and Path(cfg).exists()):
+        onnx = PIPER_MODEL; cfg = PIPER_CFG
+        mk = '_ryan'
     with _tts_voice_obj_lk:
-        if _tts_voice_obj[0] is None:
-            if Path(PIPER_MODEL).exists() and Path(PIPER_CFG).exists():
+        if _tts_voice_key[0] != mk or _tts_voice_obj[0] is None:
+            _tts_voice_obj[0] = None; _tts_voice_key[0] = None
+            if Path(onnx).exists() and Path(cfg).exists():
                 try:
                     from piper.voice import PiperVoice
-                    _tts_voice_obj[0] = PiperVoice.load(
-                        PIPER_MODEL, config_path=PIPER_CFG, use_cuda=False)
-                    _log('TTS voice loaded (en_US-ryan-high, piper fallback)')
+                    _tts_voice_obj[0] = PiperVoice.load(onnx, config_path=cfg, use_cuda=False)
+                    _tts_voice_key[0] = mk
+                    _log(f'TTS voice loaded: {mk}')
                 except Exception as e:
-                    _log(f'TTS piper load: {e}', 'WARN')
+                    _log(f'TTS piper load ({mk}): {e}', 'WARN')
         return _tts_voice_obj[0]
 
 def _tts_clean(text: str) -> str:
@@ -335,61 +400,72 @@ def _tts_clean(text: str) -> str:
     text = re.sub(r'https?://\S+', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
-def _tts_apply_effects(wav_bytes: bytes) -> bytes:
-    """GlaDOS/HAL post-processing: pitch down + metallic echo + reverb + overdrive."""
+def _tts_apply_effects(wav_bytes: bytes, fx: str = 'character') -> bytes:
+    """Post-process WAV: 'character' for neural voice, 'heavy' for formant synth."""
+    # SOX effect chains per mode
+    if fx == 'heavy':
+        # Deep robotic: heavy pitch shift + echo + reverb + overdrive
+        sox_chain = [
+            'gain', '-4',
+            'pitch', '-350',
+            'echo', '0.8', '0.7', '22', '0.45',
+            'reverb', '40', '55', '100', '100', '0',
+            'overdrive', '5', '0',
+            'tempo', '0.92',
+            'gain', '-4',
+        ]
+        ffmpeg_af = (
+            'asetrate=22050*0.82,aresample=22050,atempo=1.22,'
+            'aphaser=type=t:speed=0.4:decay=0.7:gain=0.9,'
+            'aecho=0.95:0.85:22|45:0.6|0.35,'
+            'volume=-6dB'
+        )
+    else:
+        # Character mode: subtle pitch + tight resonant echo + very light reverb
+        # Preserves voice quality, adds just enough electronic edge
+        sox_chain = [
+            'gain', '-3',
+            'pitch', '-130',
+            'echo', '0.85', '0.75', '18', '0.38',
+            'reverb', '22', '35', '75', '100', '0',
+            'tempo', '0.90',
+            'gain', '-2',
+        ]
+        ffmpeg_af = (
+            'asetrate=22050*0.92,aresample=22050,atempo=1.09,'
+            'aphaser=type=t:speed=0.5:decay=0.5:gain=0.7,'
+            'aecho=0.88:0.78:18|30:0.5|0.28,'
+            'volume=-4dB'
+        )
     if shutil.which('sox'):
         inp = out = None
         try:
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 f.write(wav_bytes); inp = f.name
             out = inp[:-4] + '_fx.wav'
-            subprocess.run(
-                ['sox', inp, out,
-                 # Pre-attenuate before effects stack up
-                 'gain', '-4',
-                 # Pitch: -350 cents (~3.5 semitones) — noticeably deeper, unnatural
-                 'pitch', '-350',
-                 # Tight short echo → metallic/electronic resonance (GlaDOS's signature ring)
-                 'echo', '0.8', '0.7', '22', '0.45',
-                 # Room reverb — system-speaker quality, not human/room
-                 'reverb', '40', '55', '100', '100', '0',
-                 # Overdrive: electronic grit/presence
-                 'overdrive', '5', '0',
-                 # Slightly slower tempo — HAL's deliberate pacing
-                 'tempo', '0.92',
-                 'gain', '-4'],
+            subprocess.run(['sox', inp, out] + sox_chain,
                 capture_output=True, timeout=20, check=True)
             with open(out, 'rb') as f:
                 return f.read()
         except Exception as e:
-            _log(f'TTS sox effects: {e}', 'WARN')
+            _log(f'TTS sox effects ({fx}): {e}', 'WARN')
         finally:
             for p in (inp, out):
                 if p:
                     try: os.unlink(p)
                     except Exception: pass
-    # ffmpeg fallback — heavier processing to compensate for no overdrive
     if shutil.which('ffmpeg'):
         inp = out = None
         try:
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 f.write(wav_bytes); inp = f.name
             out = inp[:-4] + '_fx.wav'
-            subprocess.run(
-                ['ffmpeg', '-y', '-i', inp, '-af',
-                 # Pitch: asetrate shifts pitch+speed; atempo restores speed
-                 'asetrate=22050*0.82,aresample=22050,atempo=1.22,'
-                 # Phaser: creates sweeping metallic resonance
-                 'aphaser=type=t:speed=0.4:decay=0.7:gain=0.9,'
-                 # Echo: tight metallic ring
-                 'aecho=0.95:0.85:22|45:0.6|0.35,'
-                 'volume=-6dB',
-                 out],
+            subprocess.run(['ffmpeg', '-y', '-i', inp, '-af', ffmpeg_af, out],
                 capture_output=True, timeout=20, check=True)
             with open(out, 'rb') as f:
                 return f.read()
         except Exception as e:
-            _log(f'TTS ffmpeg effects: {e}', 'WARN')
+            _log(f'TTS ffmpeg effects ({fx}): {e}', 'WARN')
         finally:
             for p in (inp, out):
                 if p:
@@ -398,43 +474,71 @@ def _tts_apply_effects(wav_bytes: bytes) -> bytes:
     return wav_bytes
 
 def _tts_synth(text: str):
-    """Synthesize cleaned text → processed WAV bytes. eSpeak primary, Piper fallback."""
+    """Synthesize cleaned text → processed WAV bytes using current voice model."""
     clean = _tts_clean(text)
     if not clean:
         return None
 
-    # ── Primary: eSpeak NG (formant synth → inherently robotic, no model loading) ──
-    if shutil.which('espeak-ng'):
-        inp = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                inp = f.name
-            r = subprocess.run(
-                ['espeak-ng',
-                 '-v', 'en-us',   # US English male voice
-                 '-s', '148',     # speed (wpm) — slightly slower than default 175
-                 '-p', '28',      # pitch (0-99) — lower = deeper, HAL-like
-                 '-g', '4',       # inter-word gap in 10ms — deliberate spacing
-                 '-a', '100',     # amplitude
-                 '-w', inp,       # write WAV to file
-                 clean],
-                capture_output=True, timeout=15)
-            if r.returncode == 0 and Path(inp).exists() and Path(inp).stat().st_size > 100:
-                with open(inp, 'rb') as f:
-                    raw = f.read()
-                return _tts_apply_effects(raw)
-            else:
-                _log(f'espeak-ng failed: {r.stderr.decode()[:200]}', 'WARN')
-        except Exception as e:
-            _log(f'TTS espeak: {e}', 'WARN')
-        finally:
-            if inp:
-                try: os.unlink(inp)
-                except Exception: pass
+    mk  = _voice_model()
+    m   = VOICE_MODELS.get(mk, VOICE_MODELS['default'])
+    backend = m.get('backend', 'piper')
+    fx  = m.get('fx', 'character')
 
-    # ── Fallback: Piper neural TTS ───────────────────────────────────────────────
+    # ── eSpeak NG backend ────────────────────────────────────────────────────────
+    if backend == 'espeak' or (backend == 'piper' and not _tts_load_voice() and shutil.which('espeak-ng')):
+        if shutil.which('espeak-ng'):
+            inp = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                    inp = f.name
+                r = subprocess.run(
+                    ['espeak-ng',
+                     '-v', 'en-us',
+                     '-s', '148',   # slightly slower than default 175 wpm
+                     '-p', '28',    # pitch 0-99, lower = deeper
+                     '-g', '4',     # inter-word gap (10ms units)
+                     '-a', '100',
+                     '-w', inp,
+                     clean],
+                    capture_output=True, timeout=15)
+                if r.returncode == 0 and Path(inp).exists() and Path(inp).stat().st_size > 100:
+                    with open(inp, 'rb') as f:
+                        raw = f.read()
+                    return _tts_apply_effects(raw, fx='heavy' if backend == 'espeak' else fx)
+                else:
+                    _log(f'espeak-ng failed: {r.stderr.decode()[:200]}', 'WARN')
+            except Exception as e:
+                _log(f'TTS espeak: {e}', 'WARN')
+            finally:
+                if inp:
+                    try: os.unlink(inp)
+                    except Exception: pass
+            if backend == 'espeak':
+                return None  # no fallback for explicit espeak model
+
+    # ── Piper neural TTS backend ─────────────────────────────────────────────────
     voice = _tts_load_voice()
     if voice is None:
+        # Last resort: espeak fallback
+        if shutil.which('espeak-ng'):
+            inp = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                    inp = f.name
+                r = subprocess.run(
+                    ['espeak-ng', '-v', 'en-us', '-s', '148', '-p', '28',
+                     '-g', '4', '-a', '100', '-w', inp, clean],
+                    capture_output=True, timeout=15)
+                if r.returncode == 0 and Path(inp).exists() and Path(inp).stat().st_size > 100:
+                    with open(inp, 'rb') as f:
+                        raw = f.read()
+                    return _tts_apply_effects(raw, fx='heavy')
+            except Exception as e:
+                _log(f'TTS espeak fallback: {e}', 'WARN')
+            finally:
+                if inp:
+                    try: os.unlink(inp)
+                    except Exception: pass
         return None
     try:
         chunks = list(voice.synthesize(clean))
@@ -448,7 +552,7 @@ def _tts_synth(text: str):
         with wave.open(buf, 'wb') as wf:
             wf.setnchannels(nc); wf.setsampwidth(sw); wf.setframerate(sr)
             wf.writeframes(raw_pcm)
-        return _tts_apply_effects(buf.getvalue())
+        return _tts_apply_effects(buf.getvalue(), fx=fx)
     except Exception as e:
         _log(f'TTS piper synth: {e}', 'WARN')
         return None
@@ -2229,17 +2333,55 @@ class Session:
                     self._tx(f'\x1b[2m  [{i}] {s}\x1b[0m\n')
             else:
                 self._tx('\x1b[2m  no sources from last query\x1b[0m\n')
-        elif c in ('voice', 'voice on', 'voice off'):
-            if not _tts_available():
-                self._tx('\x1b[38;5;160m  voice not available — run setup to install piper-tts + model\x1b[0m\n')
-            else:
-                sub = parts[1].lower() if len(parts) > 1 else ('off' if _voice_enabled() else 'on')
-                if sub == 'on':
-                    _voice_set(True)
-                    self._tx('\x1b[38;5;208m  voice on — HAL/GlaDOS mode engaged\x1b[0m\n')
+        elif c == 'voice':
+            sub = parts[1].lower() if len(parts) > 1 else ''
+            if sub == 'model':
+                # //voice model [list|<key>|custom <onnx> [json]]
+                arg = parts[2].lower() if len(parts) > 2 else 'list'
+                if arg == 'list':
+                    cur = _voice_model()
+                    self._tx('\x1b[2m  Available voice models:\x1b[0m\n')
+                    for k, v in VOICE_MODELS.items():
+                        marker = '▸' if k == cur else ' '
+                        avail = False
+                        if v.get('backend') == 'espeak':
+                            avail = bool(shutil.which('espeak-ng'))
+                        else:
+                            onnx = v.get('onnx') or ''; cfg = v.get('json') or ''
+                            avail = bool(onnx and cfg and Path(onnx).exists() and Path(cfg).exists())
+                        st = '\x1b[38;5;208m✓\x1b[0m' if avail else '\x1b[38;5;238m✗\x1b[0m'
+                        self._tx(f'\x1b[2m  {marker} {k:10s} {st}  {v["label"]} — {v["desc"]}\x1b[0m\n')
+                elif arg == 'custom':
+                    onnx = parts[3] if len(parts) > 3 else ''
+                    jsn  = parts[4] if len(parts) > 4 else ''
+                    if not onnx:
+                        self._tx('\x1b[38;5;160m  usage: //voice model custom <onnx_path> [json_path]\x1b[0m\n')
+                    else:
+                        if not jsn:
+                            jsn = onnx + '.json' if not onnx.endswith('.json') else onnx[:-5] + '.json'
+                        VOICE_MODELS['custom']['onnx'] = onnx
+                        VOICE_MODELS['custom']['json'] = jsn
+                        _voice_set_model('custom')
+                        self._tx(f'\x1b[38;5;208m  voice model set to custom: {onnx}\x1b[0m\n')
+                elif arg in VOICE_MODELS:
+                    _voice_set_model(arg)
+                    self._tx(f'\x1b[38;5;208m  voice model: {VOICE_MODELS[arg]["label"]}\x1b[0m\n')
                 else:
-                    _voice_set(False)
-                    self._tx('\x1b[2m  voice off\x1b[0m\n')
+                    self._tx(f'\x1b[38;5;160m  unknown model: {arg}  (//voice model list)\x1b[0m\n')
+            elif sub in ('on', 'off', ''):
+                if not _tts_available():
+                    self._tx('\x1b[38;5;160m  voice not available — run setup to install voice dependencies\x1b[0m\n')
+                else:
+                    toggle = sub if sub in ('on', 'off') else ('off' if _voice_enabled() else 'on')
+                    if toggle == 'on':
+                        _voice_set(True)
+                        mk = _voice_model()
+                        self._tx(f'\x1b[38;5;208m  voice on  [{VOICE_MODELS.get(mk, {}).get("label", mk)}]\x1b[0m\n')
+                    else:
+                        _voice_set(False)
+                        self._tx('\x1b[2m  voice off\x1b[0m\n')
+            else:
+                self._tx('\x1b[2m  //voice [on|off|model [list|<key>|custom <onnx>]]\x1b[0m\n')
         elif c == 'help':
             self._tx(
                 '\x1b[2m'
@@ -2252,7 +2394,8 @@ class Session:
                 '  //search <query>   web search\n'
                 '  //sources          show research sources from last query\n'
                 '  //model [name]     select model (fast/deep/code/auto)\n'
-                '  //voice [on|off]   toggle voice (HAL9000/GlaDOS synthesis)\n'
+                '  //voice [on|off]   toggle voice synthesis\n'
+                '  //voice model      list/select voice models\n'
                 '  //sh <command>     run shell command (e.g. //sh git status)\n'
                 '  //gh <command>     run gh CLI command (e.g. //gh repo list)\n'
                 '  //repo <r> [path]  read GitHub repo files (e.g. //repo user/repo src/)\n'
@@ -2398,6 +2541,19 @@ _EYE_SVG = (
     '<circle cx="14" cy="19" r="5" fill="none" stroke="#c45c00" stroke-width="1.2"/>'
     '<circle cx="14" cy="19" r="2.5" fill="#e8720c"/>'
     '<circle cx="14" cy="19" r="1" fill="#ff9533"/>'
+    '</svg>'
+)
+
+# Standalone SVG favicon (32×32) — same eye-in-triangle motif
+_FAVICON_SVG = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">'
+    '<rect width="32" height="32" fill="#080807"/>'
+    '<polygon points="16,3 29,29 3,29" fill="none" stroke="#c45c00" stroke-width="1.8"/>'
+    '<line x1="16" y1="3" x2="16" y2="29" stroke="#c45c00" stroke-width="0.8" opacity="0.35"/>'
+    '<circle cx="16" cy="21" r="5.5" fill="none" stroke="#c45c00" stroke-width="1.4"/>'
+    '<circle cx="16" cy="21" r="2.8" fill="#e8720c"/>'
+    '<circle cx="16" cy="21" r="1.1" fill="#ff9533"/>'
     '</svg>'
 )
 
@@ -2588,6 +2744,7 @@ function clr(){
 
 // ── Voice / Audio ─────────────────────────────────────────────────────────────
 var _voiceOn=false;
+var _voiceModel='default';
 var _audioQueue=[];
 var _audioPlaying=false;
 var _audioCtx=null;
@@ -2635,7 +2792,7 @@ function _queueAudio(id){
 
 function toggleVoice(){
   fetch('/api/voice').then(function(r){return r.json();}).then(function(d){
-    if(!d.available){alert('Voice not set up. Run nexis_setup.sh to install piper-tts and voice model.');return;}
+    if(!d.available){alert('Voice not set up. Run nexis_setup.sh to install voice dependencies.');return;}
     var newState=!d.voice;
     fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:newState})})
     .then(function(r){return r.json();}).then(function(rd){
@@ -2646,12 +2803,43 @@ function toggleVoice(){
     });
   });
 }
+function showVoiceModels(){
+  fetch('/api/voice/models').then(function(r){return r.json();}).then(function(d){
+    var s='';
+    for(var i=0;i<d.models.length;i++){
+      var m=d.models[i];
+      s+=(m.current?'\u25b8 ':' ')+m.key+': '+m.label+(m.available?' \u2713':' \u2717')+'\n  '+m.desc+'\n';
+    }
+    var c=prompt('Voice model \u2014 type key to switch:\n\n'+s,_voiceModel);
+    if(c&&c.trim()!==_voiceModel){
+      var key=c.trim().toLowerCase();
+      if(key.startsWith('custom ')){
+        var parts=key.substring(7).trim().split(' ');
+        var onnx=parts[0],jsn=parts[1]||'';
+        fetch('/api/voice/model',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({model:'custom',onnx:onnx,json:jsn})})
+        .then(function(r){return r.json();}).then(function(rd){
+          if(rd.ok){_voiceModel='custom';alert('Custom voice model set.');}
+          else alert('Failed: '+(rd.error||'unknown'));
+        });
+      } else {
+        fetch('/api/voice/model',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({model:key})})
+        .then(function(r){return r.json();}).then(function(rd){
+          if(rd.ok){_voiceModel=rd.model;alert('Voice: '+rd.label);}
+          else alert('Failed: '+(rd.error||'unknown'));
+        });
+      }
+    }
+  });
+}
 
 // Check initial voice state on page load
 fetch('/api/voice').then(function(r){return r.json();}).then(function(d){
   _voiceOn=d.voice||false;
+  _voiceModel=d.model||'default';
   var btn=document.getElementById('vbtn');
-  if(btn){btn.textContent=_voiceOn?'🔊':'🔇';btn.title=_voiceOn?'Voice on — click to disable':'Voice off — click to enable';}
+  if(btn){btn.classList.toggle('on',_voiceOn);btn.title=_voiceOn?'Voice on — click to disable':'Voice off — click to enable';}
 }).catch(function(){});
 
 document.addEventListener('keydown',function(e){
@@ -2674,6 +2862,7 @@ def _shell(content, active='chat'):
         '<meta charset=UTF-8>'
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         '<title>NeXiS</title>'
+        "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<link href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' rel=stylesheet>"
         f'<style>{_CSS}</style></head><body>'
         '<div class=top>'
@@ -2706,6 +2895,7 @@ def _page_chat():
         "<button id=msel class='btn sec' onclick=showModels() title='Quick responses, general use'>Fast</button>"
         "<button class='btn sec' onclick=showSrc()>Src</button>"
         "<button id=vbtn class='btn sec' onclick=toggleVoice() title='Voice off — click to enable'>Vox</button>"
+        "<button class='btn sec' onclick=showVoiceModels() title='Select voice model'>Vcfg</button>"
         "<button class='btn sec' onclick=clr()>Clr</button>"
         '</div></div>'
         f'<script>{_CHAT_JS}</script>'
@@ -2796,9 +2986,46 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
     enriched_content=user_content+pre_ctx if pre_ctx else user_content
     msgs=[{'role':'system','content':sys_p}]+hist[-30:]+[{'role':'user','content':enriched_content}]
 
-    # ── First pass: stream tokens live via thread+queue ──────────────────────
-    def _live_stream(chat_msgs, chat_images=None):
-        """Run _smart_chat in a thread, yield tokens as they arrive."""
+    # ── Per-stream sequential TTS worker (runs in parallel with text streaming) ──
+    voice_on = _voice_enabled() and _tts_available()
+    tts_in_q  = _queue.Queue()   # (seq_id, text) → None sentinel to stop
+    tts_out_q = _queue.Queue()   # (seq_id, wav_bytes) → None sentinel when done
+
+    def _stream_tts_worker():
+        while True:
+            item = tts_in_q.get()
+            if item is None:
+                tts_out_q.put(None); break  # signal downstream we're done
+            seq_id, text = item
+            wav = _tts_synth(text)
+            tts_out_q.put((seq_id, wav))
+
+    if voice_on:
+        threading.Thread(target=_stream_tts_worker, daemon=True, name='web-tts').start()
+
+    def _speak(text):
+        seq = _next_audio_seq()
+        tts_in_q.put((seq, text))
+
+    def _drain_ready():
+        """Non-blocking: drain and return AUDIOREADY strings for completed sentences."""
+        out = []
+        while True:
+            try:
+                item = tts_out_q.get_nowait()
+                if item is None:
+                    tts_out_q.put(None); break  # put sentinel back for flush phase
+                sid, wav = item
+                if wav:
+                    with _audio_store_lk: _audio_store[sid] = wav
+                    out.append(f'[AUDIOREADY:{sid}]')
+            except _queue.Empty:
+                break
+        return out
+
+    # ── Live streaming with concurrent TTS ──────────────────────────────────────
+    def _live_stream(chat_msgs, chat_images=None, tts_sa=None):
+        """Stream tokens; feed TTS accumulator if tts_sa given."""
         q=_queue.SimpleQueue(); done=threading.Event()
         result=[None,None]; err=[None]
         def _run():
@@ -2813,29 +3040,41 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
             try:
                 tok=q.get(timeout=0.05)
                 collected.append(tok); yield tok
+                if tts_sa and voice_on:
+                    sent=tts_sa.feed(tok)
+                    if sent: _speak(sent)
+                    for ar in _drain_ready(): yield ar
             except _queue.Empty:
                 if done.is_set():
-                    try:  # drain any remaining tokens put just before done
+                    try:
                         while True:
                             tok=q.get_nowait()
                             collected.append(tok); yield tok
-                    except _queue.Empty: break
+                            if tts_sa and voice_on:
+                                sent=tts_sa.feed(tok)
+                                if sent: _speak(sent)
+                    except _queue.Empty: pass
+                    break
+        if tts_sa and voice_on:
+            tail=tts_sa.flush()
+            if tail: _speak(tail)
         if err[0]: yield f'(error: {err[0]})'
         yield ('__result__', result[0], result[1], ''.join(collected))
 
     resp=None; model_used=None; streamed=''
-    for tok in _live_stream(msgs, images):
+    for tok in _live_stream(msgs, images, tts_sa=_SentenceAccum() if voice_on else None):
         if isinstance(tok, tuple) and tok[0]=='__result__':
             _,resp,model_used,streamed=tok
         else:
             yield tok
 
-    if resp is None: return
+    if resp is None:
+        if voice_on: tts_in_q.put(None)
+        return
 
     # ── Tool processing ───────────────────────────────────────────────────────
     clean,tools=_process_tools(resp, _db(), user_text=msg)
     if tools:
-        # Clear streamed tool-tagged content; stream second pass live
         yield '[CLEAR]'
         ctx='\n\n'.join(f'[{k}]:\n{v}' for k,v in tools.items())
         fmsgs=msgs+[{'role':'user','content':(
@@ -2845,47 +3084,29 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
             'Stay in character as NeXiS. Do not mention that you ran tools.'
         )}]
         collected2=[]
-        for tok in _live_stream(fmsgs):
+        for tok in _live_stream(fmsgs, tts_sa=_SentenceAccum() if voice_on else None):
             if isinstance(tok, tuple) and tok[0]=='__result__':
                 _,clean,_mu,_s=tok; collected2_str=''.join(collected2); clean=clean or collected2_str
             else:
                 collected2.append(tok); yield tok
 
-    # ── WebUI TTS: synthesize final response and yield audio chunk IDs ──────────
-    final_text = clean or resp
-    if final_text and _voice_enabled() and _tts_available():
-        sentences = _split_sentences(final_text)
-        if sentences:
-            # Launch parallel TTS jobs
-            jobs = []
-            for sent in sentences:
-                seq = _next_audio_seq()
-                ev = threading.Event()
-                holder = [None]
-                def _synth_job(s=sent, ev=ev, holder=holder):
-                    holder[0] = _tts_synth(s)
-                    ev.set()
-                threading.Thread(target=_synth_job, daemon=True).start()
-                jobs.append((seq, ev, holder))
-            # Wait for each job and yield AUDIOREADY events as they complete
-            t0 = time.time()
-            remaining = list(jobs)
-            while remaining and time.time() - t0 < 30:
-                still = []
-                for seq, ev, holder in remaining:
-                    if ev.is_set():
-                        wav = holder[0]
-                        if wav:
-                            with _audio_store_lk:
-                                _audio_store[seq] = wav
-                            yield f'[AUDIOREADY:{seq}]'
-                    else:
-                        still.append((seq, ev, holder))
-                remaining = still
-                if remaining:
-                    time.sleep(0.05)
+    # ── Flush remaining TTS (drain everything the worker still has) ──────────────
+    if voice_on:
+        tts_in_q.put(None)       # tell worker no more input
+        t0=time.time()
+        while time.time()-t0 < 30:
+            try:
+                item=tts_out_q.get(timeout=0.2)
+                if item is None: break  # worker finished
+                sid, wav=item
+                if wav:
+                    with _audio_store_lk: _audio_store[sid]=wav
+                    yield f'[AUDIOREADY:{sid}]'
+            except _queue.Empty:
+                pass
 
     # Store final response for post-stream persistence
+    final_text = clean or resp
     _web_chat_stream._last=(user_content, final_text)
     with _web_lock:
         _web_hist.append({'role':'user','content':user_content})
@@ -2971,16 +3192,43 @@ def _start_web():
                         self._send(200,json.dumps({'voice':_voice_enabled()}),'application/json')
                     else:
                         if not _tts_available():
-                            self._send(503,json.dumps({'error':'TTS not set up — run setup to install piper-tts'}),'application/json')
+                            self._send(503,json.dumps({'error':'Voice not set up — run setup to install voice dependencies'}),'application/json')
                         else:
                             _voice_set(bool(on))
                             self._send(200,json.dumps({'ok':True,'voice':_voice_enabled()}),'application/json')
+                elif path=='/api/voice/model':
+                    data=json.loads(body) if body else {}
+                    key=data.get('model','').strip().lower()
+                    if key=='custom':
+                        onnx=data.get('onnx','').strip()
+                        jsn=data.get('json','').strip()
+                        if not onnx:
+                            self._send(400,json.dumps({'error':'onnx path required'}),'application/json'); return
+                        if not jsn:
+                            jsn=onnx+'.json' if not onnx.endswith('.json') else onnx[:-5]+'.json'
+                        VOICE_MODELS['custom']['onnx']=onnx
+                        VOICE_MODELS['custom']['json']=jsn
+                        _voice_set_model('custom')
+                        self._send(200,json.dumps({'ok':True,'model':'custom','label':'Custom'}),'application/json')
+                    elif key in VOICE_MODELS:
+                        _voice_set_model(key)
+                        self._send(200,json.dumps({'ok':True,'model':key,
+                            'label':VOICE_MODELS[key]['label']}),'application/json')
+                    else:
+                        self._send(400,json.dumps({'error':f'Unknown voice model: {key}'}),'application/json')
                 else: self._send(404,b'not found')
             except Exception as e:
                 try: self._send(500,json.dumps({'error':str(e)}),'application/json')
                 except Exception: pass
         def do_GET(self):
             path=urlparse(self.path).path.rstrip('/') or '/chat'
+            if path in ('/favicon.svg','/favicon.ico'):
+                b=_FAVICON_SVG.encode()
+                self.send_response(200)
+                self.send_header('Content-Type','image/svg+xml')
+                self.send_header('Content-Length',len(b))
+                self.send_header('Cache-Control','max-age=86400')
+                self.end_headers(); self.wfile.write(b); return
             db=_db()
             try:
                 if path in ('/','/ chat','/chat'): self._send(200,_page_chat())
@@ -3013,7 +3261,23 @@ def _start_web():
                         src = list(_last_sources)
                     self._send(200, json.dumps({'sources': src}), 'application/json')
                 elif path=='/api/voice':
-                    self._send(200,json.dumps({'voice':_voice_enabled(),'available':_tts_available()}),'application/json')
+                    self._send(200,json.dumps({'voice':_voice_enabled(),'available':_tts_available(),
+                        'model':_voice_model()}),'application/json')
+                elif path=='/api/voice/models':
+                    mlist=[]
+                    cur=_voice_model()
+                    for k,v in VOICE_MODELS.items():
+                        avail=False
+                        if v.get('backend')=='espeak':
+                            avail=bool(shutil.which('espeak-ng'))
+                        else:
+                            onnx=v.get('onnx') or ''; cfg=v.get('json') or ''
+                            avail=bool(onnx and cfg and Path(onnx).exists() and Path(cfg).exists())
+                            if not avail:
+                                avail=Path(PIPER_MODEL).exists() and Path(PIPER_CFG).exists()
+                        mlist.append({'key':k,'label':v['label'],'desc':v['desc'],
+                            'available':avail,'current':k==cur})
+                    self._send(200,json.dumps({'models':mlist}),'application/json')
                 else: self._send(404,'<pre>404</pre>')
             except Exception as e: self._send(500,f'<pre>{_esc(str(e))}</pre>')
             finally: db.close()
