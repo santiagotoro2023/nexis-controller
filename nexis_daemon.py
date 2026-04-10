@@ -186,12 +186,17 @@ def _smart_chat(messages, temperature=0.75, num_ctx=None,
     if images:
         if _model_ok(MODEL_VISION):
             msgs_v = _enforce_english(list(messages))
-            result = _stream_chat(msgs_v, MODEL_VISION, temperature, num_ctx,
+            vision_ctx = max(num_ctx or 8192, 8192)  # images need more tokens
+            result = _stream_chat(msgs_v, MODEL_VISION, temperature, vision_ctx,
                                   on_token=on_token, images=images)
             if result and result.strip():
                 return result, MODEL_VISION
-        elif on_token:
-            on_token('[Vision model not installed. Run: ollama pull qwen2.5vl:7b]\n')
+            else:
+                if on_token:
+                    on_token('\n[Vision: no response from model — image may be unsupported format]\n')
+        else:
+            if on_token:
+                on_token('[Vision model not installed. Run: ollama pull qwen2.5vl:7b]\n')
         images = None
 
     # Check model is installed
@@ -460,22 +465,47 @@ def _read_file(path_str):
         return f'Cannot read file: {e}', mime, False
 
 def _md_to_terminal(text):
-    """Strip markdown formatting for clean plain-text CLI output."""
-    # Strip code fences but keep content
-    def strip_fence(m):
-        inner = m.group(0)
-        # remove first and last lines (the ``` lines)
-        parts = inner.split('\n')
-        return '\n'.join(parts[1:-1]) if len(parts) > 2 else inner
-    t = re.sub(r'```[^\n]*\n[\s\S]*?```', strip_fence, text)
-    t = re.sub(r'`([^`]+)`', r'\1', t)
-    t = re.sub(r'\*\*([^*]+)\*\*', r'\1', t)
-    t = re.sub(r'\*([^*]+)\*', r'\1', t)
-    t = re.sub(r'^#{1,6}\s+', '', t, flags=re.MULTILINE)
-    t = re.sub(r'^\s*[-*+]\s+', '  · ', t, flags=re.MULTILINE)
-    t = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', t)
-    t = re.sub(r'^>\s+', '  ', t, flags=re.MULTILINE)
-    return t
+    """Render markdown as ANSI-styled terminal text (non-streaming, full block)."""
+    OR   = '\x1b[38;5;208m'
+    DIM  = '\x1b[2m\x1b[38;5;240m'
+    CODE = '\x1b[38;5;150m'
+    BOLD = '\x1b[1m\x1b[38;5;255m'
+    GRAY = '\x1b[38;5;252m'
+    RST  = '\x1b[0m'
+
+    out = []
+    in_code = False
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('```'):
+            if in_code:
+                in_code = False
+                out.append(f'{DIM}  ─────────────────────────────{RST}')
+            else:
+                in_code = True
+                lang = stripped[3:].strip()
+                label = f' {lang}' if lang else ''
+                out.append(f'{DIM}  ────{label}─────────────────────{RST}')
+            continue
+        if in_code:
+            out.append(f'{DIM}  {line}{RST}')
+            continue
+        hm = re.match(r'^(#{1,3})\s+(.*)', line)
+        if hm:
+            out.append(f'  {OR}{BOLD}{hm.group(2)}{RST}')
+            continue
+        t = line
+        t = re.sub(r'`([^`]+)`', lambda m: f'{CODE}{m.group(1)}{RST}{GRAY}', t)
+        t = re.sub(r'\*\*([^*]+)\*\*', lambda m: f'{BOLD}{m.group(1)}{RST}{GRAY}', t)
+        t = re.sub(r'\*([^*]+)\*', lambda m: f'{DIM}{m.group(1)}{RST}{GRAY}', t)
+        t = re.sub(r'^\s*[-*+]\s+', '  · ', t)
+        t = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', t)
+        t = re.sub(r'^>\s+', '    ', t)
+        if t.strip():
+            out.append(f'  {GRAY}{t}{RST}')
+        else:
+            out.append('')
+    return '\n'.join(out)
 
 def _md_to_html(text):
     def esc(s): return s.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
@@ -1438,6 +1468,47 @@ def _process_tools(text, conn, on_status=None, user_text=''):
     return clean.strip(), tools
 
 
+class _TermRenderer:
+    """Stateful per-line Markdown→ANSI renderer for live-streaming CLI output."""
+    OR   = '\x1b[38;5;208m'
+    DIM  = '\x1b[2m\x1b[38;5;240m'
+    CODE = '\x1b[38;5;150m'
+    BOLD = '\x1b[1m\x1b[38;5;255m'
+    GRAY = '\x1b[38;5;252m'
+    RST  = '\x1b[0m'
+
+    def __init__(self):
+        self._in_code = False
+
+    def line(self, text):
+        OR, DIM, CODE, BOLD, GRAY, RST = (
+            self.OR, self.DIM, self.CODE, self.BOLD, self.GRAY, self.RST)
+        stripped = text.strip()
+        if stripped.startswith('```'):
+            if self._in_code:
+                self._in_code = False
+                return f'{DIM}  ─────────────────────────────{RST}'
+            else:
+                self._in_code = True
+                lang = stripped[3:].strip()
+                label = f' {lang}' if lang else ''
+                return f'{DIM}  ────{label}─────────────────────{RST}'
+        if self._in_code:
+            return f'{DIM}  {text}{RST}'
+        hm = re.match(r'^(#{1,3})\s+(.*)', text)
+        if hm:
+            return f'  {OR}{BOLD}{hm.group(2)}{RST}'
+        t = text
+        t = re.sub(r'`([^`]+)`', lambda m: f'{CODE}{m.group(1)}{RST}{GRAY}', t)
+        t = re.sub(r'\*\*([^*]+)\*\*', lambda m: f'{BOLD}{m.group(1)}{RST}{GRAY}', t)
+        t = re.sub(r'\*([^*]+)\*', lambda m: f'{DIM}{m.group(1)}{RST}{GRAY}', t)
+        t = re.sub(r'^\s*[-*+]\s+', '  · ', t)
+        t = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', t)
+        if not t.strip():
+            return ''
+        return f'  {GRAY}{t}{RST}'
+
+
 class _Spinner:
     """Animated CLI spinner for blocking phases (research, tool execution)."""
     _FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
@@ -1506,26 +1577,54 @@ class Session:
         except Exception: return 'exit'
         return buf.decode('utf-8','replace').strip()
 
+    _BANNER_H = 7   # rows occupied by the frozen header (rows 1–7)
+
     def _banner(self, mc, sc):
         OR  = '\x1b[38;5;208m'
         DIM = '\x1b[2m\x1b[38;5;240m'
         RST = '\x1b[0m'
-        W   = 48
+        W   = 52
         bar = '─' * W
         now = datetime.now().strftime('%H:%M')
-        with _model_override_lock:
-            sel = _model_override
+        with _model_override_lock: sel = _model_override
         model_label = MODELS.get(sel, {}).get('label', sel)
         host = _socket.gethostname()
+        self._mc = mc; self._sc = sc
         self._tx(
-            f'\n{DIM}  {bar}{RST}\n'
+            '\x1b[2J\x1b[H'                                         # clear screen, cursor home
+            f'{DIM}  {bar}{RST}\n'                                   # row 1
+            f'  {OR}◈  N e X i S{RST}  {DIM}v3.0{RST}\n'           # row 2
+            f'{DIM}  {bar}{RST}\n'                                   # row 3
+            f'{DIM}  #{sc+1}  ·  {now}  ·  {mc} mem  ·  {model_label}{RST}\n'  # row 4
+            f'{DIM}  http://{host}:8080  ·  //help  ·  //exit{RST}\n'           # row 5
+            f'{DIM}  {bar}{RST}\n'                                   # row 6
+            '\n'                                                      # row 7 (breathing room)
+            f'\x1b[{self._BANNER_H + 1};999r'                       # scroll region: row 8 → end
+        )
+        # cursor lands at row 8 (top of scroll region) after setting margins
+
+    def _redraw_banner(self):
+        """Refresh the frozen header in-place (save/restore cursor)."""
+        OR  = '\x1b[38;5;208m'
+        DIM = '\x1b[2m\x1b[38;5;240m'
+        RST = '\x1b[0m'
+        W   = 52
+        bar = '─' * W
+        now = datetime.now().strftime('%H:%M')
+        with _model_override_lock: sel = _model_override
+        model_label = MODELS.get(sel, {}).get('label', sel)
+        host = _socket.gethostname()
+        mc = getattr(self, '_mc', 0); sc = getattr(self, '_sc', 0)
+        self._tx(
+            '\x1b7'                                                   # save cursor
+            '\x1b[1;1H'                                              # jump to row 1 (outside scroll region)
+            f'{DIM}  {bar}{RST}\n'
             f'  {OR}◈  N e X i S{RST}  {DIM}v3.0{RST}\n'
             f'{DIM}  {bar}{RST}\n'
-            f'{DIM}  #{sc+1}  ·  {now}  ·  {mc} mem  ·  {sel}{RST}\n'
-            f'{DIM}  http://{host}:8080{RST}\n'
-            f'{DIM}  {bar}{RST}\n'
-            f'{DIM}  //help for commands  ·  //exit to quit{RST}\n'
-            f'{DIM}  {bar}{RST}\n\n'
+            f'{DIM}  #{sc+1}  ·  {now}  ·  {mc} mem  ·  {model_label}{RST}\n'
+            f'{DIM}  http://{host}:8080  ·  //help  ·  //exit{RST}\n'
+            f'{DIM}  {bar}{RST}'
+            '\x1b8'                                                   # restore cursor
         )
 
     def run(self):
@@ -1582,31 +1681,27 @@ class Session:
 
             self._tx('\n')
 
+            renderer = _TermRenderer()
+            line_buf = []
+
             def emit(line):
-                rendered = _md_to_terminal(line)
-                self._tx(f'  {OR}{rendered}{RST}\n')
+                self._tx(renderer.line(line) + '\n')
 
-            def emit_stream(text):
-                for line in text.split('\n'):
-                    emit(line)
-
-            # Stream first-pass tokens live
-            first_line_buf = []
             def on_first_tok(t):
-                first_line_buf.append(t)
-                combined = ''.join(first_line_buf)
+                line_buf.append(t)
+                combined = ''.join(line_buf)
                 if '\n' in combined:
                     parts = combined.split('\n')
                     for part in parts[:-1]:
                         emit(part)
-                    first_line_buf.clear()
+                    line_buf.clear()
                     if parts[-1]:
-                        first_line_buf.append(parts[-1])
+                        line_buf.append(parts[-1])
 
             try:
                 resp, model_used = _smart_chat(msgs, on_token=on_first_tok, images=file_images)
-                if first_line_buf:
-                    emit(''.join(first_line_buf))
+                if line_buf:
+                    emit(''.join(line_buf))
             except Exception as e:
                 self._tx(f'\x1b[38;5;160m  error: {e}{RST}\n')
                 self.hist.pop(); continue
@@ -1634,21 +1729,22 @@ class Session:
                     )
                 }]
                 self._tx('\n')
-                line_buf = []
+                renderer2 = _TermRenderer()
+                ftok_buf = []
                 def on_ftok(t):
-                    line_buf.append(t)
-                    combined = ''.join(line_buf)
+                    ftok_buf.append(t)
+                    combined = ''.join(ftok_buf)
                     if '\n' in combined:
                         parts = combined.split('\n')
                         for part in parts[:-1]:
-                            emit(part)
-                        line_buf.clear()
+                            self._tx(renderer2.line(part) + '\n')
+                        ftok_buf.clear()
                         if parts[-1]:
-                            line_buf.append(parts[-1])
+                            ftok_buf.append(parts[-1])
                 try:
                     fr, _ = _smart_chat(fmsgs, on_token=on_ftok)
-                    if line_buf:
-                        emit(''.join(line_buf))
+                    if ftok_buf:
+                        self._tx(renderer2.line(''.join(ftok_buf)) + '\n')
                     clean = fr if fr.strip() else clean
                 except Exception:
                     pass
@@ -1748,6 +1844,7 @@ class Session:
                         _model_override = choice
                     label = MODELS[choice]['label']
                     self._tx(f'\x1b[38;5;172m  Model set to: {label}\x1b[0m\n')
+                    self._redraw_banner()
                 else:
                     self._tx(f'\x1b[2m  Unknown model: {choice}. Options: {", ".join(MODELS.keys())}\x1b[0m\n')
         elif c.startswith('sh ') or c.startswith('shell '):
@@ -1837,6 +1934,8 @@ class Session:
     def _end(self):
         if len(self.hist) >= 2:
             threading.Thread(target=_store_memory, args=(_db(), self.hist), daemon=True).start()
+        # Reset scroll region and show cursor before closing
+        self._tx('\x1b[r\x1b[?25h')
         try: self.sock.close()
         except Exception: pass
         _log('Session ended')
