@@ -2283,6 +2283,8 @@ _CSS = (
     ".btn:disabled{opacity:.45;cursor:not-allowed}"
     ".btn.sec{background:transparent;color:var(--fg2);border:1px solid var(--border)}"
     ".btn.sec:hover:not(:disabled){background:var(--bg3);color:var(--fg);border-color:var(--fg2)}"
+    ".btn.sec.on{color:var(--or);border-color:var(--or2)}"
+    ".btn.sec.on:hover:not(:disabled){color:var(--or3);border-color:var(--or3)}"
     ".upl{cursor:pointer;background:var(--bg3);border:1px solid var(--border);"
     "color:var(--fg2);padding:8px 10px;font-size:11px;text-transform:uppercase;"
     "letter-spacing:.06em;white-space:nowrap}"
@@ -2594,7 +2596,7 @@ function toggleVoice(){
     .then(function(r){return r.json();}).then(function(rd){
       _voiceOn=rd.voice;
       var btn=document.getElementById('vbtn');
-      if(btn){btn.textContent=_voiceOn?'🔊':'🔇';btn.title=_voiceOn?'Voice on — click to disable':'Voice off — click to enable';}
+      if(btn){btn.classList.toggle('on',_voiceOn);btn.title=_voiceOn?'Voice on — click to disable':'Voice off — click to enable';}
       if(_voiceOn&&_audioCtx&&_audioCtx.state==='suspended')_audioCtx.resume();
     });
   });
@@ -2658,7 +2660,7 @@ def _page_chat():
         "<button id=sinp class=btn onclick=send()>Send</button>"
         "<button id=msel class='btn sec' onclick=showModels() title='Quick responses, general use'>Fast</button>"
         "<button class='btn sec' onclick=showSrc()>Src</button>"
-        "<button id=vbtn class='btn sec' onclick=toggleVoice() title='Voice off — click to enable'>🔇</button>"
+        "<button id=vbtn class='btn sec' onclick=toggleVoice() title='Voice off — click to enable'>Vox</button>"
         "<button class='btn sec' onclick=clr()>Clr</button>"
         '</div></div>'
         f'<script>{_CHAT_JS}</script>'
