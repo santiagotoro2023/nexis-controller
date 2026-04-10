@@ -3,7 +3,7 @@
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
-import shutil, mimetypes
+import shutil, mimetypes, io, wave, tempfile, time
 from datetime import datetime
 from pathlib import Path
 
@@ -17,12 +17,18 @@ LOG_PATH  = DATA / 'logs' / 'daemon.log'
 (DATA / 'memory').mkdir(parents=True, exist_ok=True)
 (DATA / 'logs').mkdir(exist_ok=True)
 (DATA / 'state').mkdir(exist_ok=True)
+(DATA / 'voice').mkdir(exist_ok=True)
 
 OLLAMA     = 'http://localhost:11434'
 MODEL_FAST   = 'qwen2.5:14b'
 MODEL_DEEP   = 'hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M'
 MODEL_CODE   = 'qwen3-coder-next'
 MODEL_VISION = 'qwen2.5vl:7b'
+
+# Voice / TTS
+VOICE_DIR   = DATA / 'voice'
+PIPER_MODEL = str(VOICE_DIR / 'en_US-ryan-high.onnx')
+PIPER_CFG   = str(VOICE_DIR / 'en_US-ryan-high.onnx.json')
 
 # All available models for selection — Creator chooses, no automatic switching
 MODELS = {
@@ -265,6 +271,207 @@ def _warmup():
         threading.Thread(target=_warm, args=('vision', MODEL_VISION), daemon=True),
     ]
     for t in threads: t.start()
+
+# ── Voice / TTS ───────────────────────────────────────────────────────────────
+
+_VOICE_ENABLED  = False
+_voice_lk       = threading.Lock()
+_audio_store    = {}          # seq_id -> wav_bytes served to WebUI JS
+_audio_store_lk = threading.Lock()
+_audio_seq      = [0]
+_audio_seq_lk   = threading.Lock()
+_tts_voice_obj  = [None]
+_tts_voice_obj_lk = threading.Lock()
+_cli_tts_q      = _queue.Queue(maxsize=4)
+
+def _voice_enabled():
+    with _voice_lk: return _VOICE_ENABLED
+
+def _voice_set(on: bool):
+    global _VOICE_ENABLED
+    with _voice_lk: _VOICE_ENABLED = on
+
+def _next_audio_seq():
+    with _audio_seq_lk:
+        _audio_seq[0] += 1
+        return _audio_seq[0]
+
+def _tts_available():
+    """True if piper-tts is installed and model files exist."""
+    if not (Path(PIPER_MODEL).exists() and Path(PIPER_CFG).exists()):
+        return False
+    try:
+        import piper.voice  # noqa
+        return True
+    except ImportError:
+        return False
+
+def _tts_load_voice():
+    with _tts_voice_obj_lk:
+        if _tts_voice_obj[0] is None and _tts_available():
+            try:
+                from piper.voice import PiperVoice
+                _tts_voice_obj[0] = PiperVoice.load(
+                    PIPER_MODEL, config_path=PIPER_CFG, use_cuda=False)
+                _log('TTS voice loaded (en_US-ryan-high)')
+            except Exception as e:
+                _log(f'TTS voice load: {e}', 'WARN')
+        return _tts_voice_obj[0]
+
+def _tts_clean(text: str) -> str:
+    """Strip markdown/tool-tags from text before speaking."""
+    text = re.sub(r'```[\s\S]*?```', '', text)            # fenced code
+    text = re.sub(r'`[^`\n]+`', '', text)                 # inline code
+    text = re.sub(r'\*{1,3}([^*\n]+)\*{1,3}', r'\1', text)  # bold/italic
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # headers
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  # links
+    text = re.sub(r'\[[A-Z]+:[^\]]*\]', '', text)         # tool tags
+    text = re.sub(r'\[[A-Z]+\]', '', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+def _tts_apply_effects(wav_bytes: bytes) -> bytes:
+    """Post-process WAV: pitch -120cents + subtle reverb (HAL/GlaDOS hybrid)."""
+    # Try sox first (best quality pitch shift)
+    if shutil.which('sox'):
+        inp = out = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                f.write(wav_bytes); inp = f.name
+            out = inp[:-4] + '_fx.wav'
+            subprocess.run(
+                ['sox', inp, out,
+                 'pitch', '-120',
+                 'reverb', '25', '50', '100', '100', '0',
+                 'gain', '-3'],
+                capture_output=True, timeout=15, check=True)
+            with open(out, 'rb') as f:
+                return f.read()
+        except Exception as e:
+            _log(f'TTS sox: {e}', 'WARN')
+        finally:
+            for p in (inp, out):
+                if p:
+                    try: os.unlink(p)
+                    except Exception: pass
+    # Fallback: ffmpeg (asetrate pitch-shift + echo)
+    if shutil.which('ffmpeg'):
+        inp = out = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                f.write(wav_bytes); inp = f.name
+            out = inp[:-4] + '_fx.wav'
+            # atempo compensates for the speed change caused by asetrate
+            subprocess.run(
+                ['ffmpeg', '-y', '-i', inp, '-af',
+                 'atempo=1.064,asetrate=22050*0.94,aresample=22050,'
+                 'aecho=0.85:0.88:55:0.25,volume=-3dB',
+                 out],
+                capture_output=True, timeout=15, check=True)
+            with open(out, 'rb') as f:
+                return f.read()
+        except Exception as e:
+            _log(f'TTS ffmpeg: {e}', 'WARN')
+        finally:
+            for p in (inp, out):
+                if p:
+                    try: os.unlink(p)
+                    except Exception: pass
+    return wav_bytes
+
+def _tts_synth(text: str):
+    """Synthesize cleaned text to processed WAV bytes. Returns None on failure."""
+    clean = _tts_clean(text)
+    if not clean:
+        return None
+    voice = _tts_load_voice()
+    if voice is None:
+        return None
+    try:
+        # New piper-tts API: synthesize() yields AudioChunk objects
+        chunks = list(voice.synthesize(clean))
+        if not chunks:
+            return None
+        # Reconstruct WAV from chunks
+        sr = chunks[0].sample_rate
+        sw = chunks[0].sample_width
+        nc = chunks[0].sample_channels
+        raw_pcm = b''.join(c.audio_int16_bytes for c in chunks)
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(nc)
+            wf.setsampwidth(sw)
+            wf.setframerate(sr)
+            wf.writeframes(raw_pcm)
+        raw = buf.getvalue()
+        return _tts_apply_effects(raw)
+    except Exception as e:
+        _log(f'TTS synth: {e}', 'WARN')
+        return None
+
+def _tts_play_local(wav_bytes: bytes):
+    """Play WAV bytes via aplay (non-blocking from caller's perspective)."""
+    if not shutil.which('aplay'):
+        return
+    try:
+        proc = subprocess.Popen(
+            ['aplay', '-q', '-'],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.communicate(input=wav_bytes, timeout=120)
+    except Exception as e:
+        _log(f'TTS aplay: {e}', 'WARN')
+
+class _SentenceAccum:
+    """Accumulates streaming tokens and emits complete sentences for TTS."""
+    _BOUNDARY = re.compile(r'(?<=[.!?])\s+|(?<=\n)\n')
+
+    def __init__(self):
+        self._buf = ''
+
+    def feed(self, token: str):
+        """Return a complete sentence string when one is ready, else None."""
+        self._buf += token
+        m = self._BOUNDARY.search(self._buf)
+        if m and len(self._buf[:m.start()].strip()) >= 12:
+            sentence = self._buf[:m.end()]
+            self._buf = self._buf[m.end():]
+            return sentence.strip()
+        return None
+
+    def flush(self):
+        s = self._buf.strip()
+        self._buf = ''
+        return s if s else None
+
+def _split_sentences(text: str):
+    """Split text into TTS-ready sentences."""
+    parts = re.split(r'(?<=[.!?])\s+|\n\n+', text)
+    return [p.strip() for p in parts if p.strip() and len(p.strip()) >= 4]
+
+def _cli_tts_worker():
+    """Background TTS worker for CLI: dequeues sentences, synths, plays."""
+    while True:
+        try:
+            item = _cli_tts_q.get(timeout=1)
+            if item is None:
+                break
+            if _voice_enabled() and _tts_available():
+                wav = _tts_synth(item)
+                if wav:
+                    _tts_play_local(wav)
+            _cli_tts_q.task_done()
+        except _queue.Empty:
+            continue
+        except Exception as e:
+            _log(f'CLI TTS worker: {e}', 'WARN')
+
+def _cli_tts_speak(text: str):
+    """Queue a sentence for CLI TTS (non-blocking, drops if queue full)."""
+    if not _voice_enabled() or not _tts_available():
+        return
+    try:
+        _cli_tts_q.put_nowait(text)
+    except _queue.Full:
+        pass
 
 def _system_probe():
     out = []
@@ -1705,18 +1912,15 @@ class Session:
                 msgs = msgs[:-1] + [{'role':'user','content': user_msg + pre_ctx}]
 
             # ── Live streaming with word-wrap ────────────────────────────────────
-            # Tokens are buffered per-word and only emitted at space/newline
-            # boundaries so the terminal never splits a word mid-character.
-            # WRAP_COL: soft wrap column — keeps a right margin so text breathes.
-            WRAP_COL   = 76   # wrap before this column (adjust if terminal is wider)
-            INDENT     = 2    # left indent chars (the '  ' prefix)
+            WRAP_COL   = 76
+            INDENT     = 2
             self._tx(f'\n{" " * INDENT}{OR}')
             in_code_blk = [False]
-            cur_col     = [INDENT]   # current cursor column
-            word_buf    = ['']       # word being accumulated (not yet space-terminated)
+            cur_col     = [INDENT]
+            word_buf    = ['']
+            _cli_sa     = _SentenceAccum()   # sentence accumulator for TTS
 
             def _wflush(color):
-                """Emit buffered word, wrapping to new line if it won't fit."""
                 w = word_buf[0]
                 if not w:
                     return
@@ -1728,6 +1932,11 @@ class Session:
                 word_buf[0] = ''
 
             def on_first_tok(t):
+                # TTS: accumulate sentence, dispatch when complete
+                if not in_code_blk[0]:
+                    sent = _cli_sa.feed(t)
+                    if sent:
+                        _cli_tts_speak(sent)
                 if '```' in t:
                     _wflush(OR)
                     in_code_blk[0] = not in_code_blk[0]
@@ -1745,7 +1954,6 @@ class Session:
                         cur_col[0] = INDENT
                     elif ch == ' ':
                         _wflush(color)
-                        # emit space only if not at start of line and not past margin
                         if cur_col[0] > INDENT and cur_col[0] < WRAP_COL:
                             self._tx(' ')
                             cur_col[0] += 1
@@ -1754,8 +1962,11 @@ class Session:
 
             try:
                 resp, model_used = _smart_chat(msgs, on_token=on_first_tok, images=file_images)
-                _wflush(DIM if in_code_blk[0] else OR)   # flush trailing word
-                # newline so spinner starts on a fresh line (not on top of response)
+                _wflush(DIM if in_code_blk[0] else OR)
+                # flush trailing sentence fragment to TTS
+                tail = _cli_sa.flush()
+                if tail:
+                    _cli_tts_speak(tail)
                 self._tx(RST + '\n')
             except Exception as e:
                 self._tx(f'\x1b[38;5;160m  error: {e}{RST}\n')
@@ -1973,6 +2184,17 @@ class Session:
                     self._tx(f'\x1b[2m  [{i}] {s}\x1b[0m\n')
             else:
                 self._tx('\x1b[2m  no sources from last query\x1b[0m\n')
+        elif c in ('voice', 'voice on', 'voice off'):
+            if not _tts_available():
+                self._tx('\x1b[38;5;160m  voice not available — run setup to install piper-tts + model\x1b[0m\n')
+            else:
+                sub = parts[1].lower() if len(parts) > 1 else ('off' if _voice_enabled() else 'on')
+                if sub == 'on':
+                    _voice_set(True)
+                    self._tx('\x1b[38;5;208m  voice on — HAL/GlaDOS mode engaged\x1b[0m\n')
+                else:
+                    _voice_set(False)
+                    self._tx('\x1b[2m  voice off\x1b[0m\n')
         elif c == 'help':
             self._tx(
                 '\x1b[2m'
@@ -1985,6 +2207,7 @@ class Session:
                 '  //search <query>   web search\n'
                 '  //sources          show research sources from last query\n'
                 '  //model [name]     select model (fast/deep/code/auto)\n'
+                '  //voice [on|off]   toggle voice (HAL9000/GlaDOS synthesis)\n'
                 '  //sh <command>     run shell command (e.g. //sh git status)\n'
                 '  //gh <command>     run gh CLI command (e.g. //gh repo list)\n'
                 '  //repo <r> [path]  read GitHub repo files (e.g. //repo user/repo src/)\n'
@@ -2207,6 +2430,10 @@ function send(){
             var data=p.substring(6);
             if(data==='[DONE]'){finalize(nc,buf);return;}
             if(data==='[CLEAR]'){buf='';nc.innerHTML='<span class=cursor>&#x25ae;</span>';}
+            else if(data.startsWith('[AUDIOREADY:')){
+              var am=data.match(/\[AUDIOREADY:(\d+)\]/);
+              if(am)_queueAudio(parseInt(am[1]));
+            }
             else if(data.startsWith('[STATUS:')){
               var sm=data.match(/\[STATUS:(.+)\]/);
               if(sm)statusText=sm[1].trim();
@@ -2312,6 +2539,74 @@ function clr(){
   fetch('/api/clear',{method:'POST'}).then(function(){location.reload();});
 }
 
+// ── Voice / Audio ─────────────────────────────────────────────────────────────
+var _voiceOn=false;
+var _audioQueue=[];
+var _audioPlaying=false;
+var _audioCtx=null;
+
+function _getAudioCtx(){
+  if(!_audioCtx||_audioCtx.state==='closed'){
+    try{_audioCtx=new(window.AudioContext||window.webkitAudioContext)();}catch(e){_audioCtx=null;}
+  }
+  return _audioCtx;
+}
+
+async function _playWav(id){
+  var ctx=_getAudioCtx();
+  if(!ctx)return;
+  try{
+    var resp=await fetch('/api/audio/'+id);
+    if(!resp.ok)return;
+    var buf=await resp.arrayBuffer();
+    var decoded=await ctx.decodeAudioData(buf);
+    await new Promise(function(resolve){
+      var src=ctx.createBufferSource();
+      src.buffer=decoded;
+      src.connect(ctx.destination);
+      src.onended=resolve;
+      src.start();
+    });
+  }catch(e){}
+}
+
+async function _drainAudioQueue(){
+  if(_audioPlaying)return;
+  _audioPlaying=true;
+  while(_audioQueue.length>0){
+    var id=_audioQueue.shift();
+    await _playWav(id);
+  }
+  _audioPlaying=false;
+}
+
+function _queueAudio(id){
+  if(!_voiceOn)return;
+  _audioQueue.push(id);
+  _drainAudioQueue();
+}
+
+function toggleVoice(){
+  fetch('/api/voice').then(function(r){return r.json();}).then(function(d){
+    if(!d.available){alert('Voice not set up. Run nexis_setup.sh to install piper-tts and voice model.');return;}
+    var newState=!d.voice;
+    fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:newState})})
+    .then(function(r){return r.json();}).then(function(rd){
+      _voiceOn=rd.voice;
+      var btn=document.getElementById('vbtn');
+      if(btn){btn.textContent=_voiceOn?'🔊':'🔇';btn.title=_voiceOn?'Voice on — click to disable':'Voice off — click to enable';}
+      if(_voiceOn&&_audioCtx&&_audioCtx.state==='suspended')_audioCtx.resume();
+    });
+  });
+}
+
+// Check initial voice state on page load
+fetch('/api/voice').then(function(r){return r.json();}).then(function(d){
+  _voiceOn=d.voice||false;
+  var btn=document.getElementById('vbtn');
+  if(btn){btn.textContent=_voiceOn?'🔊':'🔇';btn.title=_voiceOn?'Voice on — click to disable':'Voice off — click to enable';}
+}).catch(function(){});
+
 document.addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey&&document.activeElement.id==='inp'){
     e.preventDefault();send();
@@ -2363,6 +2658,7 @@ def _page_chat():
         "<button id=sinp class=btn onclick=send()>Send</button>"
         "<button id=msel class='btn sec' onclick=showModels() title='Quick responses, general use'>Fast</button>"
         "<button class='btn sec' onclick=showSrc()>Src</button>"
+        "<button id=vbtn class='btn sec' onclick=toggleVoice() title='Voice off — click to enable'>🔇</button>"
         "<button class='btn sec' onclick=clr()>Clr</button>"
         '</div></div>'
         f'<script>{_CHAT_JS}</script>'
@@ -2508,11 +2804,45 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
             else:
                 collected2.append(tok); yield tok
 
+    # ── WebUI TTS: synthesize final response and yield audio chunk IDs ──────────
+    final_text = clean or resp
+    if final_text and _voice_enabled() and _tts_available():
+        sentences = _split_sentences(final_text)
+        if sentences:
+            # Launch parallel TTS jobs
+            jobs = []
+            for sent in sentences:
+                seq = _next_audio_seq()
+                ev = threading.Event()
+                holder = [None]
+                def _synth_job(s=sent, ev=ev, holder=holder):
+                    holder[0] = _tts_synth(s)
+                    ev.set()
+                threading.Thread(target=_synth_job, daemon=True).start()
+                jobs.append((seq, ev, holder))
+            # Wait for each job and yield AUDIOREADY events as they complete
+            t0 = time.time()
+            remaining = list(jobs)
+            while remaining and time.time() - t0 < 30:
+                still = []
+                for seq, ev, holder in remaining:
+                    if ev.is_set():
+                        wav = holder[0]
+                        if wav:
+                            with _audio_store_lk:
+                                _audio_store[seq] = wav
+                            yield f'[AUDIOREADY:{seq}]'
+                    else:
+                        still.append((seq, ev, holder))
+                remaining = still
+                if remaining:
+                    time.sleep(0.05)
+
     # Store final response for post-stream persistence
-    _web_chat_stream._last=(user_content, clean or resp)
+    _web_chat_stream._last=(user_content, final_text)
     with _web_lock:
         _web_hist.append({'role':'user','content':user_content})
-        _web_hist.append({'role':'assistant','content':clean or resp})
+        _web_hist.append({'role':'assistant','content':final_text})
         if len(_web_hist)>40: _web_hist[:]=_web_hist[-60:]
 
 def _start_web():
@@ -2587,6 +2917,17 @@ def _start_web():
                 elif path=='/api/clear':
                     with _web_lock: _web_hist=[]
                     self._send(200,json.dumps({'ok':True}),'application/json')
+                elif path=='/api/voice':
+                    data=json.loads(body) if body else {}
+                    on=data.get('on')
+                    if on is None:
+                        self._send(200,json.dumps({'voice':_voice_enabled()}),'application/json')
+                    else:
+                        if not _tts_available():
+                            self._send(503,json.dumps({'error':'TTS not set up — run setup to install piper-tts'}),'application/json')
+                        else:
+                            _voice_set(bool(on))
+                            self._send(200,json.dumps({'ok':True,'voice':_voice_enabled()}),'application/json')
                 else: self._send(404,b'not found')
             except Exception as e:
                 try: self._send(500,json.dumps({'error':str(e)}),'application/json')
@@ -2599,6 +2940,18 @@ def _start_web():
                 elif path=='/memory': self._send(200,_page_memory(db))
                 elif path=='/status': self._send(200,_page_status(db))
                 elif path=='/history': self._send(200,_page_history(db))
+                elif path.startswith('/api/audio/'):
+                    try:
+                        chunk_id=int(path.split('/')[-1])
+                    except ValueError:
+                        self._send(400,b'bad id'); return
+                    with _audio_store_lk:
+                        wav=_audio_store.pop(chunk_id,None)
+                    if wav:
+                        self._send(200,wav,'audio/wav')
+                    else:
+                        self._send(404,b'not found')
+                    return
                 elif path=='/api/models':
                     with _model_override_lock:
                         current = _model_override
@@ -2612,6 +2965,8 @@ def _start_web():
                     with _last_sources_lock:
                         src = list(_last_sources)
                     self._send(200, json.dumps({'sources': src}), 'application/json')
+                elif path=='/api/voice':
+                    self._send(200,json.dumps({'voice':_voice_enabled(),'available':_tts_available()}),'application/json')
                 else: self._send(404,'<pre>404</pre>')
             except Exception as e: self._send(500,f'<pre>{_esc(str(e))}</pre>')
             finally: db.close()
@@ -2624,6 +2979,7 @@ def main():
     _log('NeXiS v3.0 starting')
     _refresh_models()
     threading.Thread(target=_warmup,daemon=True).start()
+    threading.Thread(target=_cli_tts_worker,daemon=True,name='tts-cli').start()
     threading.Thread(target=_start_web,daemon=True,name='web').start()
     SOCK_PATH.parent.mkdir(parents=True,exist_ok=True)
     if SOCK_PATH.exists():

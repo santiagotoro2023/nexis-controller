@@ -83,6 +83,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   read -rp "$(echo -e "${OR}  Remove Ollama models? [y/N]: ")" RM
   if [[ "$RM" =~ ^[Yy]$ ]]; then
     ollama rm qwen2.5:14b 2>/dev/null && _ok "Removed qwen2.5:14b" || true
+    ollama rm qwen2.5vl:7b 2>/dev/null && _ok "Removed qwen2.5vl:7b" || true
     ollama rm "hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M" \
       2>/dev/null && _ok "Removed Omega-Darker" || true
   fi
@@ -115,7 +116,7 @@ VENV="$NEXIS_DATA/venv"
 _hdr "DEPENDENCIES"
 apt-get update -qq 2>/dev/null || true
 apt-get install -y curl python3-pip python3-venv socat \
-  xclip xdg-utils libnotify-bin wmctrl 2>/dev/null || _warn "Some packages unavailable"
+  xclip xdg-utils libnotify-bin wmctrl sox alsa-utils 2>/dev/null || _warn "Some packages unavailable"
 # Install GitHub CLI if not present
 if ! command -v gh &>/dev/null; then
   echo "  installing gh CLI..."
@@ -164,8 +165,8 @@ fi
 _hdr "PYTHON ENVIRONMENT"
 sudo -u "$REAL_USER" "$PYTHON_BIN" -m venv "$VENV"
 sudo -u "$REAL_USER" "$VENV/bin/pip" install --upgrade pip -q
-sudo -u "$REAL_USER" "$VENV/bin/pip" install requests -q
-_ok "venv ready"
+sudo -u "$REAL_USER" "$VENV/bin/pip" install requests piper-tts -q
+_ok "venv ready (requests + piper-tts)"
 
 _hdr "OLLAMA"
 if ! command -v ollama &>/dev/null; then
@@ -177,14 +178,36 @@ curl -sf http://localhost:11434/api/tags &>/dev/null || _err "Ollama not respond
 _ok "Ollama online"
 
 _hdr "MODELS"
-echo -e "\n${DIM}    qwen2.5:14b   — fast, always-on\n    Omega-Darker  — deep / fallback${RST}\n"
+echo -e "\n${DIM}    qwen2.5:14b      — fast, always-on"
+echo -e "    qwen2.5vl:7b     — vision (image analysis)"
+echo -e "    Omega-Darker 22B — deep / fallback"
+echo -e "    qwen3-coder-next — code (large, optional)${RST}\n"
 read -rp "$(echo -e "${OR}  Pull models? [Y/n]: ")" PULL
 PULL="${PULL:-Y}"
 if [[ "$PULL" =~ ^[Yy]$ ]]; then
   ollama pull qwen2.5:14b && _ok "qwen2.5:14b ready" || _err "Model pull failed"
+  ollama pull qwen2.5vl:7b && _ok "qwen2.5vl:7b ready (vision)" || _warn "qwen2.5vl:7b unavailable — image analysis disabled"
   ollama pull qwen3-coder-next && _ok "qwen3-coder-next ready" || _warn "qwen3-coder-next unavailable (can install later: ollama pull qwen3-coder-next)"
   ollama pull "hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M" \
     && _ok "Omega-Darker ready" || _warn "Omega-Darker unavailable"
+fi
+
+_hdr "VOICE MODEL"
+VOICE_DIR="$NEXIS_DATA/voice"
+sudo -u "$REAL_USER" mkdir -p "$VOICE_DIR"
+PIPER_ONNX="$VOICE_DIR/en_US-ryan-high.onnx"
+PIPER_JSON="$VOICE_DIR/en_US-ryan-high.onnx.json"
+HF_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high"
+if [[ -f "$PIPER_ONNX" && -f "$PIPER_JSON" ]]; then
+  _ok "Voice model already present"
+else
+  echo -e "${DIM}  Downloading en_US-ryan-high voice model (~65 MB)...${RST}"
+  sudo -u "$REAL_USER" curl -L --progress-bar \
+    "$HF_BASE/en_US-ryan-high.onnx" -o "$PIPER_ONNX" \
+    && sudo -u "$REAL_USER" curl -L --progress-bar \
+    "$HF_BASE/en_US-ryan-high.onnx.json" -o "$PIPER_JSON" \
+    && _ok "Voice model downloaded (HAL9000/GlaDOS male voice)" \
+    || _warn "Voice model download failed — voice will be unavailable until model is present"
 fi
 
 _hdr "PERSONALITY"
@@ -404,7 +427,8 @@ echo -e "  ${GN}  ✓${RST}  daemon          nexis-daemon.service"
 echo -e "  ${GN}  ✓${RST}  web             http://localhost:8080  (Chat · Memory · Status)"
 echo -e "  ${GN}  ✓${RST}  streaming       tokens appear as generated"
 echo -e "  ${GN}  ✓${RST}  markdown        rendered in CLI and web"
-echo -e "  ${GN}  ✓${RST}  models          qwen2.5:14b fast · Omega-Darker deep/fallback"
+echo -e "  ${GN}  ✓${RST}  models          qwen2.5:14b fast · qwen2.5vl:7b vision · Omega-Darker deep"
+echo -e "  ${GN}  ✓${RST}  voice           HAL9000/GlaDOS synthesis (off by default — //voice on)"
 echo -e "  ${GN}  ✓${RST}  smart routing   auto-switches to deep if fast refuses"
 echo -e "  ${GN}  ✓${RST}  web search      DuckDuckGo, no API key"
 echo -e "  ${GN}  ✓${RST}  file analysis   text + images (inline path or upload)"
