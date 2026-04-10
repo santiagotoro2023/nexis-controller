@@ -252,12 +252,19 @@ def _smart_chat(messages, temperature=0.75, num_ctx=None,
     return result, model
 
 def _warmup():
-    try:
-        _log('Warming 14b...')
-        _stream_chat([{'role': 'user', 'content': 'hi'}], MODEL_FAST, num_ctx=64)
-        _log('14b warm')
-    except Exception as e:
-        _log(f'Warmup: {e}', 'WARN')
+    """Warm up fast model and vision model in parallel so first use is instant."""
+    def _warm(label, model):
+        try:
+            _log(f'Warming {label}...')
+            _stream_chat([{'role': 'user', 'content': 'hi'}], model, num_ctx=64)
+            _log(f'{label} warm')
+        except Exception as e:
+            _log(f'Warmup {label}: {e}', 'WARN')
+    threads = [
+        threading.Thread(target=_warm, args=('fast', MODEL_FAST), daemon=True),
+        threading.Thread(target=_warm, args=('vision', MODEL_VISION), daemon=True),
+    ]
+    for t in threads: t.start()
 
 def _system_probe():
     out = []
@@ -1697,28 +1704,58 @@ class Session:
             if pre_ctx:
                 msgs = msgs[:-1] + [{'role':'user','content': user_msg + pre_ctx}]
 
-            # ── Live streaming: emit tokens directly so text appears word-by-word ──
-            # We stream each token immediately in orange. Newlines get indentation.
-            # Code block state is tracked so we can dim code sections.
-            self._tx(f'\n  {OR}')
+            # ── Live streaming with word-wrap ────────────────────────────────────
+            # Tokens are buffered per-word and only emitted at space/newline
+            # boundaries so the terminal never splits a word mid-character.
+            # WRAP_COL: soft wrap column — keeps a right margin so text breathes.
+            WRAP_COL   = 76   # wrap before this column (adjust if terminal is wider)
+            INDENT     = 2    # left indent chars (the '  ' prefix)
+            self._tx(f'\n{" " * INDENT}{OR}')
             in_code_blk = [False]
+            cur_col     = [INDENT]   # current cursor column
+            word_buf    = ['']       # word being accumulated (not yet space-terminated)
+
+            def _wflush(color):
+                """Emit buffered word, wrapping to new line if it won't fit."""
+                w = word_buf[0]
+                if not w:
+                    return
+                if cur_col[0] + len(w) > WRAP_COL and cur_col[0] > INDENT:
+                    self._tx(f'{RST}\n{" " * INDENT}{color}')
+                    cur_col[0] = INDENT
+                self._tx(w)
+                cur_col[0] += len(w)
+                word_buf[0] = ''
 
             def on_first_tok(t):
-                # Handle code fence transitions
                 if '```' in t:
+                    _wflush(OR)
                     in_code_blk[0] = not in_code_blk[0]
-                    marker = f'{DIM}────{RST}\n  {DIM}' if in_code_blk[0] else f'{RST}\n  {DIM}────{RST}\n  {OR}'
-                    self._tx(marker)
+                    if in_code_blk[0]:
+                        self._tx(f'{DIM}────{RST}\n{" " * INDENT}{DIM}')
+                    else:
+                        self._tx(f'{RST}\n{" " * INDENT}{DIM}────{RST}\n{" " * INDENT}{OR}')
+                    cur_col[0] = INDENT
                     return
-                # Dim code block content, orange everything else
                 color = DIM if in_code_blk[0] else OR
-                out = t.replace('\n', f'{RST}\n  {color}')
-                self._tx(out)
+                for ch in t:
+                    if ch == '\n':
+                        _wflush(color)
+                        self._tx(f'{RST}\n{" " * INDENT}{color}')
+                        cur_col[0] = INDENT
+                    elif ch == ' ':
+                        _wflush(color)
+                        # emit space only if not at start of line and not past margin
+                        if cur_col[0] > INDENT and cur_col[0] < WRAP_COL:
+                            self._tx(' ')
+                            cur_col[0] += 1
+                    else:
+                        word_buf[0] += ch
 
             try:
                 resp, model_used = _smart_chat(msgs, on_token=on_first_tok, images=file_images)
-                # IMPORTANT: newline here so the spinner starts on a FRESH line,
-                # not on top of the last response line (which \r would overwrite).
+                _wflush(DIM if in_code_blk[0] else OR)   # flush trailing word
+                # newline so spinner starts on a fresh line (not on top of response)
                 self._tx(RST + '\n')
             except Exception as e:
                 self._tx(f'\x1b[38;5;160m  error: {e}{RST}\n')
@@ -1746,17 +1783,34 @@ class Session:
                         'Stay in character as NeXiS. Do not mention that you ran tools.'
                     )
                 }]
-                self._tx(f'\n  {OR}')
+                self._tx(f'\n{" " * INDENT}{OR}')
                 in_code_blk2 = [False]
+                cur_col2 = [INDENT]; word_buf2 = ['']
+                def _wflush2(color):
+                    w = word_buf2[0]
+                    if not w: return
+                    if cur_col2[0] + len(w) > WRAP_COL and cur_col2[0] > INDENT:
+                        self._tx(f'{RST}\n{" " * INDENT}{color}')
+                        cur_col2[0] = INDENT
+                    self._tx(w); cur_col2[0] += len(w); word_buf2[0] = ''
                 def on_ftok(t):
                     if '```' in t:
-                        in_code_blk2[0] = not in_code_blk2[0]
-                        marker = f'{DIM}────{RST}\n  {DIM}' if in_code_blk2[0] else f'{RST}\n  {DIM}────{RST}\n  {OR}'
-                        self._tx(marker); return
+                        _wflush2(OR); in_code_blk2[0] = not in_code_blk2[0]
+                        self._tx((f'{DIM}────{RST}\n{" "*INDENT}{DIM}') if in_code_blk2[0]
+                                 else (f'{RST}\n{" "*INDENT}{DIM}────{RST}\n{" "*INDENT}{OR}'))
+                        cur_col2[0] = INDENT; return
                     color = DIM if in_code_blk2[0] else OR
-                    self._tx(t.replace('\n', f'{RST}\n  {color}'))
+                    for ch in t:
+                        if ch == '\n':
+                            _wflush2(color); self._tx(f'{RST}\n{" "*INDENT}{color}'); cur_col2[0]=INDENT
+                        elif ch == ' ':
+                            _wflush2(color)
+                            if cur_col2[0] > INDENT and cur_col2[0] < WRAP_COL:
+                                self._tx(' '); cur_col2[0] += 1
+                        else: word_buf2[0] += ch
                 try:
                     fr, _ = _smart_chat(fmsgs, on_token=on_ftok)
+                    _wflush2(DIM if in_code_blk2[0] else OR)
                     self._tx(RST + '\n')
                     clean = fr if fr.strip() else clean
                 except Exception:
