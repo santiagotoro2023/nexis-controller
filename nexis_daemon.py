@@ -400,6 +400,39 @@ def _tts_clean(text: str) -> str:
     text = re.sub(r'https?://\S+', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
+def _tts_rhythm(text: str, backend: str = 'piper') -> str:
+    """Apply pronunciation fixes and rhythm cues for natural-sounding delivery."""
+    # NeXiS: force correct pronunciation — "nexis" reads as /ˈnɛksɪs/ naturally
+    text = re.sub(r'\bNeXiS\b', 'Nexis', text)
+    text = re.sub(r'\bNEXIS\b', 'Nexis', text)
+
+    if backend == 'espeak':
+        # eSpeak inline markup for pauses and pronunciation
+        # Colon → 250ms silence after it
+        text = re.sub(r':(?=\s+\S)', ': [[slnc 250]]', text)
+        # Em-dash → 350ms silence
+        text = re.sub(r'\s*—\s*', ' [[slnc 350]] ', text)
+        # Semicolon → brief 150ms pause
+        text = re.sub(r';(?=\s+\S)', '; [[slnc 150]]', text)
+        # Ellipsis → deliberate 400ms pause (GlaDOS loves her ellipses)
+        text = re.sub(r'\.{3}', '. [[slnc 400]]', text)
+    else:
+        # Piper / text-level rhythm cues
+        # Colon followed by text → insert comma so TTS breathes before continuing
+        text = re.sub(r':(?=\s+[A-Za-z0-9"\'(])', ',', text)
+        # Em-dash → ellipsis (Piper pauses on "...")
+        text = re.sub(r'\s*—\s*', '... ', text)
+        # Semicolon → comma (prevents run-on delivery)
+        text = re.sub(r';(?=\s)', ',', text)
+        # Trailing colon at end of fragment → period (forces pause)
+        text = re.sub(r':$', '.', text, flags=re.MULTILINE)
+        # Numbers followed by unit abbreviations that read oddly
+        text = re.sub(r'\bms\b', 'milliseconds', text)
+        text = re.sub(r'\bMB\b', 'megabytes', text)
+        text = re.sub(r'\bGB\b', 'gigabytes', text)
+
+    return text
+
 def _tts_apply_effects(wav_bytes: bytes, fx: str = 'character') -> bytes:
     """Post-process WAV: 'character' for neural voice, 'heavy' for formant synth."""
     # SOX effect chains per mode
@@ -479,10 +512,13 @@ def _tts_synth(text: str):
     if not clean:
         return None
 
-    mk  = _voice_model()
-    m   = VOICE_MODELS.get(mk, VOICE_MODELS['default'])
+    mk      = _voice_model()
+    m       = VOICE_MODELS.get(mk, VOICE_MODELS['default'])
     backend = m.get('backend', 'piper')
-    fx  = m.get('fx', 'character')
+    fx      = m.get('fx', 'character')
+
+    # Apply rhythm/pronunciation preprocessing for the target backend
+    clean = _tts_rhythm(clean, backend)
 
     # ── eSpeak NG backend ────────────────────────────────────────────────────────
     if backend == 'espeak' or (backend == 'piper' and not _tts_load_voice() and shutil.which('espeak-ng')):
@@ -558,20 +594,56 @@ def _tts_synth(text: str):
         return None
 
 def _tts_play_local(wav_bytes: bytes):
-    """Play WAV bytes via aplay (non-blocking from caller's perspective)."""
-    if not shutil.which('aplay'):
-        return
-    try:
-        proc = subprocess.Popen(
-            ['aplay', '-q', '-'],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        proc.communicate(input=wav_bytes, timeout=120)
-    except Exception as e:
-        _log(f'TTS aplay: {e}', 'WARN')
+    """Play WAV bytes. Tries paplay (PulseAudio) then aplay (ALSA)."""
+    # Load session env vars so daemon can reach user's PulseAudio from systemd service
+    env = os.environ.copy()
+    display_env_path = DATA / 'state' / '.display_env'
+    if display_env_path.exists():
+        try:
+            for line in display_env_path.read_text().splitlines():
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    if v.strip():
+                        env[k.strip()] = v.strip()
+        except Exception:
+            pass
+
+    # Try paplay (PulseAudio) — works from systemd service when env vars are set
+    if shutil.which('paplay'):
+        inp = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                f.write(wav_bytes); inp = f.name
+            r = subprocess.run(['paplay', inp],
+                capture_output=True, timeout=60, env=env)
+            if r.returncode == 0:
+                return
+            _log(f'TTS paplay failed (rc={r.returncode}): {r.stderr.decode()[:120]}', 'WARN')
+        except Exception as e:
+            _log(f'TTS paplay: {e}', 'WARN')
+        finally:
+            if inp:
+                try: os.unlink(inp)
+                except Exception: pass
+
+    # Try aplay (ALSA direct)
+    if shutil.which('aplay'):
+        try:
+            proc = subprocess.Popen(
+                ['aplay', '-q', '-'],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                env=env)
+            _, stderr = proc.communicate(input=wav_bytes, timeout=60)
+            if proc.returncode != 0:
+                _log(f'TTS aplay failed: {stderr.decode()[:120]}', 'WARN')
+        except Exception as e:
+            _log(f'TTS aplay: {e}', 'WARN')
 
 class _SentenceAccum:
     """Accumulates streaming tokens and emits complete sentences for TTS."""
-    _BOUNDARY = re.compile(r'(?<=[.!?])\s+|(?<=\n)\n')
+    # Split on sentence-end punctuation, double newlines, or colon/semicolon
+    # Colon/semicolon need min 20 chars so "e.g.:" doesn't trigger prematurely
+    _BOUNDARY = re.compile(r'(?<=[.!?])\s+|(?<=\n)\n|(?<=[;:])\s{2,}')
 
     def __init__(self):
         self._buf = ''
@@ -592,8 +664,9 @@ class _SentenceAccum:
         return s if s else None
 
 def _split_sentences(text: str):
-    """Split text into TTS-ready sentences."""
-    parts = re.split(r'(?<=[.!?])\s+|\n\n+', text)
+    """Split text into TTS-ready sentence chunks."""
+    # Split on sentence endings, colon-then-newline, double newlines
+    parts = re.split(r'(?<=[.!?])\s+|(?<=:)\s*\n|\n\n+', text)
     return [p.strip() for p in parts if p.strip() and len(p.strip()) >= 4]
 
 def _cli_tts_worker():
@@ -2473,6 +2546,9 @@ _CSS = (
     ".btn.sec:hover:not(:disabled){background:var(--bg3);color:var(--fg);border-color:var(--fg2)}"
     ".btn.sec.on{color:var(--or);border-color:var(--or2)}"
     ".btn.sec.on:hover:not(:disabled){color:var(--or3);border-color:var(--or3)}"
+    "select.btn.sec{-webkit-appearance:none;appearance:none;cursor:pointer;"
+    "padding:0 8px;outline:none;max-width:90px}"
+    "select.btn.sec:focus{border-color:var(--or2);color:var(--fg)}"
     ".upl{cursor:pointer;background:var(--bg3);border:1px solid var(--border);"
     "color:var(--fg2);padding:8px 10px;font-size:11px;text-transform:uppercase;"
     "letter-spacing:.06em;white-space:nowrap}"
@@ -2803,44 +2879,61 @@ function toggleVoice(){
     });
   });
 }
-function showVoiceModels(){
-  fetch('/api/voice/models').then(function(r){return r.json();}).then(function(d){
-    var s='';
-    for(var i=0;i<d.models.length;i++){
-      var m=d.models[i];
-      s+=(m.current?'\u25b8 ':' ')+m.key+': '+m.label+(m.available?' \u2713':' \u2717')+'\n  '+m.desc+'\n';
+function setVoiceModel(key){
+  if(!key)return;
+  if(key==='custom'){
+    var onnx=prompt('Custom model — enter path to .onnx file:\n(JSON config assumed at same path + .json)','');
+    if(!onnx){
+      var sel=document.getElementById('vmodel');
+      if(sel)sel.value=_voiceModel;
+      return;
     }
-    var c=prompt('Voice model \u2014 type key to switch:\n\n'+s,_voiceModel);
-    if(c&&c.trim()!==_voiceModel){
-      var key=c.trim().toLowerCase();
-      if(key.startsWith('custom ')){
-        var parts=key.substring(7).trim().split(' ');
-        var onnx=parts[0],jsn=parts[1]||'';
-        fetch('/api/voice/model',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({model:'custom',onnx:onnx,json:jsn})})
-        .then(function(r){return r.json();}).then(function(rd){
-          if(rd.ok){_voiceModel='custom';alert('Custom voice model set.');}
-          else alert('Failed: '+(rd.error||'unknown'));
-        });
-      } else {
-        fetch('/api/voice/model',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({model:key})})
-        .then(function(r){return r.json();}).then(function(rd){
-          if(rd.ok){_voiceModel=rd.model;alert('Voice: '+rd.label);}
-          else alert('Failed: '+(rd.error||'unknown'));
-        });
-      }
-    }
+    fetch('/api/voice/model',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:'custom',onnx:onnx.trim()})})
+    .then(function(r){return r.json();}).then(function(d){
+      if(d.ok){_voiceModel='custom';}
+      else{alert('Error: '+(d.error||'unknown'));
+        var sel=document.getElementById('vmodel');
+        if(sel)sel.value=_voiceModel;}
+    });
+    return;
+  }
+  fetch('/api/voice/model',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model:key})})
+  .then(function(r){return r.json();}).then(function(d){
+    if(d.ok){_voiceModel=d.model;}
+    else{alert('Voice model error: '+(d.error||'unknown'));
+      var sel=document.getElementById('vmodel');
+      if(sel)sel.value=_voiceModel;}
   });
 }
 
-// Check initial voice state on page load
+function _populateVoiceModels(){
+  fetch('/api/voice/models').then(function(r){return r.json();}).then(function(d){
+    var sel=document.getElementById('vmodel');
+    if(!sel||!d.models)return;
+    sel.innerHTML='';
+    for(var i=0;i<d.models.length;i++){
+      var m=d.models[i];
+      var opt=document.createElement('option');
+      opt.value=m.key;
+      opt.textContent=m.label+(m.available?'':' \u2717');
+      opt.title=m.desc;
+      opt.selected=m.current;
+      if(m.current)_voiceModel=m.key;
+      sel.appendChild(opt);
+    }
+  }).catch(function(){});
+}
+
+// Check initial voice state + populate model dropdown on page load
 fetch('/api/voice').then(function(r){return r.json();}).then(function(d){
   _voiceOn=d.voice||false;
   _voiceModel=d.model||'default';
   var btn=document.getElementById('vbtn');
   if(btn){btn.classList.toggle('on',_voiceOn);btn.title=_voiceOn?'Voice on — click to disable':'Voice off — click to enable';}
 }).catch(function(){});
+_populateVoiceModels();
 
 document.addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey&&document.activeElement.id==='inp'){
@@ -2895,7 +2988,9 @@ def _page_chat():
         "<button id=msel class='btn sec' onclick=showModels() title='Quick responses, general use'>Fast</button>"
         "<button class='btn sec' onclick=showSrc()>Src</button>"
         "<button id=vbtn class='btn sec' onclick=toggleVoice() title='Voice off — click to enable'>Vox</button>"
-        "<button class='btn sec' onclick=showVoiceModels() title='Select voice model'>Vcfg</button>"
+        "<select id=vmodel class='btn sec' onchange=setVoiceModel(this.value) title='Voice model'>"
+        "<option value='default'>Default</option>"
+        "</select>"
         "<button class='btn sec' onclick=clr()>Clr</button>"
         '</div></div>'
         f'<script>{_CHAT_JS}</script>'
