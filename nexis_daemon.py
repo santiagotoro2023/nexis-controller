@@ -466,11 +466,11 @@ def _read_file(path_str):
 
 def _md_to_terminal(text):
     """Render markdown as ANSI-styled terminal text (non-streaming, full block)."""
-    OR   = '\x1b[38;5;208m'
+    OR   = '\x1b[38;5;208m'   # orange — body text
     DIM  = '\x1b[2m\x1b[38;5;240m'
     CODE = '\x1b[38;5;150m'
-    BOLD = '\x1b[1m\x1b[38;5;255m'
-    GRAY = '\x1b[38;5;252m'
+    BOLD = '\x1b[1m\x1b[38;5;214m'
+    GRAY = '\x1b[38;5;208m'   # orange — same as OR
     RST  = '\x1b[0m'
 
     out = []
@@ -1192,7 +1192,7 @@ def _build_system(conn):
         '\n'
         '\n## Response rules'
         '\n- ALWAYS respond in English. Never output Chinese, Japanese, Korean, or any CJK characters.'
-        '\n- Be concise. One precise sentence beats three vague ones. Elaborate only when asked.'
+        '\n- Cover what the question actually needs. Simple questions get tight answers. Complex ones get real explanation — with personality woven through, not tacked on the end. Never truncate information that matters.'
         '\n- Personality is mandatory, not optional. Your voice colours the information — it does not decorate it.'
         '\n- Never: "certainly", "absolutely", "I\'d be happy to", "Is there anything else?", "Great question!"'
         '\n- Never repeat yourself. Never summarise what you just said at the end.'
@@ -1470,11 +1470,11 @@ def _process_tools(text, conn, on_status=None, user_text=''):
 
 class _TermRenderer:
     """Stateful per-line Markdown→ANSI renderer for live-streaming CLI output."""
-    OR   = '\x1b[38;5;208m'
+    OR   = '\x1b[38;5;208m'   # bright orange — body text
     DIM  = '\x1b[2m\x1b[38;5;240m'
-    CODE = '\x1b[38;5;150m'
-    BOLD = '\x1b[1m\x1b[38;5;255m'
-    GRAY = '\x1b[38;5;252m'
+    CODE = '\x1b[38;5;150m'   # soft green for code
+    BOLD = '\x1b[1m\x1b[38;5;214m'  # amber bold for emphasis
+    GRAY = '\x1b[38;5;208m'   # same orange as OR — keeps response text orange
     RST  = '\x1b[0m'
 
     def __init__(self):
@@ -1579,11 +1579,11 @@ class Session:
 
     _BANNER_H = 8   # rows occupied by the frozen header (rows 1–8)
 
-    # ASCII eye-in-triangle logo, 3 rows × 7 chars wide
+    # ASCII eye-in-triangle logo — all rows padded to 9 chars so info column is fixed
     _LOGO = [
-        r'   /\ ',
-        r'  /⊙ \ ',
-        r' /____\ ',
+        r'    /\   ',   #    /\    (tip)
+        r'   /⊙ \  ',   #   /⊙ \  (eye centered between slashes)
+        r'  /____\ ',   #  /____\ (base)
     ]
 
     def _banner_body(self, mc, sc):
@@ -1687,29 +1687,27 @@ class Session:
             if pre_ctx:
                 msgs = msgs[:-1] + [{'role':'user','content': user_msg + pre_ctx}]
 
-            self._tx('\n')
-
-            renderer = _TermRenderer()
-            line_buf = []
-
-            def emit(line):
-                self._tx(renderer.line(line) + '\n')
+            # ── Live streaming: emit tokens directly so text appears word-by-word ──
+            # We stream each token immediately in orange. Newlines get indentation.
+            # Code block state is tracked so we can dim code sections.
+            self._tx(f'\n  {OR}')
+            in_code_blk = [False]
 
             def on_first_tok(t):
-                line_buf.append(t)
-                combined = ''.join(line_buf)
-                if '\n' in combined:
-                    parts = combined.split('\n')
-                    for part in parts[:-1]:
-                        emit(part)
-                    line_buf.clear()
-                    if parts[-1]:
-                        line_buf.append(parts[-1])
+                # Handle code fence transitions
+                if '```' in t:
+                    in_code_blk[0] = not in_code_blk[0]
+                    marker = f'{DIM}────{RST}\n  {DIM}' if in_code_blk[0] else f'{RST}\n  {DIM}────{RST}\n  {OR}'
+                    self._tx(marker)
+                    return
+                # Dim code block content, orange everything else
+                color = DIM if in_code_blk[0] else OR
+                out = t.replace('\n', f'{RST}\n  {color}')
+                self._tx(out)
 
             try:
                 resp, model_used = _smart_chat(msgs, on_token=on_first_tok, images=file_images)
-                if line_buf:
-                    emit(''.join(line_buf))
+                self._tx(RST)
             except Exception as e:
                 self._tx(f'\x1b[38;5;160m  error: {e}{RST}\n')
                 self.hist.pop(); continue
@@ -1736,23 +1734,18 @@ class Session:
                         'Stay in character as NeXiS. Do not mention that you ran tools.'
                     )
                 }]
-                self._tx('\n')
-                renderer2 = _TermRenderer()
-                ftok_buf = []
+                self._tx(f'\n  {OR}')
+                in_code_blk2 = [False]
                 def on_ftok(t):
-                    ftok_buf.append(t)
-                    combined = ''.join(ftok_buf)
-                    if '\n' in combined:
-                        parts = combined.split('\n')
-                        for part in parts[:-1]:
-                            self._tx(renderer2.line(part) + '\n')
-                        ftok_buf.clear()
-                        if parts[-1]:
-                            ftok_buf.append(parts[-1])
+                    if '```' in t:
+                        in_code_blk2[0] = not in_code_blk2[0]
+                        marker = f'{DIM}────{RST}\n  {DIM}' if in_code_blk2[0] else f'{RST}\n  {DIM}────{RST}\n  {OR}'
+                        self._tx(marker); return
+                    color = DIM if in_code_blk2[0] else OR
+                    self._tx(t.replace('\n', f'{RST}\n  {color}'))
                 try:
                     fr, _ = _smart_chat(fmsgs, on_token=on_ftok)
-                    if ftok_buf:
-                        self._tx(renderer2.line(''.join(ftok_buf)) + '\n')
+                    self._tx(RST + '\n')
                     clean = fr if fr.strip() else clean
                 except Exception:
                     pass
