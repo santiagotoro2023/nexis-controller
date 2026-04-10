@@ -1579,15 +1579,24 @@ class Session:
 
     _BANNER_H = 8   # rows occupied by the frozen header (rows 1–8)
 
-    # ASCII eye-in-triangle logo — all rows padded to 9 chars so info column is fixed
+    # 5-row eye-in-triangle — all rows exactly 9 chars wide
+    # Interior widths per row: 0, 1, 3, 5, 7  (all odd → ◉ sits at exact centre col 4)
+    #   col: 0 1 2 3 4 5 6 7 8
+    #   row1:         ▲          tip at col 4
+    #   row2:       /   \        / col3, \ col5,  1 interior (col 4)
+    #   row3:     /   ◉   \      / col2, ◉ col4, \ col6,  3 interior → ◉ centred ✓
+    #   row4:   /           \    / col1, \ col7,  5 interior
+    #   row5: /───────────────\  / col0, \ col8,  7 interior
     _LOGO = [
-        r'    /\   ',   #    /\    (tip)
-        r'   /⊙ \  ',   #   /⊙ \  (eye centered between slashes)
-        r'  /____\ ',   #  /____\ (base)
+        r'    ▲    ',   # 4sp + ▲ + 4sp
+        r'   / \   ',   # 3sp + /·\ + 3sp
+        r'  / ◉ \  ',   # 2sp + /·◉·\ + 2sp   ← eye at col 4, centred
+        r' /     \ ',   # 1sp + /·····\ + 1sp
+        '/───────\\',   # /·───────·\          base
     ]
 
     def _banner_body(self, mc, sc):
-        """Return the 6 banner content lines (no ANSI reset at start)."""
+        """Return banner content lines (8 total, matching _BANNER_H)."""
         OR  = '\x1b[38;5;208m'
         DIM = '\x1b[2m\x1b[38;5;240m'
         RST = '\x1b[0m'
@@ -1597,16 +1606,17 @@ class Session:
         label = MODELS.get(sel, {}).get('label', sel)
         host  = _socket.gethostname()
         L = self._LOGO
-        # Two-column layout: logo left, info right
+        sep = '─' * 34
+        # Each logo row (9 chars) + 2-char gap = text starts at col 13 consistently
         return (
-            f'{DIM}  {bar}{RST}\n'
-            f'  {OR}{L[0]}{RST}   {OR}◈  N e X i S{RST}  {DIM}v3.0{RST}\n'
-            f'  {OR}{L[1]}{RST}   {DIM}{bar[:36]}{RST}\n'
-            f'  {OR}{L[2]}{RST}   {DIM}#{sc+1}  ·  {now}  ·  {mc} mem  ·  {label}{RST}\n'
-            f'           {DIM}http://{host}:8080{RST}\n'
-            f'           {DIM}//help  ·  //switch  ·  //exit{RST}\n'
-            f'{DIM}  {bar}{RST}\n'
-            '\n'
+            f'{DIM}  {bar}{RST}\n'                                                           # row 1
+            f'  {OR}{L[0]}{RST}  {OR}◈  N e X i S{RST}  {DIM}v3.0{RST}\n'                  # row 2
+            f'  {OR}{L[1]}{RST}  {DIM}{sep}{RST}\n'                                         # row 3
+            f'  {OR}{L[2]}{RST}  {DIM}#{sc+1}  ·  {now}  ·  {mc} mem  ·  {label}{RST}\n'   # row 4
+            f'  {OR}{L[3]}{RST}  {DIM}http://{host}:8080{RST}\n'                            # row 5
+            f'  {OR}{L[4]}{RST}  {DIM}//help  ·  //switch  ·  //exit{RST}\n'               # row 6
+            f'{DIM}  {bar}{RST}\n'                                                           # row 7
+            '\n'                                                                              # row 8
         )
 
     def _banner(self, mc, sc):
