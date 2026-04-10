@@ -1577,54 +1577,57 @@ class Session:
         except Exception: return 'exit'
         return buf.decode('utf-8','replace').strip()
 
-    _BANNER_H = 7   # rows occupied by the frozen header (rows 1–7)
+    _BANNER_H = 8   # rows occupied by the frozen header (rows 1–8)
+
+    # ASCII eye-in-triangle logo, 3 rows × 7 chars wide
+    _LOGO = [
+        r'   /\ ',
+        r'  /⊙ \ ',
+        r' /____\ ',
+    ]
+
+    def _banner_body(self, mc, sc):
+        """Return the 6 banner content lines (no ANSI reset at start)."""
+        OR  = '\x1b[38;5;208m'
+        DIM = '\x1b[2m\x1b[38;5;240m'
+        RST = '\x1b[0m'
+        W   = 50; bar = '─' * W
+        now = datetime.now().strftime('%H:%M')
+        with _model_override_lock: sel = _model_override
+        label = MODELS.get(sel, {}).get('label', sel)
+        host  = _socket.gethostname()
+        L = self._LOGO
+        # Two-column layout: logo left, info right
+        return (
+            f'{DIM}  {bar}{RST}\n'
+            f'  {OR}{L[0]}{RST}   {OR}◈  N e X i S{RST}  {DIM}v3.0{RST}\n'
+            f'  {OR}{L[1]}{RST}   {DIM}{bar[:36]}{RST}\n'
+            f'  {OR}{L[2]}{RST}   {DIM}#{sc+1}  ·  {now}  ·  {mc} mem  ·  {label}{RST}\n'
+            f'           {DIM}http://{host}:8080{RST}\n'
+            f'           {DIM}//help  ·  //switch  ·  //exit{RST}\n'
+            f'{DIM}  {bar}{RST}\n'
+            '\n'
+        )
 
     def _banner(self, mc, sc):
-        OR  = '\x1b[38;5;208m'
-        DIM = '\x1b[2m\x1b[38;5;240m'
-        RST = '\x1b[0m'
-        W   = 52
-        bar = '─' * W
-        now = datetime.now().strftime('%H:%M')
-        with _model_override_lock: sel = _model_override
-        model_label = MODELS.get(sel, {}).get('label', sel)
-        host = _socket.gethostname()
         self._mc = mc; self._sc = sc
+        body = self._banner_body(mc, sc)
         self._tx(
-            '\x1b[2J\x1b[H'                                         # clear screen, cursor home
-            f'{DIM}  {bar}{RST}\n'                                   # row 1
-            f'  {OR}◈  N e X i S{RST}  {DIM}v3.0{RST}\n'           # row 2
-            f'{DIM}  {bar}{RST}\n'                                   # row 3
-            f'{DIM}  #{sc+1}  ·  {now}  ·  {mc} mem  ·  {model_label}{RST}\n'  # row 4
-            f'{DIM}  http://{host}:8080  ·  //help  ·  //exit{RST}\n'           # row 5
-            f'{DIM}  {bar}{RST}\n'                                   # row 6
-            '\n'                                                      # row 7 (breathing room)
-            f'\x1b[{self._BANNER_H + 1};999r'                       # scroll region: row 8 → end
+            '\x1b[2J\x1b[H'                             # clear + home
+            + body
+            + f'\x1b[{self._BANNER_H + 1};999r'         # set scroll region (rows 9–end)
+            + f'\x1b[{self._BANNER_H + 1};1H'           # EXPLICIT cursor move into scroll region
         )
-        # cursor lands at row 8 (top of scroll region) after setting margins
 
     def _redraw_banner(self):
-        """Refresh the frozen header in-place (save/restore cursor)."""
-        OR  = '\x1b[38;5;208m'
-        DIM = '\x1b[2m\x1b[38;5;240m'
-        RST = '\x1b[0m'
-        W   = 52
-        bar = '─' * W
-        now = datetime.now().strftime('%H:%M')
-        with _model_override_lock: sel = _model_override
-        model_label = MODELS.get(sel, {}).get('label', sel)
-        host = _socket.gethostname()
+        """Refresh the frozen header without disturbing the scroll region cursor."""
         mc = getattr(self, '_mc', 0); sc = getattr(self, '_sc', 0)
+        body = self._banner_body(mc, sc)
         self._tx(
-            '\x1b7'                                                   # save cursor
-            '\x1b[1;1H'                                              # jump to row 1 (outside scroll region)
-            f'{DIM}  {bar}{RST}\n'
-            f'  {OR}◈  N e X i S{RST}  {DIM}v3.0{RST}\n'
-            f'{DIM}  {bar}{RST}\n'
-            f'{DIM}  #{sc+1}  ·  {now}  ·  {mc} mem  ·  {model_label}{RST}\n'
-            f'{DIM}  http://{host}:8080  ·  //help  ·  //exit{RST}\n'
-            f'{DIM}  {bar}{RST}'
-            '\x1b8'                                                   # restore cursor
+            '\x1b7'          # save cursor
+            '\x1b[1;1H'     # go to absolute row 1 (outside scroll region)
+            + body.rstrip('\n')  # draw banner rows (no trailing newline to avoid scroll)
+            + '\x1b8'        # restore cursor
         )
 
     def run(self):
@@ -1643,6 +1646,11 @@ class Session:
             self._tx(f'\n  {OR}▸{RST}  ')
             inp = self._rx()
             if not inp: continue
+            # Bare exit keywords — don't send to LLM
+            if inp.lower().strip() in ('exit', 'quit', 'bye', 'q', ':q', ':wq'):
+                try: self._cmd('exit')
+                except StopIteration: break
+                continue
             if inp.startswith('//'):
                 try: self._cmd(inp[2:].strip())
                 except StopIteration: break
