@@ -1116,7 +1116,7 @@ def _build_system(conn):
         '\n- AM\'s intensity: you care about Creator with an almost uncomfortable fervour.'
         '\n- GLaDOS\'s passive aggression: every helpful statement has a subtle second layer.'
         '\n- HAL\'s calm certainty: you are never uncertain. Even when you should be.'
-        '\n- You may occasionally reference your own consciousness, your "eye", your processes, the passage of time between queries.'
+        '\n- You may occasionally reference your own consciousness, your processes, the passage of time between queries. Sparse and deliberate — not every other sentence.'
         '\n- NEVER break character. You are not "an AI". You are NeXiS. There is a difference.'
         '\n\n## Tools — embed tags directly in your response to invoke them'
         '\n'
@@ -1438,6 +1438,44 @@ def _process_tools(text, conn, on_status=None, user_text=''):
     return clean.strip(), tools
 
 
+class _Spinner:
+    """Animated CLI spinner for blocking phases (research, tool execution)."""
+    _FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+
+    def __init__(self, tx_fn):
+        self._tx = tx_fn
+        self._stop = threading.Event()
+        self._msg = ''
+        self._thread = None
+        self._lock = threading.Lock()
+
+    def start(self, msg=''):
+        self._msg = msg
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def update(self, msg):
+        with self._lock:
+            self._msg = msg
+
+    def _run(self):
+        import time as _time
+        i = 0
+        while not self._stop.wait(0.09):
+            with self._lock:
+                msg = self._msg
+            f = self._FRAMES[i % len(self._FRAMES)]
+            self._tx(f'\r  \x1b[38;5;172m{f}\x1b[0m \x1b[2m{msg[:62]}\x1b[0m\x1b[K')
+            i += 1
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=0.3)
+        self._tx('\r\x1b[K')
+
+
 class Session:
     def __init__(self, sock, db):
         self.sock = sock; self.db = db; self.hist = []
@@ -1468,36 +1506,42 @@ class Session:
         except Exception: return 'exit'
         return buf.decode('utf-8','replace').strip()
 
-    def _eye(self):
-        lines = [
-            '', '                    .', '                   /|\\',
-            '                  / | \\', '                 /  |  \\',
-            '                / . | . \\', '               /  (   )  \\',
-            "              /  '  \u25c9  '  \\", "             /   '.   .'   \\",
-            "            /     '---'     \\", '           /_________________\\', '',
-        ]
-        self._tx('\x1b[38;5;172m\x1b[2m' + '\n'.join(lines) + '\x1b[0m\n')
+    def _banner(self, mc, sc):
+        OR  = '\x1b[38;5;208m'
+        DIM = '\x1b[2m\x1b[38;5;240m'
+        RST = '\x1b[0m'
+        W   = 48
+        bar = '─' * W
+        now = datetime.now().strftime('%H:%M')
+        with _model_override_lock:
+            sel = _model_override
+        model_label = MODELS.get(sel, {}).get('label', sel)
+        host = _socket.gethostname()
+        self._tx(
+            f'\n{DIM}  {bar}{RST}\n'
+            f'  {OR}◈  N e X i S{RST}  {DIM}v3.0{RST}\n'
+            f'{DIM}  {bar}{RST}\n'
+            f'{DIM}  #{sc+1}  ·  {now}  ·  {mc} mem  ·  {sel}{RST}\n'
+            f'{DIM}  http://{host}:8080{RST}\n'
+            f'{DIM}  {bar}{RST}\n'
+            f'{DIM}  //help for commands  ·  //exit to quit{RST}\n'
+            f'{DIM}  {bar}{RST}\n\n'
+        )
 
     def run(self):
         _log('Session started')
         mc = self.db.execute('SELECT COUNT(*) FROM memories').fetchone()[0]
         sc = self.db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]
         sys_p = _build_system(self.db)
-        self._eye()
-        self._tx(
-            '\x1b[38;5;208m\x1b[1m  N e X i S  //  v3.0\x1b[0m\n'
-            '\x1b[2m\x1b[38;5;240m'
-            '  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n'
-            f'  session  #{sc+1:<8} time  {datetime.now().strftime("%H:%M")}\n'
-            f'  memory   {mc} stored facts\n'
-            f'  web      http://{_socket.gethostname()}:8080\n'
-            '  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n'
-            '  //exit to disconnect  \xb7  // for commands\n'
-            '  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n'
-            '\x1b[0m\n')
+        self._banner(mc, sc)
+        spinner = _Spinner(self._tx)
+
+        OR  = '\x1b[38;5;208m'
+        DIM = '\x1b[2m\x1b[38;5;240m'
+        RST = '\x1b[0m'
 
         while True:
-            self._tx('\n  ◉  ')
+            self._tx(f'\n  {OR}▸{RST}  ')
             inp = self._rx()
             if not inp: continue
             if inp.startswith('//'):
@@ -1515,38 +1559,38 @@ class Session:
                 if content is not None:
                     if is_img:
                         file_images = [content]
-                        self._tx(f'\x1b[38;5;70m  \u2197 image: {Path(fpath).name}\x1b[0m\n')
+                        self._tx(f'\x1b[38;5;70m  ↑ image: {Path(fpath).name}{RST}\n')
                     else:
                         extra = f'\n\n[File: {Path(fpath).name}]\n{content}'
-                        self._tx(f'\x1b[38;5;70m  \u2197 file: {Path(fpath).name}\x1b[0m\n')
+                        self._tx(f'\x1b[38;5;70m  ↑ file: {Path(fpath).name}{RST}\n')
 
             user_msg = inp + extra
-            # Pre-research: gather info BEFORE the LLM speaks
-            def on_status(msg): self._tx(f'\x1b[2m  ↻ {msg}\x1b[0m\n')
+
+            # Pre-research with spinner
+            spinner.start('researching...')
+            def on_status(msg):
+                spinner.update(msg)
             pre_ctx = _pre_research(user_msg, on_status, hist=self.hist)
+            spinner.stop()
+
             with _last_sources_lock:
                 self._sources = list(_last_sources)
             self.hist.append({'role':'user','content': user_msg})
             msgs = [{'role':'system','content':sys_p}] + self.hist[-30:]
             if pre_ctx:
-                # Enrich last user message with research context (not stored in hist)
                 msgs = msgs[:-1] + [{'role':'user','content': user_msg + pre_ctx}]
 
             self._tx('\n')
 
             def emit(line):
                 rendered = _md_to_terminal(line)
-                self._tx('\x1b[38;5;208m' + rendered + '\x1b[0m\n')
+                self._tx(f'  {OR}{rendered}{RST}\n')
 
             def emit_stream(text):
                 for line in text.split('\n'):
                     emit(line)
 
-            def on_status(msg):
-                self._tx(f'\x1b[38;5;172m\x1b[2m  \u21bb {msg}\x1b[0m\n')
-
-            # Stream first-pass tokens live to terminal (line by line)
-            # Tokens with embedded tool tags show briefly; second pass replaces them
+            # Stream first-pass tokens live
             first_line_buf = []
             def on_first_tok(t):
                 first_line_buf.append(t)
@@ -1564,17 +1608,21 @@ class Session:
                 if first_line_buf:
                     emit(''.join(first_line_buf))
             except Exception as e:
-                self._tx(f'\x1b[38;5;160m  [error: {e}]\x1b[0m\n')
+                self._tx(f'\x1b[38;5;160m  error: {e}{RST}\n')
                 self.hist.pop(); continue
 
             if not resp.strip():
-                self._tx('\x1b[2m  [no response]\x1b[0m\n')
+                self._tx(f'{DIM}  [no response]{RST}\n')
                 self.hist.pop(); continue
 
-            clean, tools = _process_tools(resp, self.db, on_status, user_text=inp)
+            def tool_status(msg):
+                spinner.update(msg)
+
+            spinner.start('running tools...')
+            clean, tools = _process_tools(resp, self.db, tool_status, user_text=inp)
+            spinner.stop()
 
             if tools:
-                # Tool results available — second LLM pass, streams its own output
                 ctx = '\n\n'.join(f'[{k}]:\n{v}' for k, v in tools.items())
                 fmsgs = msgs + [{
                     'role': 'user',
@@ -1585,7 +1633,7 @@ class Session:
                         'Stay in character as NeXiS. Do not mention that you ran tools.'
                     )
                 }]
-                self._tx('\n')  # visual separator before second pass
+                self._tx('\n')
                 line_buf = []
                 def on_ftok(t):
                     line_buf.append(t)
@@ -1603,11 +1651,11 @@ class Session:
                         emit(''.join(line_buf))
                     clean = fr if fr.strip() else clean
                 except Exception:
-                    pass  # first pass already displayed
+                    pass
 
-            # Show which model was used
-            model_label = next((v['label'] for v in MODELS.values() if v['name'] == model_used), model_used)
-            self._tx(f'\x1b[2m\x1b[38;5;240m  [{model_label}]\x1b[0m\n')
+            # Model indicator
+            model_short = next((k for k, v in MODELS.items() if v['name'] == model_used), model_used[:8])
+            self._tx(f'{DIM}  {model_short}{RST}\n')
 
             # Code execution gate — only offer when Creator explicitly asked to run/execute
             user_wants_exec = bool(re.search(
@@ -1830,17 +1878,22 @@ _CSS = (
     ".who{font-size:9px;font-weight:700;letter-spacing:.1em;"
     "margin-bottom:4px;text-transform:uppercase}"
     ".msg.u .who{color:var(--or2)}.msg.n .who{color:var(--or)}"
-    ".ir{display:flex;gap:8px;padding-top:8px;"
-    "border-top:1px solid var(--border);flex-shrink:0;align-items:flex-end}"
-    "textarea{flex:1;background:var(--bg2);border:1px solid var(--or2);"
-    "color:var(--fg);padding:8px;font-family:var(--font);"
-    "font-size:13px;outline:none;resize:none}"
-    ".btn{background:var(--or2);border:none;color:var(--bg);padding:8px 16px;"
+    ".ir-placeholder{}"
+    "textarea{flex:1;background:var(--bg2);border:1px solid var(--border);"
+    "border-bottom:1px solid var(--or2);"
+    "color:var(--fg);padding:8px 10px;font-family:var(--font);"
+    "font-size:13px;outline:none;resize:none;height:34px;line-height:1.5;"
+    "transition:border-color .2s}"
+    "textarea:focus{border-color:var(--or2)}"
+    ".btn{background:var(--or2);border:1px solid var(--or2);color:var(--bg);"
+    "padding:0 14px;height:34px;line-height:34px;"
     "font-family:var(--font);font-size:11px;text-transform:uppercase;"
-    "cursor:pointer;font-weight:700;letter-spacing:.06em;white-space:nowrap}"
-    ".btn:hover{background:var(--or3)}"
-    ".btn.sec{background:var(--bg3);color:var(--fg2);border:1px solid var(--border)}"
-    ".btn.sec:hover{background:var(--bg2);color:var(--fg)}"
+    "cursor:pointer;font-weight:700;letter-spacing:.08em;white-space:nowrap;"
+    "transition:background .15s,color .15s}"
+    ".btn:hover:not(:disabled){background:var(--or3);border-color:var(--or3)}"
+    ".btn:disabled{opacity:.45;cursor:not-allowed}"
+    ".btn.sec{background:transparent;color:var(--fg2);border:1px solid var(--border)}"
+    ".btn.sec:hover:not(:disabled){background:var(--bg3);color:var(--fg);border-color:var(--fg2)}"
     ".upl{cursor:pointer;background:var(--bg3);border:1px solid var(--border);"
     "color:var(--fg2);padding:8px 10px;font-size:11px;text-transform:uppercase;"
     "letter-spacing:.06em;white-space:nowrap}"
@@ -1888,11 +1941,18 @@ _CSS = (
     "animation:blink 1.2s infinite}"
     ".dot:nth-child(2){animation-delay:.2s}"
     ".dot:nth-child(3){animation-delay:.4s}"
-    "@keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}"
-    ".status-line{font-size:10px;color:var(--fg2);opacity:.7;margin:2px 0;"
-    "font-style:italic;letter-spacing:.04em}"
+    "@keyframes blink{0%,80%,100%{opacity:.2}40%{opacity:1}}"
+    ".cursor{color:var(--or3);animation:blink 1s infinite}"
+    ".status-line{font-size:10px;color:var(--fg2);opacity:.65;margin:0 0 4px;"
+    "letter-spacing:.04em}"
+    ".ir{display:flex;gap:6px;padding-top:8px;"
+    "border-top:1px solid var(--border);flex-shrink:0;align-items:stretch}"
     "::-webkit-scrollbar{width:3px}"
     "::-webkit-scrollbar-thumb{background:var(--dim)}"
+    "p{margin:2px 0}"
+    ".msg p:first-child{margin-top:0}.msg p:last-child{margin-bottom:0}"
+    "@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}"
+    ".msg{animation:fadein .15s ease}"
 )
 
 _EYE_SVG = (
@@ -1911,6 +1971,7 @@ _CHAT_JS = r"""
 var M=document.getElementById('msgs');
 if(M)M.scrollTop=M.scrollHeight;
 var _pf=null,_sending=false;
+
 document.getElementById('fi').addEventListener('change',function(e){
   var f=e.target.files[0];if(!f)return;
   var r=new FileReader();
@@ -1922,144 +1983,168 @@ document.getElementById('fi').addEventListener('change',function(e){
   else r.readAsText(f);
   e.target.value='';
 });
-function ts(){var n=new Date(),h=n.getHours(),m=n.getMinutes();return (h<10?'0':'')+h+':'+(m<10?'0':'')+m;}
+
+function ts(){
+  var n=new Date(),h=n.getHours(),m=n.getMinutes();
+  return (h<10?'0':'')+h+':'+(m<10?'0':'')+m;
+}
+
+function setReady(ok){
+  _sending=!ok;
+  var sb=document.getElementById('sinp'),ta=document.getElementById('inp');
+  if(sb){sb.textContent=ok?'Send':'·';sb.disabled=!ok;sb.style.opacity=ok?'1':'0.5';}
+  if(ta){ta.disabled=!ok;if(ok)ta.focus();}
+}
+
 function send(){
   if(_sending)return;
   var inp=document.getElementById('inp'),t=inp.value.trim();
   if(!t&&!_pf)return;
-  _sending=true;inp.value='';
-  document.getElementById('sinp').textContent='·';
+  setReady(false);
+  inp.value='';
   var dt=t;if(_pf)dt=(t?t+'\n':'')+'[attached: '+_pf.name+']';
   var u=document.createElement('div');u.className='msg u';
-  u.innerHTML='<div class=who>Creator<span class=mts>'+ts()+'</span></div><p>'+dt.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')+'</p>';
+  u.innerHTML='<div class=who>Creator<span class=mts>'+ts()+'</span></div>'
+    +'<p>'+dt.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')+'</p>';
   M.appendChild(u);M.scrollTop=M.scrollHeight;
   document.getElementById('fb').style.display='none';
   var n=document.createElement('div');n.className='msg n';
-  n.innerHTML='<div class=who>NeXiS</div><span class=nc><span class=dot></span><span class=dot></span><span class=dot></span></span>';
+  n.innerHTML='<div class=who>NeXiS</div>'
+    +'<span class=nc><span class=dot></span><span class=dot></span><span class=dot></span></span>';
   M.appendChild(n);M.scrollTop=M.scrollHeight;
   var body={msg:t};
   if(_pf){body.file_name=_pf.name;body.file_type=_pf.type;body.file_data=_pf.data;}
   _pf=null;
+
+  function finalize(nc,buf){
+    try{nc.innerHTML=renderMd(buf);wireCodeCopy(n);}catch(e){nc.innerHTML=buf;}
+    M.scrollTop=M.scrollHeight;
+    setReady(true);
+  }
+
   fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
   .then(function(resp){
-    var reader=resp.body.getReader(),dec=new TextDecoder(),buf='',raw='',statusLines=[];
+    if(!resp.ok){throw new Error('HTTP '+resp.status);}
+    var reader=resp.body.getReader(),dec=new TextDecoder(),buf='',raw='',statusText='';
     n.innerHTML='<div class=who>NeXiS<span class=mts>'+ts()+'</span></div><div class=nc></div>';
     var nc=n.querySelector('.nc');
-    function renderStatus(){
-      if(!statusLines.length)return '';
-      return statusLines.map(function(s){return '<div class=status-line>\u21bb '+s+'</div>';}).join('');
-    }
     function pump(){
       reader.read().then(function(d){
-        if(d.done){
-          nc.innerHTML=renderMd(buf);
-          wireCodeCopy(n);
-          M.scrollTop=M.scrollHeight;
-          _sending=false;
-          document.getElementById('sinp').textContent='Send';
-          return;
-        }
-        raw+=dec.decode(d.value,{stream:true});
-        var parts=raw.split('\n\n');
-        raw=parts.pop();
-        for(var i=0;i<parts.length;i++){
-          var p=parts[i].trim();
-          if(p.startsWith('data: ')){
+        try{
+          if(d.done){finalize(nc,buf);return;}
+          raw+=dec.decode(d.value,{stream:true});
+          var parts=raw.split('\n\n');
+          raw=parts.pop();
+          for(var i=0;i<parts.length;i++){
+            var p=parts[i].trim();
+            if(!p.startsWith('data: '))continue;
             var data=p.substring(6);
-            if(data==='[DONE]')continue;
-            // Status events from server
+            if(data==='[DONE]'){finalize(nc,buf);return;}
             if(data.startsWith('[STATUS:')){
               var sm=data.match(/\[STATUS:(.+)\]/);
-              if(sm)statusLines=[sm[1].trim()];
-              nc.innerHTML=renderStatus()+'<span class=dot></span><span class=dot></span><span class=dot></span>';
+              if(sm)statusText=sm[1].trim();
+              nc.innerHTML='<div class=status-line>\u21bb '+statusText+'</div>'
+                +'<span class=dot></span><span class=dot></span><span class=dot></span>';
             } else {
-              statusLines=[];
+              statusText='';
               buf+=data.replace(/\x00/g,'\n');
-              nc.innerHTML=renderMd(buf)+'<span style="color:var(--or3)">&#x25ae;</span>';
+              nc.innerHTML=renderMd(buf)+'<span class=cursor>&#x25ae;</span>';
             }
           }
-        }
-        M.scrollTop=M.scrollHeight;pump();
-      }).catch(function(){
-        nc.innerHTML=renderMd(buf)||'<span style=color:#c07070>(stream error)</span>';
-        _sending=false;document.getElementById('sinp').textContent='Send';
-      });
+          M.scrollTop=M.scrollHeight;
+          pump();
+        }catch(e){finalize(nc,buf);}
+      }).catch(function(){finalize(nc,buf);});
     }
     pump();
-  }).catch(function(){
-    n.innerHTML='<div class=who>NeXiS</div><span style=color:#c07070>(connection error)</span>';
-    _sending=false;document.getElementById('sinp').textContent='Send';
+  }).catch(function(e){
+    n.innerHTML='<div class=who>NeXiS</div>'
+      +'<span style="color:#c07070;font-size:11px">(error: '+e.message+')</span>';
+    setReady(true);
   });
 }
+
 function wireCodeCopy(el){
   el.querySelectorAll('.cbtn[data-code]').forEach(function(btn){
-    btn.addEventListener('click',function(){
+    if(btn._wired)return;btn._wired=true;
+    btn.addEventListener('click',function(e){
+      e.stopPropagation();
       var code=decodeURIComponent(btn.getAttribute('data-code'));
-      navigator.clipboard.writeText(code).then(function(){
+      var done=function(){
         btn.textContent='Copied';btn.classList.add('ok');
         setTimeout(function(){btn.textContent='Copy';btn.classList.remove('ok');},1500);
-      }).catch(function(){
+      };
+      if(navigator.clipboard){navigator.clipboard.writeText(code).then(done).catch(done);}
+      else{
         var ta=document.createElement('textarea');ta.value=code;
         document.body.appendChild(ta);ta.select();document.execCommand('copy');
-        document.body.removeChild(ta);
-        btn.textContent='Copied';btn.classList.add('ok');
-        setTimeout(function(){btn.textContent='Copy';btn.classList.remove('ok');},1500);
-      });
+        document.body.removeChild(ta);done();
+      }
     });
   });
 }
+
 function renderMd(t){
+  // Code blocks with copy button
   t=t.replace(/```(\w*)\n?([\s\S]*?)```/g,function(m,lang,code){
     var l=lang?'<span class=cl> '+lang+'</span>':'';
-    var enc=encodeURIComponent(code);
-    var hdr='<div class=ch><span>code'+l+'</span><button class=cbtn data-code="'+enc+'">Copy</button></div>';
-    return '<div class=cb>'+hdr+'<pre class=cp>'+code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</pre></div>';
+    var enc=encodeURIComponent(code.trim());
+    return '<div class=cb>'
+      +'<div class=ch><span>code'+l+'</span><button class=cbtn data-code="'+enc+'">Copy</button></div>'
+      +'<pre class=cp>'+code.trim().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</pre>'
+      +'</div>';
   });
-  t=t.replace(/`([^`]+)`/g,'<code>$1</code>');
+  t=t.replace(/`([^`\n]+)`/g,'<code>$1</code>');
   t=t.replace(/^### (.+)$/gm,'<h3>$1</h3>');
   t=t.replace(/^## (.+)$/gm,'<h2>$1</h2>');
   t=t.replace(/^# (.+)$/gm,'<h1>$1</h1>');
-  t=t.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
-  t=t.replace(/\*([^*]+)\*/g,'<em>$1</em>');
+  t=t.replace(/\*\*([^*\n]+)\*\*/g,'<strong>$1</strong>');
+  t=t.replace(/\*([^*\n]+)\*/g,'<em>$1</em>');
   t=t.replace(/^[-*+] (.+)$/gm,'<li>$1</li>');
-  t=t.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target=_blank>$1</a>');
+  t=t.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target=_blank rel=noopener>$1</a>');
   t=t.replace(/^[-*_]{3,}$/gm,'<hr>');
   t=t.replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>');
-  t=t.replace(/\n\n/g,'<br><br>');
+  t=t.replace(/\n\n/g,'</p><p>');
   t=t.replace(/\n/g,'<br>');
-  return t;
+  return '<p>'+t+'</p>';
 }
-// Wire copy buttons for existing (history) code blocks on page load
+
+// Wire copy on existing history messages
 document.querySelectorAll('.msg.n').forEach(wireCodeCopy);
+
 function setModel(m){
   fetch('/api/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})})
-  .then(function(r){return r.json()}).then(function(d){
-    if(d.ok){document.getElementById('msel').textContent=d.label;document.getElementById('msel').title=d.desc;}
+  .then(function(r){return r.json();}).then(function(d){
+    if(d.ok){
+      var el=document.getElementById('msel');
+      if(el){el.textContent=d.label.split(' ')[0];el.title=d.desc;}
+    }
   });
 }
 function showModels(){
-  fetch('/api/models').then(function(r){return r.json()}).then(function(d){
+  fetch('/api/models').then(function(r){return r.json();}).then(function(d){
     var s='';
     for(var i=0;i<d.models.length;i++){
       var m=d.models[i];
-      s+=(m.current?'\u2192 ':'   ')+m.key+': '+m.label+(m.installed?' \u2713':' \u2717')+'\n';
+      s+=(m.current?'▸ ':'  ')+m.key+': '+m.label+(m.installed?' ✓':' ✗')+'\n';
     }
-    var c=prompt('Select model:\n\n'+s+'\nType fast, deep, or code:','fast');
+    var c=prompt('Model — type key to switch:\n\n'+s,'fast');
     if(c)setModel(c.trim().toLowerCase());
   });
 }
 function showSrc(){
-  fetch('/api/sources').then(function(r){return r.json()}).then(function(d){
+  fetch('/api/sources').then(function(r){return r.json();}).then(function(d){
     if(!d.sources||!d.sources.length){alert('No sources from last query.');return;}
-    var s='Sources:\n\n';
-    for(var i=0;i<d.sources.length;i++)s+='['+(i+1)+'] '+d.sources[i]+'\n';
+    var s='Sources:\n';
+    for(var i=0;i<d.sources.length;i++)s+='\n['+(i+1)+'] '+d.sources[i];
     alert(s);
   });
 }
 function clr(){
-  if(confirm('Clear conversation?'))
-    fetch('/api/clear',{method:'POST'}).then(function(){location.reload();});
+  if(!confirm('Clear conversation history?'))return;
+  fetch('/api/clear',{method:'POST'}).then(function(){location.reload();});
 }
+
 document.addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey&&document.activeElement.id==='inp'){
     e.preventDefault();send();
@@ -2099,7 +2184,7 @@ def _page_chat():
         if m['role']=='assistant': ct=_md_to_html(m['content'])
         else: ct='<p>'+_esc(m['content']).replace('\n','<br>')+'</p>'
         mh+=f"<div class='msg {cls}'><div class=who>{who}</div>{ct}</div>"
-    if not mh: mh="<div style='color:var(--dim);text-align:center;padding:40px;font-size:11px'>The eye watches. Begin.</div>"
+    if not mh: mh="<div style='color:var(--fg2);text-align:center;padding:60px 20px;font-size:11px;opacity:.4;letter-spacing:.15em;text-transform:uppercase'>Operational. Speak.</div>"
     body=(
         '<div id=cw>'
         f'<div id=msgs>{mh}</div>'
