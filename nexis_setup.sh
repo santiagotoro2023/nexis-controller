@@ -116,7 +116,7 @@ VENV="$NEXIS_DATA/venv"
 _hdr "DEPENDENCIES"
 apt-get update -qq 2>/dev/null || true
 apt-get install -y curl python3-pip python3-venv socat \
-  xclip xdg-utils libnotify-bin wmctrl sox alsa-utils 2>/dev/null || _warn "Some packages unavailable"
+  xclip xdg-utils libnotify-bin wmctrl sox alsa-utils espeak-ng 2>/dev/null || _warn "Some packages unavailable"
 # Install GitHub CLI if not present
 if ! command -v gh &>/dev/null; then
   echo "  installing gh CLI..."
@@ -192,7 +192,11 @@ if [[ "$PULL" =~ ^[Yy]$ ]]; then
     && _ok "Omega-Darker ready" || _warn "Omega-Darker unavailable"
 fi
 
-_hdr "VOICE MODEL"
+_hdr "VOICE"
+# espeak-ng is primary (robotic formant synth) — already installed above
+command -v espeak-ng &>/dev/null && _ok "espeak-ng ready (primary voice engine)" || _warn "espeak-ng missing — Piper fallback will be used"
+
+_hdr "VOICE MODEL (Piper fallback)"
 VOICE_DIR="$NEXIS_DATA/voice"
 sudo -u "$REAL_USER" mkdir -p "$VOICE_DIR"
 PIPER_ONNX="$VOICE_DIR/en_US-ryan-high.onnx"

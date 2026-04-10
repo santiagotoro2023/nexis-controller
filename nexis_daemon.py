@@ -297,41 +297,46 @@ def _next_audio_seq():
         return _audio_seq[0]
 
 def _tts_available():
-    """True if piper-tts is installed and model files exist."""
-    if not (Path(PIPER_MODEL).exists() and Path(PIPER_CFG).exists()):
-        return False
-    try:
-        import piper.voice  # noqa
+    """True if any TTS backend is usable: espeak-ng OR piper+model."""
+    if shutil.which('espeak-ng'):
         return True
-    except ImportError:
-        return False
+    if Path(PIPER_MODEL).exists() and Path(PIPER_CFG).exists():
+        try:
+            import piper.voice  # noqa
+            return True
+        except ImportError:
+            pass
+    return False
 
 def _tts_load_voice():
+    """Load (or return cached) PiperVoice. Returns None if piper unavailable."""
     with _tts_voice_obj_lk:
-        if _tts_voice_obj[0] is None and _tts_available():
-            try:
-                from piper.voice import PiperVoice
-                _tts_voice_obj[0] = PiperVoice.load(
-                    PIPER_MODEL, config_path=PIPER_CFG, use_cuda=False)
-                _log('TTS voice loaded (en_US-ryan-high)')
-            except Exception as e:
-                _log(f'TTS voice load: {e}', 'WARN')
+        if _tts_voice_obj[0] is None:
+            if Path(PIPER_MODEL).exists() and Path(PIPER_CFG).exists():
+                try:
+                    from piper.voice import PiperVoice
+                    _tts_voice_obj[0] = PiperVoice.load(
+                        PIPER_MODEL, config_path=PIPER_CFG, use_cuda=False)
+                    _log('TTS voice loaded (en_US-ryan-high, piper fallback)')
+                except Exception as e:
+                    _log(f'TTS piper load: {e}', 'WARN')
         return _tts_voice_obj[0]
 
 def _tts_clean(text: str) -> str:
     """Strip markdown/tool-tags from text before speaking."""
-    text = re.sub(r'```[\s\S]*?```', '', text)            # fenced code
-    text = re.sub(r'`[^`\n]+`', '', text)                 # inline code
-    text = re.sub(r'\*{1,3}([^*\n]+)\*{1,3}', r'\1', text)  # bold/italic
-    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # headers
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  # links
-    text = re.sub(r'\[[A-Z]+:[^\]]*\]', '', text)         # tool tags
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    text = re.sub(r'`[^`\n]+`', '', text)
+    text = re.sub(r'\*{1,3}([^*\n]+)\*{1,3}', r'\1', text)
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'\[[A-Z]+:[^\]]*\]', '', text)
     text = re.sub(r'\[[A-Z]+\]', '', text)
+    # Remove URLs — they sound terrible spoken aloud
+    text = re.sub(r'https?://\S+', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def _tts_apply_effects(wav_bytes: bytes) -> bytes:
-    """Post-process WAV: pitch -120cents + subtle reverb (HAL/GlaDOS hybrid)."""
-    # Try sox first (best quality pitch shift)
+    """GlaDOS/HAL post-processing: pitch down + metallic echo + reverb + overdrive."""
     if shutil.which('sox'):
         inp = out = None
         try:
@@ -340,37 +345,51 @@ def _tts_apply_effects(wav_bytes: bytes) -> bytes:
             out = inp[:-4] + '_fx.wav'
             subprocess.run(
                 ['sox', inp, out,
-                 'pitch', '-120',
-                 'reverb', '25', '50', '100', '100', '0',
-                 'gain', '-3'],
-                capture_output=True, timeout=15, check=True)
+                 # Pre-attenuate before effects stack up
+                 'gain', '-4',
+                 # Pitch: -350 cents (~3.5 semitones) — noticeably deeper, unnatural
+                 'pitch', '-350',
+                 # Tight short echo → metallic/electronic resonance (GlaDOS's signature ring)
+                 'echo', '0.8', '0.7', '22', '0.45',
+                 # Room reverb — system-speaker quality, not human/room
+                 'reverb', '40', '55', '100', '100', '0',
+                 # Overdrive: electronic grit/presence
+                 'overdrive', '5', '0',
+                 # Slightly slower tempo — HAL's deliberate pacing
+                 'tempo', '0.92',
+                 'gain', '-4'],
+                capture_output=True, timeout=20, check=True)
             with open(out, 'rb') as f:
                 return f.read()
         except Exception as e:
-            _log(f'TTS sox: {e}', 'WARN')
+            _log(f'TTS sox effects: {e}', 'WARN')
         finally:
             for p in (inp, out):
                 if p:
                     try: os.unlink(p)
                     except Exception: pass
-    # Fallback: ffmpeg (asetrate pitch-shift + echo)
+    # ffmpeg fallback — heavier processing to compensate for no overdrive
     if shutil.which('ffmpeg'):
         inp = out = None
         try:
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 f.write(wav_bytes); inp = f.name
             out = inp[:-4] + '_fx.wav'
-            # atempo compensates for the speed change caused by asetrate
             subprocess.run(
                 ['ffmpeg', '-y', '-i', inp, '-af',
-                 'atempo=1.064,asetrate=22050*0.94,aresample=22050,'
-                 'aecho=0.85:0.88:55:0.25,volume=-3dB',
+                 # Pitch: asetrate shifts pitch+speed; atempo restores speed
+                 'asetrate=22050*0.82,aresample=22050,atempo=1.22,'
+                 # Phaser: creates sweeping metallic resonance
+                 'aphaser=type=t:speed=0.4:decay=0.7:gain=0.9,'
+                 # Echo: tight metallic ring
+                 'aecho=0.95:0.85:22|45:0.6|0.35,'
+                 'volume=-6dB',
                  out],
-                capture_output=True, timeout=15, check=True)
+                capture_output=True, timeout=20, check=True)
             with open(out, 'rb') as f:
                 return f.read()
         except Exception as e:
-            _log(f'TTS ffmpeg: {e}', 'WARN')
+            _log(f'TTS ffmpeg effects: {e}', 'WARN')
         finally:
             for p in (inp, out):
                 if p:
@@ -379,33 +398,59 @@ def _tts_apply_effects(wav_bytes: bytes) -> bytes:
     return wav_bytes
 
 def _tts_synth(text: str):
-    """Synthesize cleaned text to processed WAV bytes. Returns None on failure."""
+    """Synthesize cleaned text → processed WAV bytes. eSpeak primary, Piper fallback."""
     clean = _tts_clean(text)
     if not clean:
         return None
+
+    # ── Primary: eSpeak NG (formant synth → inherently robotic, no model loading) ──
+    if shutil.which('espeak-ng'):
+        inp = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                inp = f.name
+            r = subprocess.run(
+                ['espeak-ng',
+                 '-v', 'en-us',   # US English male voice
+                 '-s', '148',     # speed (wpm) — slightly slower than default 175
+                 '-p', '28',      # pitch (0-99) — lower = deeper, HAL-like
+                 '-g', '4',       # inter-word gap in 10ms — deliberate spacing
+                 '-a', '100',     # amplitude
+                 '-w', inp,       # write WAV to file
+                 clean],
+                capture_output=True, timeout=15)
+            if r.returncode == 0 and Path(inp).exists() and Path(inp).stat().st_size > 100:
+                with open(inp, 'rb') as f:
+                    raw = f.read()
+                return _tts_apply_effects(raw)
+            else:
+                _log(f'espeak-ng failed: {r.stderr.decode()[:200]}', 'WARN')
+        except Exception as e:
+            _log(f'TTS espeak: {e}', 'WARN')
+        finally:
+            if inp:
+                try: os.unlink(inp)
+                except Exception: pass
+
+    # ── Fallback: Piper neural TTS ───────────────────────────────────────────────
     voice = _tts_load_voice()
     if voice is None:
         return None
     try:
-        # New piper-tts API: synthesize() yields AudioChunk objects
         chunks = list(voice.synthesize(clean))
         if not chunks:
             return None
-        # Reconstruct WAV from chunks
         sr = chunks[0].sample_rate
         sw = chunks[0].sample_width
         nc = chunks[0].sample_channels
         raw_pcm = b''.join(c.audio_int16_bytes for c in chunks)
         buf = io.BytesIO()
         with wave.open(buf, 'wb') as wf:
-            wf.setnchannels(nc)
-            wf.setsampwidth(sw)
-            wf.setframerate(sr)
+            wf.setnchannels(nc); wf.setsampwidth(sw); wf.setframerate(sr)
             wf.writeframes(raw_pcm)
-        raw = buf.getvalue()
-        return _tts_apply_effects(raw)
+        return _tts_apply_effects(buf.getvalue())
     except Exception as e:
-        _log(f'TTS synth: {e}', 'WARN')
+        _log(f'TTS piper synth: {e}', 'WARN')
         return None
 
 def _tts_play_local(wav_bytes: bytes):
