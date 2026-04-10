@@ -1717,7 +1717,9 @@ class Session:
 
             try:
                 resp, model_used = _smart_chat(msgs, on_token=on_first_tok, images=file_images)
-                self._tx(RST)
+                # IMPORTANT: newline here so the spinner starts on a FRESH line,
+                # not on top of the last response line (which \r would overwrite).
+                self._tx(RST + '\n')
             except Exception as e:
                 self._tx(f'\x1b[38;5;160m  error: {e}{RST}\n')
                 self.hist.pop(); continue
