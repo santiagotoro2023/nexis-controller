@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """NeXiS Daemon v3.0"""
 
-import os, sys, json, sqlite3, threading, signal, re, base64
+import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
 import shutil, mimetypes
 from datetime import datetime
@@ -2040,7 +2040,8 @@ function send(){
             if(!p.startsWith('data: '))continue;
             var data=p.substring(6);
             if(data==='[DONE]'){finalize(nc,buf);return;}
-            if(data.startsWith('[STATUS:')){
+            if(data==='[CLEAR]'){buf='';nc.innerHTML='<span class=cursor>&#x25ae;</span>';}
+            else if(data.startsWith('[STATUS:')){
               var sm=data.match(/\[STATUS:(.+)\]/);
               if(sm)statusText=sm[1].trim();
               nc.innerHTML='<div class=status-line>\u21bb '+statusText+'</div>'
@@ -2276,22 +2277,57 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         else:
             text=file_data[:8000] if isinstance(file_data,str) else file_data.decode('utf-8','replace')[:8000]
             user_content=(msg+'\n\n' if msg else '')+'[File: '+str(file_name)+']\n'+text
-    # Collect status events during pre-research, yield before LLM response
-    status_buf = []
+
+    # Yield status events during pre-research
+    status_buf=[]
     def on_status(s): status_buf.append(f'[STATUS:{s}]')
-    pre_ctx = _pre_research(user_content, on_status=on_status, hist=hist)
-    # Yield any accumulated status events
+    pre_ctx=_pre_research(user_content, on_status=on_status, hist=hist)
     for sv in status_buf: yield sv
-    enriched_content = user_content + pre_ctx if pre_ctx else user_content
+
+    enriched_content=user_content+pre_ctx if pre_ctx else user_content
     msgs=[{'role':'system','content':sys_p}]+hist[-30:]+[{'role':'user','content':enriched_content}]
-    buf=[]
-    try:
-        resp,model_used=_smart_chat(msgs,on_token=lambda t:buf.append(t),images=images)
-    except Exception as e:
-        yield f'(error: {e})'; return
-    clean,tools=_process_tools(resp,_db(),user_text=msg)
-    streamed=''.join(buf)
+
+    # ── First pass: stream tokens live via thread+queue ──────────────────────
+    def _live_stream(chat_msgs, chat_images=None):
+        """Run _smart_chat in a thread, yield tokens as they arrive."""
+        q=_queue.SimpleQueue(); done=threading.Event()
+        result=[None,None]; err=[None]
+        def _run():
+            try:
+                r,mu=_smart_chat(chat_msgs, on_token=q.put, images=chat_images)
+                result[0]=r; result[1]=mu
+            except Exception as e: err[0]=e
+            finally: done.set()
+        threading.Thread(target=_run, daemon=True).start()
+        collected=[]
+        while True:
+            try:
+                tok=q.get(timeout=0.05)
+                collected.append(tok); yield tok
+            except _queue.Empty:
+                if done.is_set():
+                    try:  # drain any remaining tokens put just before done
+                        while True:
+                            tok=q.get_nowait()
+                            collected.append(tok); yield tok
+                    except _queue.Empty: break
+        if err[0]: yield f'(error: {err[0]})'
+        yield ('__result__', result[0], result[1], ''.join(collected))
+
+    resp=None; model_used=None; streamed=''
+    for tok in _live_stream(msgs, images):
+        if isinstance(tok, tuple) and tok[0]=='__result__':
+            _,resp,model_used,streamed=tok
+        else:
+            yield tok
+
+    if resp is None: return
+
+    # ── Tool processing ───────────────────────────────────────────────────────
+    clean,tools=_process_tools(resp, _db(), user_text=msg)
     if tools:
+        # Clear streamed tool-tagged content; stream second pass live
+        yield '[CLEAR]'
         ctx='\n\n'.join(f'[{k}]:\n{v}' for k,v in tools.items())
         fmsgs=msgs+[{'role':'user','content':(
             f'[Tool results]:\n{ctx}\n\n'
@@ -2299,20 +2335,15 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
             'Answer the original question fully and accurately using the tool results above. '
             'Stay in character as NeXiS. Do not mention that you ran tools.'
         )}]
-        buf2=[]
-        try:
-            clean,_=_smart_chat(fmsgs,on_token=lambda t:buf2.append(t))
-            for tok in buf2: yield tok
-        except Exception:
-            yield streamed
-    else:
-        # If quality retry changed the response, yield the corrected version
-        if resp != streamed and resp.strip():
-            yield resp
-        else:
-            yield streamed
+        collected2=[]
+        for tok in _live_stream(fmsgs):
+            if isinstance(tok, tuple) and tok[0]=='__result__':
+                _,clean,_mu,_s=tok; collected2_str=''.join(collected2); clean=clean or collected2_str
+            else:
+                collected2.append(tok); yield tok
+
     # Store final response for post-stream persistence
-    _web_chat_stream._last = (user_content, clean or resp)
+    _web_chat_stream._last=(user_content, clean or resp)
     with _web_lock:
         _web_hist.append({'role':'user','content':user_content})
         _web_hist.append({'role':'assistant','content':clean or resp})
