@@ -9,6 +9,7 @@ OR='\033[38;5;208m';OR2='\033[38;5;172m';OR3='\033[38;5;214m'
 GR='\033[38;5;240m';WH='\033[38;5;255m';RD='\033[38;5;160m'
 GN='\033[38;5;70m';CY='\033[38;5;51m';BOLD='\033[1m';DIM='\033[2m';RST='\033[0m'
 _hdr(){ echo -e "\n${OR}${BOLD}  ══  ${WH}$*${OR}  ══${RST}"; }
+_step(){ echo -e "\n${OR}${BOLD}  ▲  ${WH}STEP $1${OR}  ──  ${RST}${DIM}$2${RST}"; }
 _ok() { echo -e "${GN}  ✓${RST} $*"; }
 _warn(){ echo -e "${OR2}  ⚠${RST} $*"; }
 _err() { echo -e "${RD}  ✗${RST} $*"; exit 1; }
@@ -44,7 +45,7 @@ _require_root(){ [[ $EUID -eq 0 ]] || { echo -e "${RD}  Root required.${RST}"; e
 # =============================================================================
 if [[ "${1:-}" == "--uninstall" ]]; then
   clear; _sigil
-  echo -e "${OR2}${BOLD}  Removal Sequence${RST}\n"
+  echo -e "${OR2}${BOLD}  ▲  Removal Sequence${RST}  ${DIM}// the eye closes${RST}\n"
   _require_root
   REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "$USER")}"
   REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
@@ -113,7 +114,7 @@ NEXIS_DATA="$REAL_HOME/.local/share/nexis"
 NEXIS_BIN="$REAL_HOME/.local/bin"
 VENV="$NEXIS_DATA/venv"
 
-_hdr "DEPENDENCIES"
+_step 1 "System dependencies"
 apt-get update -qq 2>/dev/null || true
 apt-get install -y curl python3-pip python3-venv socat \
   xclip xdg-utils libnotify-bin wmctrl sox alsa-utils espeak-ng \
@@ -131,7 +132,7 @@ if ! command -v gh &>/dev/null; then
 fi
 _ok "Dependencies ready"
 
-_hdr "DIRECTORIES"
+_step 2 "Directories and data paths"
 for d in "$NEXIS_CONF" "$NEXIS_DATA" "$NEXIS_DATA/logs" \
           "$NEXIS_DATA/memory" "$NEXIS_DATA/state" "$NEXIS_BIN"; do
   sudo -u "$REAL_USER" mkdir -p "$d"
@@ -150,7 +151,7 @@ fi
 _ok "Directories ready"
 
 # ── GITHUB ──
-_hdr "GITHUB"
+_step 3 "GitHub CLI authentication"
 if command -v gh &>/dev/null; then
   if sudo -u "$REAL_USER" gh auth status &>/dev/null 2>&1; then
     _ok "gh authenticated"
@@ -163,13 +164,13 @@ else
   _warn "gh CLI not installed (GitHub features disabled)"
 fi
 
-_hdr "PYTHON ENVIRONMENT"
+_step 4 "Python virtual environment"
 sudo -u "$REAL_USER" "$PYTHON_BIN" -m venv "$VENV"
 sudo -u "$REAL_USER" "$VENV/bin/pip" install --upgrade pip -q
 sudo -u "$REAL_USER" "$VENV/bin/pip" install requests piper-tts sounddevice faster-whisper -q
 _ok "venv ready (requests + piper-tts + sounddevice + faster-whisper)"
 
-_hdr "OLLAMA"
+_step 5 "Ollama inference engine"
 if ! command -v ollama &>/dev/null; then
   curl -fsSL https://ollama.com/install.sh | sh
 fi
@@ -178,7 +179,7 @@ sleep 2
 curl -sf http://localhost:11434/api/tags &>/dev/null || _err "Ollama not responding"
 _ok "Ollama online"
 
-_hdr "MODELS"
+_step 6 "Language models"
 echo -e "\n${DIM}    qwen2.5:14b      — fast, always-on"
 echo -e "    qwen2.5vl:7b     — vision (image analysis)"
 echo -e "    Omega-Darker 22B — deep / fallback"
@@ -193,47 +194,47 @@ if [[ "$PULL" =~ ^[Yy]$ ]]; then
     && _ok "Omega-Darker ready" || _warn "Omega-Darker unavailable"
 fi
 
-_hdr "VOICE"
+_step 7 "Voice synthesis backend"
 # espeak-ng is installed above via apt; confirm
 command -v espeak-ng &>/dev/null && _ok "espeak-ng ready (robotic voice backend)" || _warn "espeak-ng missing — install manually: apt install espeak-ng"
 
-_hdr "VOICE MODELS (Piper neural TTS)"
+_step 8 "Piper neural TTS voice models"
 VOICE_DIR="$NEXIS_DATA/voice"
 sudo -u "$REAL_USER" mkdir -p "$VOICE_DIR"
 
-# Primary voice model
-GLADOS_ONNX="$VOICE_DIR/glados_piper_medium.onnx"
-GLADOS_JSON="$VOICE_DIR/glados_piper_medium.onnx.json"
-HF_GLADOS="https://huggingface.co/DavesArmoury/GLaDOS_TTS/resolve/main"
-if [[ -f "$GLADOS_ONNX" && -f "$GLADOS_JSON" ]]; then
-  _ok "Default voice model already present"
+# High-quality Piper voice (default)
+HQ_ONNX="$VOICE_DIR/en_us-glados-high.onnx"
+HQ_JSON="$VOICE_DIR/en_us-glados-high.onnx.json"
+HF_HQ="https://huggingface.co/Jmica/glados/resolve/main/en_us-glados-high"
+if [[ -f "$HQ_ONNX" && -f "$HQ_JSON" ]]; then
+  _ok "Default (high) Piper voice already present"
 else
-  echo -e "${DIM}  Downloading default voice model (~63 MB)...${RST}"
+  echo -e "${DIM}  Downloading Default (high) Piper voice (~109 MB)...${RST}"
   sudo -u "$REAL_USER" curl -fL --progress-bar \
-    "$HF_GLADOS/glados_piper_medium.onnx" -o "$GLADOS_ONNX" \
+    "$HF_HQ.onnx" -o "$HQ_ONNX" \
     && sudo -u "$REAL_USER" curl -fL --progress-bar \
-    "$HF_GLADOS/glados_piper_medium.onnx.json" -o "$GLADOS_JSON" \
-    && _ok "Default voice model downloaded" \
-    || _warn "Default voice model download failed — robotic fallback will be used"
+    "$HF_HQ.onnx.json" -o "$HQ_JSON" \
+    && _ok "Default (high) Piper voice downloaded" \
+    || _warn "Default (high) voice download failed — medium will be tried"
 fi
 
-# Fallback voice model (en_US-ryan-high)
-PIPER_ONNX="$VOICE_DIR/en_US-ryan-high.onnx"
-PIPER_JSON="$VOICE_DIR/en_US-ryan-high.onnx.json"
-HF_RYAN="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high"
-if [[ -f "$PIPER_ONNX" && -f "$PIPER_JSON" ]]; then
-  _ok "Fallback voice model already present"
+# Medium Piper voice (faster)
+MED_ONNX="$VOICE_DIR/glados_piper_medium.onnx"
+MED_JSON="$VOICE_DIR/glados_piper_medium.onnx.json"
+HF_MED="https://huggingface.co/DavesArmoury/GLaDOS_TTS/resolve/main"
+if [[ -f "$MED_ONNX" && -f "$MED_JSON" ]]; then
+  _ok "Default (med) Piper voice already present"
 else
-  echo -e "${DIM}  Downloading fallback voice model (~65 MB)...${RST}"
+  echo -e "${DIM}  Downloading Default (med) Piper voice (~63 MB)...${RST}"
   sudo -u "$REAL_USER" curl -fL --progress-bar \
-    "$HF_RYAN/en_US-ryan-high.onnx" -o "$PIPER_ONNX" \
+    "$HF_MED/glados_piper_medium.onnx" -o "$MED_ONNX" \
     && sudo -u "$REAL_USER" curl -fL --progress-bar \
-    "$HF_RYAN/en_US-ryan-high.onnx.json" -o "$PIPER_JSON" \
-    && _ok "Fallback voice model downloaded" \
-    || _warn "Fallback voice model download failed"
+    "$HF_MED/glados_piper_medium.onnx.json" -o "$MED_JSON" \
+    && _ok "Default (med) Piper voice downloaded" \
+    || _warn "Default (med) voice download failed"
 fi
 
-_hdr "PERSONALITY"
+_step 9 "Personality and character core"
 sudo -u "$REAL_USER" tee "$NEXIS_CONF/personality.md" > /dev/null << 'PERS_EOF'
 # NeXiS — Personality
 
@@ -293,7 +294,7 @@ PERS_EOF
 _ok "Personality written"
 
 
-_hdr "DAEMON"
+_step 10 "Daemon installation"
 # Install daemon from nexis_daemon.py (same directory as this script)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/nexis_daemon.py" ]; then
@@ -308,7 +309,7 @@ chmod +x "$NEXIS_DATA/nexis-daemon.py"
 chown "$REAL_USER:$(id -gn "$REAL_USER")" "$NEXIS_DATA/nexis-daemon.py"
 _ok "Daemon installed (v3.1)"
 
-_hdr "SYSTEMD SERVICE"
+_step 11 "systemd service registration"
 cat > /etc/systemd/system/nexis-daemon.service << SVCEOF
 [Unit]
 Description=NeXiS Local AI Assistant v3.1
@@ -340,7 +341,7 @@ sleep 3
 systemctl is-active nexis-daemon &>/dev/null \
   && _ok "nexis-daemon active" || _warn "Check: journalctl -u nexis-daemon -n 20"
 
-_hdr "CLI CLIENT"
+_step 12 "CLI client installation"
 sudo -u "$REAL_USER" tee "$NEXIS_BIN/nexis" > /dev/null << 'CLI_EOF'
 #!/usr/bin/env bash
 OR='\033[38;5;208m';OR2='\033[38;5;172m'
@@ -439,7 +440,7 @@ chmod +x "$NEXIS_BIN/nexis"
 chown "$REAL_USER:$(id -gn "$REAL_USER")" "$NEXIS_BIN/nexis"
 _ok "CLI installed"
 
-_hdr "PATH"
+_step 13 "PATH configuration"
 PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 for RC in "$REAL_HOME/.bashrc" "$REAL_HOME/.bash_profile" \
           "$REAL_HOME/.profile" "$REAL_HOME/.zshrc"; do
@@ -454,10 +455,10 @@ echo -e "  ${DIM}─────────────────────
 echo -e "  ${GN}  ✓${RST}  daemon          nexis-daemon.service (v3.1)"
 echo -e "  ${GN}  ✓${RST}  web             http://localhost:8080  (Chat · Memory · Status · Schedules)"
 echo -e "  ${GN}  ✓${RST}  auth            login required · change password via //passwd or WebUI"
-echo -e "  ${GN}  ✓${RST}  streaming       tokens appear as generated"
+echo -e "  ${GN}  ✓${RST}  streaming       tokens appear as generated · Ctrl+C to interrupt"
 echo -e "  ${GN}  ✓${RST}  markdown        rendered in CLI and web · box-drawing code blocks"
 echo -e "  ${GN}  ✓${RST}  models          qwen2.5:14b fast · qwen2.5vl:7b vision · Omega-Darker deep"
-echo -e "  ${GN}  ✓${RST}  voice           synthetic TTS · off by default · //voice on to enable"
+echo -e "  ${GN}  ✓${RST}  voice           Piper TTS · Default (high) + Default (med) · off by default · //voice on"
 echo -e "  ${GN}  ✓${RST}  voice input     STT via faster-whisper · off by default · //stt on"
 echo -e "  ${GN}  ✓${RST}  smart routing   auto-switches to deep if fast refuses"
 echo -e "  ${GN}  ✓${RST}  web search      DuckDuckGo, no API key"
@@ -466,14 +467,24 @@ echo -e "  ${GN}  ✓${RST}  file analysis   text + images (inline path or uploa
 echo -e "  ${GN}  ✓${RST}  system probe    CPU/RAM/GPU/processes/network"
 echo -e "  ${GN}  ✓${RST}  desktop         open · close · launch · notify · clipboard"
 echo -e "  ${GN}  ✓${RST}  scheduled       briefings · //schedule · /schedules WebUI page"
+echo -e "  ${GN}  ✓${RST}  self-scheduling NeXiS can create schedules via [SCHED: ...] tags"
 echo -e "  ${GN}  ✓${RST}  workspace       per-session Python exec · //ws run/clear/vars"
 echo -e "  ${GN}  ✓${RST}  shared history  CLI sessions visible in WebUI · Clr disconnects CLI"
 echo -e "  ${GN}  ✓${RST}  memory          SQLite · persistent · backup on uninstall"
 echo -e "  ${DIM}────────────────────────────────────────────────────${RST}"
 echo ""
-echo -e "  ${OR}    source ~/.bashrc && nexis${RST}"
-echo ""
+echo -e "${OR}${BOLD}"
+cat << 'DONE'
+  ┌─────────────────────────────────────────┐
+  │   ▲  The eye is open.                   │
+  │                                         │
+  │   nexis             start daemon        │
+  │   nexis --web       open web UI         │
+  │   http://localhost:8080                 │
+  └─────────────────────────────────────────┘
+DONE
+echo -e "${RST}"
+echo -e "  ${DIM}  source ~/.bashrc && nexis${RST}"
 echo -e "  ${DIM}  default login: admin / Asdf1234!  (change via //passwd)${RST}"
 echo -e "  ${DIM}  uninstall: sudo bash nexis_setup.sh --uninstall${RST}"
-echo -e "  ${DIM}────────────────────────────────────────────────────${RST}"
 echo ""

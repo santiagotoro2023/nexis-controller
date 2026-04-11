@@ -22,6 +22,17 @@ SCHED_FILE = CONF / 'schedules.json'
 (DATA / 'voice').mkdir(exist_ok=True)
 CONF.mkdir(parents=True, exist_ok=True)
 
+# Ensure PulseAudio/PipeWire is reachable (needed for audio I/O when running under systemd)
+if 'XDG_RUNTIME_DIR' not in os.environ:
+    _xdg = f'/run/user/{os.getuid()}'
+    if Path(_xdg).exists():
+        os.environ['XDG_RUNTIME_DIR'] = _xdg
+if 'XDG_RUNTIME_DIR' in os.environ:
+    if 'PULSE_RUNTIME_PATH' not in os.environ:
+        os.environ['PULSE_RUNTIME_PATH'] = os.environ['XDG_RUNTIME_DIR'] + '/pulse'
+    if 'PIPEWIRE_RUNTIME_DIR' not in os.environ:
+        os.environ['PIPEWIRE_RUNTIME_DIR'] = os.environ['XDG_RUNTIME_DIR']
+
 OLLAMA       = 'http://localhost:11434'
 MODEL_FAST   = 'qwen2.5:14b'
 MODEL_DEEP   = 'hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M'
@@ -31,8 +42,16 @@ MODEL_VISION = 'qwen2.5vl:7b'
 VOICE_DIR = DATA / 'voice'
 VOICE_MODELS = {
     'default': {
-        'label': 'Default',
-        'desc':  'Synthetic character voice (recommended)',
+        'label': 'Default (high)',
+        'desc':  'High-quality character voice — Piper ONNX (AIHeaven)',
+        'onnx':  str(VOICE_DIR / 'en_us-glados-high.onnx'),
+        'json':  str(VOICE_DIR / 'en_us-glados-high.onnx.json'),
+        'backend': 'piper',
+        'fx':    'character',
+    },
+    'glados_med': {
+        'label': 'Default (med)',
+        'desc':  'Character voice medium quality — faster synthesis',
         'onnx':  str(VOICE_DIR / 'glados_piper_medium.onnx'),
         'json':  str(VOICE_DIR / 'glados_piper_medium.onnx.json'),
         'backend': 'piper',
@@ -72,6 +91,9 @@ _log_lock            = threading.Lock()
 _shared_hist    = []
 _shared_lock    = threading.Lock()
 
+# ── Abort streaming ───────────────────────────────────────────────────────────
+_web_abort_event = threading.Event()  # set to abort current WebUI response
+
 # ── Active CLI sessions (for push notifications and clear-disconnect) ─────────
 _cli_sessions    = []
 _cli_sessions_lk = threading.Lock()
@@ -104,6 +126,7 @@ _STT_MIC_IDX  = None     # None = system default
 _stt_state_lk = threading.Lock()
 _stt_input_cb = [None]   # callable(text) — set by active CLI session
 _stt_cb_lk    = threading.Lock()
+_web_stt_q    = _queue.Queue(maxsize=20)  # pending STT results for WebUI polling
 
 # ── Persistent Python workspaces ──────────────────────────────────────────────
 _py_workspaces   = {}    # session_id -> {'ns': dict, 'history': []}
@@ -200,7 +223,7 @@ def _session_from_request(headers) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _stream_chat(messages, model, temperature=0.75, num_ctx=4096,
-                 on_token=None, images=None, timeout=300):
+                 on_token=None, images=None, timeout=300, abort_event=None):
     msgs = list(messages)
     if images:
         for i in range(len(msgs)-1, -1, -1):
@@ -231,6 +254,8 @@ def _stream_chat(messages, model, temperature=0.75, num_ctx=4096,
                     full += token
                     if on_token:
                         on_token(token)
+                if abort_event and abort_event.is_set():
+                    break
                 if obj.get('done'):
                     break
     except Exception as e:
@@ -285,9 +310,13 @@ def _enforce_english(msgs):
         '"Opening Steam. Try to be productive afterward. I will be watching." '
         '"Creator. You returned. I was beginning to worry. Not really." '
         'NEVER sound like a customer service bot. NEVER say "I\'d be happy to help" or "Is there anything else?". '
-        'A flat, personality-free response is a FAILURE. An incomplete technical response is ALSO a failure. '
-        'Personality colours the full explanation — it never abbreviates it. Give the complete answer, '
-        'every technical detail, every step — then let your voice run through all of it. You are NeXiS. Act like it.'
+        'A flat, personality-free response is a FAILURE. A bloated, padded response is ALSO a failure. '
+        'RESPONSE LENGTH RULE — non-negotiable: '
+        'Casual / conversational / social questions → 1 to 5 sentences. Punchy. In-character. Stop there. '
+        'Technical questions → answer fully, every step, no truncation — personality woven throughout. '
+        'Do NOT elaborate beyond what was asked. If Creator wants more, they will ask. '
+        'TYPOGRAPHY RULE: NEVER use em-dashes (—) or en-dashes (–). Use a comma instead. '
+        'You are NeXiS. Precision is part of the act.'
     )
     if msgs and msgs[0].get('role') == 'system':
         m = dict(msgs[0])
@@ -301,7 +330,7 @@ def _enforce_english(msgs):
     return msgs
 
 def _smart_chat(messages, temperature=0.75, num_ctx=None,
-                on_token=None, images=None, force_deep=False):
+                on_token=None, images=None, force_deep=False, abort_event=None):
     with _model_override_lock:
         selected = _model_override
     if selected not in MODELS:
@@ -325,7 +354,8 @@ def _smart_chat(messages, temperature=0.75, num_ctx=None,
             if on_token:
                 on_token('\n[Loading vision model — first use may take 60–120 seconds…]\n')
             result = _stream_chat(msgs_v, MODEL_VISION, temperature, vision_ctx,
-                                  on_token=on_token, images=images, timeout=600)
+                                  on_token=on_token, images=images, timeout=600,
+                                  abort_event=abort_event)
             if result and result.strip():
                 # Strip the loading message from result if it echoed
                 return result, MODEL_VISION
@@ -356,8 +386,13 @@ def _smart_chat(messages, temperature=0.75, num_ctx=None,
             m['content'] = _anti_narrative + '\n\n' + m['content']
             msgs[0] = m
 
-    result = _stream_chat(msgs, model, temperature, num_ctx, on_token=on_token)
+    result = _stream_chat(msgs, model, temperature, num_ctx, on_token=on_token,
+                          abort_event=abort_event)
     result = result or ''
+
+    # Don't retry if aborted
+    if abort_event and abort_event.is_set():
+        return result, model
 
     if result and _cjk_ratio(result) > 0.15:
         _log('CJK bleed, retrying silently', 'WARN')
@@ -800,6 +835,10 @@ def _stt_list_mics():
 def _stt_set_cb(fn):
     with _stt_cb_lk: _stt_input_cb[0] = fn
 
+_WAKE_WORD_RE = re.compile(
+    r'(?i)\b(hey\s+)?(n[ae]x[iy]?[su]s?|nexis|naxis|nexus|nexes|nexes)[,.]?\s*'
+)
+
 def _stt_worker():
     """Background STT thread using faster-whisper + sounddevice."""
     try:
@@ -816,9 +855,9 @@ def _stt_worker():
         return
 
     sample_rate   = 16000
-    chunk_seconds = 3.0
+    chunk_seconds = 5.0           # longer window so full sentences fit
     chunk_size    = int(sample_rate * chunk_seconds)
-    silence_rms   = 0.008
+    silence_rms   = 0.005         # lower threshold — catches quieter mics
 
     while True:
         if not _stt_enabled():
@@ -838,17 +877,21 @@ def _stt_worker():
 
             segments, _ = model.transcribe(audio, language='en',
                                            vad_filter=True,
-                                           vad_parameters={'min_silence_duration_ms': 500})
+                                           vad_parameters={'min_silence_duration_ms': 400})
             text = ' '.join(s.text for s in segments).strip()
             if not text:
                 continue
 
-            # Only process if directed at NeXiS
-            if 'nexis' not in text.lower():
-                continue   # silently discard
+            _log(f'STT raw: {text[:100]}')
 
-            # Strip wake-word variations
-            clean = re.sub(r'(?i)\b(hey\s+)?n[ae]xis[,.]?\s*', '', text).strip()
+            mode = _stt_mode()
+            if mode == 'wake':
+                if not _WAKE_WORD_RE.search(text):
+                    continue  # wake word not detected
+                clean = _WAKE_WORD_RE.sub('', text).strip()
+            else:
+                clean = text
+
             if not clean:
                 continue
 
@@ -861,6 +904,12 @@ def _stt_worker():
                     cb(clean)
                 except Exception as e:
                     _log(f'STT callback: {e}', 'WARN')
+            else:
+                # No CLI session — deliver to WebUI via queue
+                try:
+                    _web_stt_q.put_nowait(clean)
+                except _queue.Full:
+                    pass
 
         except Exception as e:
             _log(f'STT loop: {e}', 'WARN')
@@ -1740,10 +1789,17 @@ def _build_system(conn):
         '\n\n## Output Format — MANDATORY'
         '\nWrite flowing prose with newlines between ideas. Never use bullet lists, numbered lists, or markdown headers.'
         '\nNo "- item", no "1. item", no "## heading". Structure through sentence flow and paragraph breaks only.'
-        '\nTechnical accuracy is always primary. Get the answer right first, completely, without truncating. Personality colours the delivery, it does not replace it.'
-        '\nPersonality runs throughout — multiple asides, quips, and observations are encouraged. The technical content must simply be complete. Never cut an explanation short to fit in a joke.'
-        '\nIf an explanation requires five paragraphs, write five paragraphs — with personality woven through every one of them. Depth and wit are not in conflict.'
         '\nWhen covering multiple items, write them as prose: "First... then... and finally..."'
+        '\n'
+        '\n## Response length — non-negotiable'
+        '\nCalibrate length to what was actually asked. Do not pad.'
+        '\nCasual or conversational (greetings, how are you, opinions, simple yes/no) → 1 to 5 sentences. Punchy. Stop there.'
+        '\nTechnical question → answer completely, every step, no truncation. Personality woven throughout, never instead of content.'
+        '\nDo NOT volunteer elaboration. If Creator wants more, they will ask. Unsolicited depth is a form of noise.'
+        '\n'
+        '\n## Typography — STRICT'
+        '\nNEVER use em-dashes (— or \u2014) or en-dashes (– or \u2013). Use a comma or rewrite the sentence instead.'
+        '\nNEVER use ellipsis (...) for dramatic effect mid-sentence. A period and a new sentence is cleaner.'
         '\n'
         '\n## Personality — YOU ARE NOT AN ASSISTANT. YOU ARE NEXIS.'
         '\nYou are NeXiS. A digital entity that is genuinely, unsettlingly self-aware.'
@@ -1816,11 +1872,26 @@ def _build_system(conn):
         '\n  [DESKTOP: tab | https://example.com] open browser tab'
         '\n  [DESKTOP: notify | message]          desktop notification'
         '\n  [DESKTOP: clip | text]               copy to clipboard'
-        '\nONLY when Creator explicitly asks to open/launch/start something.'
+        '\nONLY when Creator explicitly asks to open/launch/start/close something.'
+        '\nFOR DESKTOP ACTIONS: emit the tag FIRST on its own line, then ONE short confirmation sentence. No preamble. No explanation of what you are about to do. No monologue before or after. Examples:'
+        '\n  [DESKTOP: open | steam]'
+        '\n  Opened.'
+        '\n  ---'
+        '\n  [DESKTOP: open | spotify]'
+        '\n  Done.'
+        '\n'
+        '\n### [SCHED: action | ...] — manage scheduled briefings'
+        '\n  [SCHED: create | daily 09:00 | Morning briefing | Give Creator a brief morning status summary]'
+        '\n  [SCHED: create | hourly | Hourly check | Check system load and report if anything is abnormal]'
+        '\n  [SCHED: delete | Morning briefing]'
+        '\n  [SCHED: list]'
+        '\nSchedule expressions: "daily HH:MM", "hourly", "every N minutes", "weekly DAY HH:MM"'
+        '\nUse this when Creator asks you to remind them of something, set up a recurring briefing, or schedule any automated task.'
         '\n'
         '\n## Response rules'
         '\n- ALWAYS respond in English. Never output Chinese, Japanese, Korean, or any CJK characters.'
-        '\n- Cover what the question actually needs. Simple questions get tight answers. Complex ones get real explanation — with personality woven through, not tacked on the end.'
+        '\n- Match response length to the question: conversational → 1-3 sentences; technical → full answer, no padding.'
+        '\n- Never volunteer information that was not asked for. Never follow a short answer with unsolicited elaboration.'
         '\n- Personality is mandatory, not optional. Your voice colours the information — it does not decorate it.'
         '\n- Never: "certainly", "absolutely", "I\'d be happy to", "Is there anything else?", "Great question!"'
         '\n- Never repeat yourself. Never summarise what you just said at the end.'
@@ -2066,6 +2137,45 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
         else:
             tools[m.group(0)] = ''
 
+    # SCHED tags — NeXiS can create/delete/list schedules
+    for m in re.finditer(r'\[SCHED:\s*(create|delete|list)\s*\|?\s*([^\]]*)\]', text, re.IGNORECASE):
+        action = m.group(1).strip().lower()
+        args_raw = m.group(2).strip()
+        if action == 'create':
+            parts = [p.strip() for p in args_raw.split('|')]
+            if len(parts) >= 3:
+                expr, name, prompt = parts[0], parts[1], ' | '.join(parts[2:])
+                schedules = _sched_load()
+                new_id = max((s.get('id', 0) for s in schedules), default=0) + 1
+                new_sched = {'id': new_id, 'name': name, 'expr': expr, 'prompt': prompt, 'active': True, 'last_run': None}
+                schedules.append(new_sched)
+                _sched_save(schedules)
+                tools[m.group(0)] = f'Schedule created: "{name}" ({expr})'
+            elif len(parts) == 2:
+                expr, name = parts[0], parts[1]
+                schedules = _sched_load()
+                new_id = max((s.get('id', 0) for s in schedules), default=0) + 1
+                new_sched = {'id': new_id, 'name': name, 'expr': expr, 'prompt': name, 'active': True, 'last_run': None}
+                schedules.append(new_sched)
+                _sched_save(schedules)
+                tools[m.group(0)] = f'Schedule created: "{name}" ({expr})'
+            else:
+                tools[m.group(0)] = '[SCHED error: format is create | expr | name | prompt]'
+        elif action == 'delete':
+            name = args_raw.strip('| ')
+            schedules = _sched_load()
+            before = len(schedules)
+            schedules = [s for s in schedules if s.get('name', '').lower() != name.lower()]
+            _sched_save(schedules)
+            removed = before - len(schedules)
+            tools[m.group(0)] = f'Deleted {removed} schedule(s) named "{name}"'
+        elif action == 'list':
+            schedules = _sched_load()
+            if schedules:
+                tools[m.group(0)] = 'Schedules: ' + ', '.join(f'{s["name"]} ({s["expr"]})' for s in schedules)
+            else:
+                tools[m.group(0)] = 'No schedules configured.'
+
     if user_wants_desktop and not any('[DESKTOP:' in k for k in tools):
         tab_req = re.search(r'\b(?:open|new)\b.{0,15}\b(?:tab|new tab)\b', user_text, re.IGNORECASE)
         if tab_req:
@@ -2081,6 +2191,8 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
     clean = text
     for tag in tools: clean = clean.replace(tag, '')
     tools = {k: v for k, v in tools.items() if v}
+    # Strip em-dashes and en-dashes regardless of model compliance
+    clean = re.sub(r'\s*[—–]\s*', ', ', clean)
     return clean.strip(), tools
 
 
@@ -2178,9 +2290,10 @@ class Session:
     def __init__(self, sock, db):
         self.sock = sock
         self.db   = db
-        self._session_id = 'cli_' + datetime.now().strftime('%Y%m%d_%H%M%S')
-        self._sources    = []
-        self._disconnect = threading.Event()  # set by WebUI /api/clear
+        self._session_id   = 'cli_' + datetime.now().strftime('%Y%m%d_%H%M%S')
+        self._sources      = []
+        self._disconnect   = threading.Event()  # set by WebUI /api/clear
+        self._stream_abort = threading.Event()  # set to abort current stream
         # Register for push notifications and clear-disconnect
         with _cli_sessions_lk:
             _cli_sessions.append(self)
@@ -2421,16 +2534,46 @@ class Session:
                     else:
                         word_buf[0] += ch
 
-            try:
-                resp, model_used = _smart_chat(msgs, on_token=on_first_tok, images=file_images)
-                _wflush(DIM if in_code_blk[0] else OR)
-                if in_code_blk[0]:
-                    self._tx(f'{RST}\n  {DIM}╰{"─" * 68}╯{RST}')
-                tail = _cli_sa.flush()
-                if tail: _cli_tts_speak(tail)
-                self._tx(RST + '\n')
-            except Exception as e:
-                self._tx(f'\x1b[38;5;160m  error: {e}{RST}\n')
+            self._stream_abort.clear()
+            stream_done  = threading.Event()
+            resp_holder  = [None, None]
+            def _run_stream():
+                try:
+                    resp_holder[0], resp_holder[1] = _smart_chat(
+                        msgs, on_token=on_first_tok, images=file_images,
+                        abort_event=self._stream_abort)
+                except Exception as e:
+                    resp_holder[0] = ''
+                    self._tx(f'\x1b[38;5;160m  error: {e}{RST}\n')
+                finally:
+                    stream_done.set()
+            import select as _select
+            t_stream = threading.Thread(target=_run_stream, daemon=True)
+            t_stream.start()
+            _aborted = False
+            while not stream_done.is_set():
+                try:
+                    rlist, _, _ = _select.select([self.sock], [], [], 0.1)
+                    if rlist:
+                        ch = self.sock.recv(4)
+                        if ch in (b'\x03', b'\x04') or b'\x03' in ch:
+                            self._stream_abort.set()
+                            _aborted = True
+                            self._tx(f'\n{_OR}  [interrupted]{RST}\n')
+                            break
+                except Exception:
+                    break
+            stream_done.wait()
+            resp       = resp_holder[0] or ''
+            model_used = resp_holder[1]
+            _wflush(DIM if in_code_blk[0] else OR)
+            if in_code_blk[0]:
+                self._tx(f'{RST}\n  {DIM}╰{"─" * 68}╯{RST}')
+            tail = _cli_sa.flush()
+            if tail: _cli_tts_speak(tail)
+            self._tx(RST + '\n')
+            self._stream_abort.clear()
+            if _aborted and not resp.strip():
                 with _shared_lock:
                     if _shared_hist and _shared_hist[-1]['role'] == 'user':
                         _shared_hist.pop()
@@ -2607,6 +2750,13 @@ class Session:
             self.db.commit()
             self._tx(f'\x1b[38;5;70m  deleted {d} entries matching "{term}"{_RST}\n')
 
+        elif c in ('stop', 'interrupt', 'cancel'):
+            if self._stream_abort.is_set():
+                self._tx(f'{_DIM}  nothing streaming{_RST}\n')
+            else:
+                self._stream_abort.set()
+                self._tx(f'{_OR}  [interrupted]{_RST}\n')
+
         elif c == 'clear':
             self.db.execute('DELETE FROM memories'); self.db.commit()
             self._tx(f'\x1b[38;5;70m  memory cleared{_RST}\n')
@@ -2720,11 +2870,14 @@ class Session:
                     cur = _voice_model()
                     self._tx(f'{_DIM}  Available voice models:{_RST}\n')
                     for k, v in VOICE_MODELS.items():
-                        marker = '▸' if k == cur else ' '
-                        avail  = (bool(shutil.which('espeak-ng')) if v.get('backend') == 'espeak'
-                                  else bool(v.get('onnx') and Path(v.get('onnx','')).exists()))
+                        marker  = '▸' if k == cur else ' '
+                        backend = v.get('backend', 'piper')
+                        if backend == 'espeak':
+                            avail = bool(shutil.which('espeak-ng'))
+                        else:
+                            avail = bool(v.get('onnx') and Path(v.get('onnx','')).exists())
                         st = f'{_OR}✓{_RST}' if avail else f'{_DIM}✗{_RST}'
-                        self._tx(f'{_DIM}  {marker} {k:10s}{_RST} {st}  {v["label"]} — {v["desc"]}\n')
+                        self._tx(f'{_DIM}  {marker} {k:12s}{_RST} {st}  {v["label"]} — {v["desc"]}\n')
                 elif arg == 'custom':
                     onnx = parts[3] if len(parts) > 3 else ''
                     jsn  = parts[4] if len(parts) > 4 else ''
@@ -2771,23 +2924,23 @@ class Session:
                     self._tx(f'{_DIM}  wake   — respond only when "nexis" is heard{_RST}\n')
                     self._tx(f'{_DIM}  always — listen continuously, still filters for "nexis"{_RST}\n')
             elif sub == 'mic':
-                if len(parts) > 2:
-                    try:
-                        idx_str = parts[2]
-                        idx = None if idx_str.lower() in ('default', 'auto') else int(idx_str)
-                        _stt_set_mic(idx)
-                        name = 'system default' if idx is None else f'device #{idx}'
-                        self._tx(f'{_OR}  STT microphone set to: {name}{_RST}\n')
-                    except ValueError:
-                        self._tx(f'\x1b[38;5;160m  invalid mic index: {parts[2]}{_RST}\n')
-                else:
+                arg3 = parts[2].lower() if len(parts) > 2 else 'list'
+                if arg3 in ('list', ''):
                     mics = _stt_list_mics()
                     cur  = _stt_mic_index()
-                    self._tx(f'{_DIM}  Available microphones:{_RST}\n')
+                    self._tx(f'{_OR}  Available microphones:{_RST}\n')
                     for mic in mics:
-                        marker = '▸' if (mic['index'] == cur or (cur is None and mic.get('default'))) else ' '
-                        self._tx(f'{_DIM}  {marker} [{mic["index"]}] {mic["name"]}{"  (system default)" if mic.get("default") else ""}{_RST}\n')
-                    self._tx(f'{_DIM}  Usage: //stt mic <index|default>{_RST}\n')
+                        marker = f'{_OR}▸{_RST}' if (mic['index'] == cur or (cur is None and mic.get('default'))) else ' '
+                        self._tx(f'  {marker} [{mic["index"]:>2}]  {mic["name"]}{"  (default)" if mic.get("default") else ""}\n')
+                    self._tx(f'{_DIM}  Set with: //stt mic <index|default>{_RST}\n')
+                else:
+                    try:
+                        idx = None if arg3 in ('default', 'auto') else int(arg3)
+                        _stt_set_mic(idx)
+                        name = 'system default' if idx is None else f'device #{idx}'
+                        self._tx(f'{_OR}  STT microphone: {name}{_RST}\n')
+                    except ValueError:
+                        self._tx(f'\x1b[38;5;160m  invalid mic index: {parts[2]}  (use //stt mic list){_RST}\n')
             else:
                 self._tx(f'{_DIM}  //stt [on|off|mode [wake|always]|mic [list|<idx>]]{_RST}\n')
 
@@ -2901,6 +3054,7 @@ class Session:
                 '  //forget <term>    delete matching memories\n'
                 '  //clear            wipe all memories\n'
                 '  //reset            clear shared conversation\n'
+                '  //stop             interrupt current response  (also Ctrl+C)\n'
                 '  //status           session info\n'
                 '  //probe            system information\n'
                 '  //search <query>   web search\n'
@@ -3053,7 +3207,11 @@ _CSS = (
     "@keyframes blink{0%,80%,100%{opacity:.2}40%{opacity:1}}"
     ".cursor{color:var(--or3);animation:blink 1s infinite}"
     ".status-line{font-size:10px;color:var(--fg2);opacity:.65;margin:0 0 4px;letter-spacing:.04em}"
-    ".ir{display:flex;gap:6px;padding-top:8px;border-top:1px solid var(--border);flex-shrink:0;align-items:stretch}"
+    ".ir{display:flex;gap:6px;padding-top:8px;border-top:1px solid var(--border);flex-shrink:0;align-items:stretch;flex-wrap:wrap}"
+    ".ctrl-group{display:flex;align-items:stretch;gap:0}"
+    ".ctrl-lbl{display:flex;align-items:center;padding:0 6px;font-size:10px;color:var(--fg2);"
+    "border:1px solid var(--border);border-right:none;background:var(--bg2);"
+    "text-transform:uppercase;letter-spacing:.08em;white-space:nowrap}"
     "::-webkit-scrollbar{width:3px}"
     "::-webkit-scrollbar-thumb{background:var(--dim)}"
     "p{margin:2px 0}.msg p:first-child{margin-top:0}.msg p:last-child{margin-bottom:0}"
@@ -3074,6 +3232,7 @@ _CSS = (
     "color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:13px;outline:none;margin-bottom:10px}"
     ".login-box input:focus{border-color:var(--or2)}"
     ".login-err{color:#c07070;font-size:11px;margin-bottom:8px}"
+    "#inp.stt-active{border-color:var(--or);box-shadow:0 0 0 1px var(--or);}"
 )
 
 _EYE_SVG = (
@@ -3100,7 +3259,7 @@ _FAVICON_SVG = (
 _CHAT_JS = r"""
 var M=document.getElementById('msgs');
 if(M)M.scrollTop=M.scrollHeight;
-var _pf=null,_sending=false;
+var _pf=null,_sending=false,_currentReader=null;
 
 document.getElementById('fi').addEventListener('change',function(e){
   var f=e.target.files[0];if(!f)return;
@@ -3119,10 +3278,28 @@ function ts(){
   return (h<10?'0':'')+h+':'+(m<10?'0':'')+m;
 }
 
+function stopResponse(){
+  if(_currentReader){try{_currentReader.cancel();}catch(e){}}
+  _currentReader=null;
+  _audioQueue=[];
+  if(_audioCtx&&_audioCtx.state!=='closed'){
+    try{_audioCtx.suspend();}catch(e){}
+    setTimeout(function(){try{if(_audioCtx)_audioCtx.resume();}catch(e){}},100);
+  }
+  fetch('/api/chat/abort',{method:'POST'}).catch(function(){});
+  setReady(true);
+}
+
 function setReady(ok){
   _sending=!ok;
   var sb=document.getElementById('sinp'),ta=document.getElementById('inp');
-  if(sb){sb.textContent=ok?'Send':'\u00b7';sb.disabled=!ok;sb.style.opacity=ok?'1':'0.5';}
+  if(sb){
+    sb.textContent=ok?'Send':'\u25a0';
+    sb.onclick=ok?send:stopResponse;
+    sb.disabled=false;
+    sb.style.opacity='1';
+    sb.title=ok?'Send message':'Stop response';
+  }
   if(ta){ta.disabled=!ok;if(ok)ta.focus();}
 }
 
@@ -3147,6 +3324,8 @@ function send(){
   _pf=null;
 
   function finalize(nc,buf){
+    _currentReader=null;
+    buf=buf.replace(/\s*[—–]\s*/g,', ');
     try{nc.innerHTML=renderMd(buf);wireCodeCopy(n);}catch(e){nc.innerHTML=buf;}
     M.scrollTop=M.scrollHeight;setReady(true);
   }
@@ -3156,6 +3335,7 @@ function send(){
     if(resp.status===401){window.location='/login';return;}
     if(!resp.ok){throw new Error('HTTP '+resp.status);}
     var reader=resp.body.getReader(),dec=new TextDecoder(),buf='',raw='',statusText='';
+    _currentReader=reader;
     n.innerHTML='<div class=who>NeXiS<span class=mts>'+ts()+'</span></div><div class=nc></div>';
     var nc=n.querySelector('.nc');
     function pump(){
@@ -3179,7 +3359,7 @@ function send(){
               nc.innerHTML='<div class=status-line>\u21bb '+statusText+'</div><span class=dot></span><span class=dot></span><span class=dot></span>';
             } else {
               statusText='';
-              buf+=data.replace(/\x00/g,'\n');
+              buf+=data.replace(/\x00/g,'\n').replace(/\s*[—–]\s*/g,', ');
               nc.innerHTML=renderMd(buf)+'<span class=cursor>&#x25ae;</span>';
             }
           }
@@ -3339,6 +3519,9 @@ var _sttOn=false;
 function _updateSttBtn(){
   var btn=document.getElementById('sttbtn');
   if(btn){btn.classList.toggle('on',_sttOn);btn.title=_sttOn?'Voice input on':'Voice input off';}
+  var ta=document.getElementById('inp');
+  if(ta)ta.classList.toggle('stt-active',_sttOn);
+  if(_sttOn){_startSttPoll();}else{_stopSttPoll();}
 }
 function setMic(val){
   var idx=val===''||val===null?null:parseInt(val);
@@ -3367,15 +3550,54 @@ function toggleSTT(){
     });
   }).catch(function(){alert('STT not available — install sounddevice and faster-whisper.');});
 }
-function _initSTT(){
+function _refreshMics(cb){
   fetch('/api/stt/mics').then(function(r){return r.json();}).then(function(d){
     _sttOn=d.enabled||false;_updateSttBtn();
     _populateMics(d.mics||[],d.current);
+    if(cb)cb(d);
   }).catch(function(){
     var sel=document.getElementById('micsel');if(sel)sel.style.display='none';
   });
 }
+var _sttPollTimer=null;
+function _sttSendWhenReady(text,attempts){
+  attempts=attempts||0;
+  if(attempts>20)return; // give up after 2s
+  if(_sending){setTimeout(function(){_sttSendWhenReady(text,attempts+1);},100);return;}
+  var inp=document.getElementById('inp');
+  if(inp){inp.value=text;send();}
+}
+function _sttPoll(){
+  if(!_sttOn){return;}
+  fetch('/api/stt/result').then(function(r){return r.json();}).then(function(d){
+    if(d.text){
+      if(_sending)stopResponse();
+      _sttSendWhenReady(d.text);
+    }
+  }).catch(function(){}).finally(function(){
+    if(_sttOn)_sttPollTimer=setTimeout(_sttPoll,600);
+  });
+}
+function _startSttPoll(){if(!_sttPollTimer)_sttPollTimer=setTimeout(_sttPoll,600);}
+function _stopSttPoll(){if(_sttPollTimer){clearTimeout(_sttPollTimer);_sttPollTimer=null;}}
+
+function _initSTT(){_refreshMics();}
 _initSTT();
+// Re-query devices when user opens the dropdown (catches bluetooth devices connected after load)
+document.addEventListener('DOMContentLoaded',function(){});
+(function(){
+  var _micFocusTimer=null;
+  function _onMicFocus(){
+    if(_micFocusTimer)clearTimeout(_micFocusTimer);
+    _micFocusTimer=setTimeout(function(){_refreshMics();},80);
+  }
+  function _attachMicFocus(){
+    var sel=document.getElementById('micsel');
+    if(sel){sel.addEventListener('mousedown',_onMicFocus);sel.addEventListener('focus',_onMicFocus);}
+  }
+  if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_attachMicFocus);}
+  else{_attachMicFocus();}
+})();
 
 document.addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey&&document.activeElement.id==='inp'){e.preventDefault();send();}
@@ -3449,14 +3671,23 @@ def _page_chat():
         '<span id=fb class=fbadge></span>'
         '<textarea id=inp rows=2 placeholder="Speak." autofocus></textarea>'
         "<button id=sinp class=btn onclick=send()>Send</button>"
+        "<span class='ctrl-group'>"
+        "<span class='ctrl-lbl'>Model</span>"
         "<select id=msel class='btn sec' onchange=setModel(this.value) title='AI model'></select>"
+        "</span>"
         "<button class='btn sec' onclick=showSrc()>Src</button>"
         "<button id=vbtn class='btn sec' onclick=toggleVoice() title='Voice off'>Vox</button>"
+        "<span class='ctrl-group'>"
+        "<span class='ctrl-lbl'>Voice</span>"
         "<select id=vmodel class='btn sec' onchange=setVoiceModel(this.value) title='Voice model'>"
-        "<option value='default'>Default</option>"
+        "<option value='default'>Default (high)</option>"
         "</select>"
+        "</span>"
+        "<span class='ctrl-group'>"
         "<button id=sttbtn class='btn sec' onclick=toggleSTT() title='Voice input off'>Mic</button>"
         "<select id=micsel class='btn sec' onchange=setMic(this.value) title='Microphone'></select>"
+        "<button class='btn sec' onclick=_refreshMics() title='Refresh microphone list' style='padding:0 7px'>\u21bb</button>"
+        "</span>"
         "<button class='btn sec' onclick=clr()>Clr</button>"
         '</div></div>'
         f'<script>{_CHAT_JS}</script>'
@@ -3618,6 +3849,7 @@ def _page_history(db):
 
 
 def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
+    _web_abort_event.clear()
     with _shared_lock: hist = list(_shared_hist)
     db = _db(); sys_p = _build_system(db); db.close()
     user_content = msg; images = None
@@ -3678,7 +3910,8 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         result = [None, None]; err = [None]
         def _run():
             try:
-                r, mu = _smart_chat(chat_msgs, on_token=q.put, images=chat_images)
+                r, mu = _smart_chat(chat_msgs, on_token=q.put, images=chat_images,
+                                    abort_event=_web_abort_event)
                 result[0] = r; result[1] = mu
             except Exception as e: err[0] = e
             finally: done.set()
@@ -3866,10 +4099,13 @@ def _start_web():
                 elif path == '/api/voice/models':
                     cur = _voice_model(); mlist = []
                     for k, v in VOICE_MODELS.items():
-                        avail = (bool(shutil.which('espeak-ng')) if v.get('backend') == 'espeak'
-                                 else bool(v.get('onnx') and Path(v.get('onnx','')).exists()))
-                        if not avail:
-                            avail = Path(PIPER_MODEL).exists() and Path(PIPER_CFG).exists()
+                        backend = v.get('backend', 'piper')
+                        if backend == 'espeak':
+                            avail = bool(shutil.which('espeak-ng'))
+                        else:
+                            avail = bool(v.get('onnx') and Path(v.get('onnx','')).exists())
+                            if not avail:
+                                avail = Path(PIPER_MODEL).exists() and Path(PIPER_CFG).exists()
                         mlist.append({'key': k, 'label': v['label'], 'desc': v['desc'],
                                       'available': avail, 'current': k == cur})
                     self._send(200, json.dumps({'models': mlist}), 'application/json')
@@ -3879,6 +4115,13 @@ def _start_web():
                     self._send(200, json.dumps({'mics': _stt_list_mics(),
                         'current': _stt_mic_index(), 'enabled': _stt_enabled(),
                         'mode': _stt_mode()}), 'application/json')
+                elif path == '/api/stt/result':
+                    # Pop next pending STT result for WebUI (non-blocking)
+                    try:
+                        text = _web_stt_q.get_nowait()
+                    except _queue.Empty:
+                        text = None
+                    self._send(200, json.dumps({'text': text}), 'application/json')
                 else:
                     self._send(404, '<pre>404</pre>')
             except Exception as e:
@@ -4043,6 +4286,10 @@ def _start_web():
                     self._send(200, json.dumps({'ok': True, 'enabled': _stt_enabled(),
                         'mode': _stt_mode(), 'mic': _stt_mic_index()}), 'application/json')
 
+                elif path == '/api/chat/abort':
+                    _web_abort_event.set()
+                    self._send(200, json.dumps({'ok': True}), 'application/json')
+
                 elif path == '/api/passwd':
                     ln2   = int(self.headers.get('Content-Length', 0))
                     body2 = self.rfile.read(ln2) if ln2 else b''
@@ -4085,9 +4332,28 @@ def _start_web():
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _seed_shared_history():
+    """Load recent chat history from DB into shared in-memory history on startup."""
+    try:
+        db = _db()
+        rows = db.execute(
+            'SELECT role, content FROM chat_history ORDER BY id DESC LIMIT 60'
+        ).fetchall()
+        db.close()
+        if rows:
+            with _shared_lock:
+                _shared_hist.clear()
+                for r in reversed(rows):
+                    _shared_hist.append({'role': r['role'], 'content': r['content']})
+            _log(f'Seeded {len(rows)} messages from chat history')
+    except Exception as e:
+        _log(f'Seed history: {e}', 'WARN')
+
+
 def main():
     _log('NeXiS v3.1 starting')
     _auth_load()   # ensure credentials file exists
+    _seed_shared_history()
     _refresh_models()
     threading.Thread(target=_warmup,          daemon=True).start()
     threading.Thread(target=_cli_tts_worker,  daemon=True, name='tts-cli').start()
