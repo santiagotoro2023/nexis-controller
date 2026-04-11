@@ -93,6 +93,8 @@ _tts_voice_obj      = [None]
 _tts_voice_key      = [None]
 _tts_voice_obj_lk   = threading.Lock()
 _tts_last_error     = [None]   # last piper load error string, shown in /api/voice
+_tts_speed          = [0.85]  # piper length_scale; lower = faster
+_tts_playing        = threading.Event()  # set while audio is playing
 _cli_tts_q          = _queue.Queue(maxsize=8)
 _tts_current_proc   = [None]
 _tts_current_proc_lk = threading.Lock()
@@ -112,6 +114,10 @@ _py_ws_lock      = threading.Lock()
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 _sched_lock = threading.Lock()
+
+# ── Process watchdog ──────────────────────────────────────────────────────────
+_watchers     = {}   # name -> {'thread': t, 'stop': Event, 'interval': int}
+_watchers_lk  = threading.Lock()
 
 # ── Research sources cache ────────────────────────────────────────────────────
 _last_sources      = []
@@ -194,6 +200,26 @@ def _session_from_request(headers) -> str:
         if part.startswith('_nexis_session='):
             return part[len('_nexis_session='):]
     return ''
+
+
+# ── Bearer token (persistent API token for Android / API clients) ─────────────
+_API_TOKEN_KEY = 'api_token'
+
+def _api_token_get() -> str | None:
+    return _auth_load().get(_API_TOKEN_KEY)
+
+def _api_token_create() -> str:
+    token = secrets.token_hex(32)
+    creds = _auth_load()
+    creds[_API_TOKEN_KEY] = token
+    AUTH_FILE.write_text(json.dumps(creds, indent=2))
+    return token
+
+def _api_token_valid(token: str) -> bool:
+    if not token:
+        return False
+    stored = _api_token_get()
+    return stored is not None and secrets.compare_digest(stored, token)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -639,9 +665,11 @@ def _tts_synth(text: str):
 
     if voice:
         try:
+            from piper.config import SynthesisConfig
             buf = io.BytesIO()
             with wave.open(buf, 'wb') as wf:
-                voice.synthesize_wav(rhythm_text, wf)
+                voice.synthesize_wav(rhythm_text, wf,
+                                     syn_config=SynthesisConfig(length_scale=_tts_speed[0]))
             wav_bytes = buf.getvalue()
             if len(wav_bytes) > 44:
                 return _tts_apply_effects(wav_bytes, fx)
@@ -683,6 +711,7 @@ def _tts_play_local(wav_bytes: bytes):
             except Exception: pass
         _tts_current_proc[0] = None
 
+    _tts_playing.set()
     inp = None
     if shutil.which('paplay'):
         try:
@@ -712,6 +741,7 @@ def _tts_play_local(wav_bytes: bytes):
                 _log(f'TTS aplay rc={rc2}: {stderr2.decode(errors="replace").strip()[:120]}', 'WARN')
         except Exception as e:
             _log(f'TTS aplay: {e}', 'WARN')
+    _tts_playing.clear()
 
 
 class _SentenceAccum:
@@ -820,14 +850,35 @@ _stt_conv_active  = [False]   # True = in conversation mode, skip wake word
 _stt_conv_ts      = [0.0]     # timestamp of last speech in conversation
 _STT_CONV_TIMEOUT = 30.0      # seconds of silence before leaving conversation
 
+_whisper_model = [None]  # shared pre-loaded model
+
+def _warmup_whisper():
+    """Pre-load Whisper at daemon start so first utterance has no delay."""
+    try:
+        from faster_whisper import WhisperModel
+        import numpy as np
+        m = WhisperModel('small', device='cpu', compute_type='int8')
+        # Warm-up pass: transcribe silent audio so model is JIT-compiled
+        silence = np.zeros(16000, dtype='float32')
+        list(m.transcribe(silence, language='en')[0])
+        _whisper_model[0] = m
+        _log('STT: whisper/small warmed up')
+    except Exception as e:
+        _log(f'STT warmup: {e}', 'WARN')
+
 def _stt_worker():
     """Background STT thread using faster-whisper + sounddevice."""
     try:
         import sounddevice as sd
         import numpy as np
         from faster_whisper import WhisperModel
-        model = WhisperModel('base', device='cpu', compute_type='int8')
-        _log('STT: faster-whisper base model loaded')
+        # Wait up to 30s for pre-loaded model, otherwise load own instance
+        for _ in range(60):
+            if _whisper_model[0] is not None:
+                break
+            time.sleep(0.5)
+        model = _whisper_model[0] or WhisperModel('small', device='cpu', compute_type='int8')
+        _log('STT: worker ready')
     except ImportError as e:
         _log(f'STT: missing dependency ({e}) — install sounddevice faster-whisper', 'WARN')
         return
@@ -835,10 +886,12 @@ def _stt_worker():
         _log(f'STT init: {e}', 'WARN')
         return
 
-    sample_rate   = 16000
-    chunk_seconds = 5.0           # longer window so full sentences fit
-    chunk_size    = int(sample_rate * chunk_seconds)
-    silence_rms   = 0.005         # lower threshold — catches quieter mics
+    sample_rate    = 16000
+    silence_rms    = 0.005   # RMS below this = silence
+    pre_frames     = 3       # ~90ms pre-roll to catch start of speech
+    max_seconds    = 8.0     # hard cap per utterance
+    step_size      = 512     # samples per poll (~32ms)
+    silence_frames = 20      # ~640ms of consecutive silence → end of utterance
 
     while True:
         if not _stt_enabled():
@@ -846,19 +899,62 @@ def _stt_worker():
             continue
         try:
             mic = _stt_mic_index()
-            audio = sd.rec(chunk_size, samplerate=sample_rate, channels=1,
-                           dtype='float32', device=mic)
-            sd.wait()
-            audio = audio.flatten()
 
-            # Skip silent chunks
-            rms = float(((audio ** 2).mean()) ** 0.5)
-            if rms < silence_rms:
+            # VAD-gated recording: stream until silence after speech
+            ring = []          # rolling pre-roll buffer
+            recording = []
+            in_speech = False
+            silent_count = 0
+            total_samples = 0
+            max_samples = int(sample_rate * max_seconds)
+
+            with sd.InputStream(samplerate=sample_rate, channels=1,
+                                 dtype='float32', device=mic,
+                                 blocksize=step_size) as stream:
+                while True:
+                    chunk, _ = stream.read(step_size)
+                    chunk = chunk.flatten()
+                    rms = float(((chunk ** 2).mean()) ** 0.5)
+
+                    if not in_speech:
+                        ring.append(chunk)
+                        if len(ring) > pre_frames:
+                            ring.pop(0)
+                        if rms >= silence_rms:
+                            in_speech = True
+                            # Interrupt TTS if it's currently playing
+                            if _tts_playing.is_set():
+                                with _tts_current_proc_lk:
+                                    p = _tts_current_proc[0]
+                                    if p:
+                                        try: p.terminate()
+                                        except Exception: pass
+                                try:
+                                    while True: _cli_tts_q.get_nowait()
+                                except _queue.Empty: pass
+                                _log('STT: interrupted TTS playback')
+                            recording.extend(ring)
+                            recording.append(chunk)
+                            silent_count = 0
+                            total_samples = sum(len(c) for c in recording)
+                    else:
+                        recording.append(chunk)
+                        total_samples += len(chunk)
+                        if rms < silence_rms:
+                            silent_count += 1
+                        else:
+                            silent_count = 0
+                        if silent_count >= silence_frames or total_samples >= max_samples:
+                            break
+
+            if not in_speech:
                 continue
+
+            audio = np.concatenate(recording)
 
             segments, _ = model.transcribe(audio, language='en',
                                            vad_filter=True,
-                                           vad_parameters={'min_silence_duration_ms': 400})
+                                           vad_parameters={'min_silence_duration_ms': 300})
             text = ' '.join(s.text for s in segments).strip()
             if not text:
                 continue
@@ -999,8 +1095,7 @@ def _sched_execute(sched: dict):
         with _shared_lock:
             _shared_hist.append({'role': 'user',      'content': header})
             _shared_hist.append({'role': 'assistant',  'content': result})
-            if len(_shared_hist) > 120:
-                del _shared_hist[:40]
+        _maybe_summarize_history()
         # Push to active CLI sessions
         OR  = '\x1b[38;5;208m'
         DIM = '\x1b[2m\x1b[38;5;240m'
@@ -1022,6 +1117,40 @@ def _sched_execute(sched: dict):
             pass
     except Exception as e:
         _log(f'Scheduler execute "{name}": {e}', 'WARN')
+
+def _watch_service(name: str, stop_event: threading.Event, interval: int = 30):
+    """Monitor a systemd service or process name. Notify on state changes."""
+    last_state = None
+    while not stop_event.wait(interval):
+        try:
+            # Try systemd first
+            r = subprocess.run(['systemctl', 'is-active', name],
+                               capture_output=True, text=True, timeout=5)
+            state = r.stdout.strip()
+        except Exception:
+            # Fall back to checking process list
+            r2 = subprocess.run(['pgrep', '-x', name],
+                                capture_output=True, text=True, timeout=5)
+            state = 'active' if r2.returncode == 0 else 'inactive'
+
+        if last_state is not None and state != last_state:
+            msg = f'[WATCH] {name}: {last_state} -> {state}'
+            _log(msg, 'WARN')
+            # Desktop notification
+            try:
+                subprocess.Popen(['notify-send', '-u', 'critical',
+                                  f'NeXiS Watch: {name}', f'State changed: {last_state} -> {state}'],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            # Push to all CLI sessions
+            with _cli_sessions_lk:
+                for sess in list(_cli_sessions):
+                    try:
+                        sess._tx(f'\n\x1b[38;5;160m  [WATCH] {name}: {last_state} -> {state}\x1b[0m\n')
+                    except Exception:
+                        pass
+        last_state = state
 
 def _scheduler_thread():
     """Runs every 30 s; fires any due schedules."""
@@ -1447,6 +1576,14 @@ def _db():
             content TEXT NOT NULL,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS doc_index (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            chunk_idx INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            indexed_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(path, chunk_idx)
+        );
     """)
     conn.commit()
     return conn
@@ -1493,6 +1630,32 @@ def _store_memory(conn, messages):
 def _get_memories(conn, limit=20):
     rows = conn.execute('SELECT content FROM memories ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
     return [r['content'] for r in rows]
+
+def _get_relevant_memories(conn, query: str, limit=12) -> list:
+    """Return memories relevant to query via keyword overlap, fall back to recent."""
+    all_rows = conn.execute('SELECT content FROM memories ORDER BY id DESC').fetchall()
+    if not all_rows:
+        return []
+    # Tokenise query into meaningful words (≥4 chars)
+    q_words = set(w.lower() for w in re.findall(r'\b\w{4,}\b', query))
+    if not q_words:
+        return [r['content'] for r in all_rows[:limit]]
+    scored = []
+    for r in all_rows:
+        m_words = set(w.lower() for w in re.findall(r'\b\w{4,}\b', r['content']))
+        score = len(q_words & m_words)
+        scored.append((score, r['content']))
+    scored.sort(key=lambda x: -x[0])
+    # Always include top keyword matches + pad with recent ones
+    top = [c for s, c in scored if s > 0][:limit]
+    if len(top) < 4:
+        recent = [r['content'] for r in all_rows[:limit]]
+        for m in recent:
+            if m not in top:
+                top.append(m)
+            if len(top) >= limit:
+                break
+    return top[:limit]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1592,6 +1755,30 @@ def _youtube_latest(query):
         if sr and not sr.startswith('No results'): return sr
     except Exception: pass
     return ''
+
+
+def _get_location() -> str:
+    """Get approximate location from IP geolocation."""
+    try:
+        with urllib.request.urlopen('https://ipinfo.io/json', timeout=4) as r:
+            d = json.loads(r.read())
+            city = d.get('city', '')
+            region = d.get('region', '')
+            country = d.get('country', '')
+            return f"{city}, {region}, {country}".strip(', ')
+    except Exception:
+        return ''
+
+def _get_weather(location: str = '') -> str:
+    """Fetch weather summary from wttr.in."""
+    try:
+        loc = urllib.parse.quote(location) if location else ''
+        url = f'https://wttr.in/{loc}?format=3'
+        req = urllib.request.Request(url, headers={'User-Agent': 'curl/7.68'})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            return r.read().decode('utf-8', 'replace').strip()
+    except Exception:
+        return ''
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1776,9 +1963,7 @@ def _build_system(conn):
             return cached['prompt']
 
     p    = personality_raw
-    mems = _get_memories(conn)
-    if mems:
-        p += '\n\n## What you remember about Creator\n' + '\n'.join(f'- {m}' for m in mems)
+    # Memories injected per-query via _inject_memories() — not cached here
     p += (
         '\n\n## Output Format — MANDATORY'
         '\nWrite flowing prose with newlines between ideas. Never use bullet lists, numbered lists, or markdown headers.'
@@ -1874,6 +2059,10 @@ def _build_system(conn):
         '\n  [DESKTOP: open | spotify]'
         '\n  Done.'
         '\n'
+        '\n### [WATCH: service] — monitor a service/process'
+        '\nEmit when Creator asks to monitor something, or when it would be useful (e.g. "keep an eye on nginx", "let me know if X crashes").'
+        '\nAlso proactively suggest it: if Creator mentions a service and monitoring seems useful, ask "Want me to watch [service] for state changes?"'
+        '\n'
         '\n### [SCHED: action | ...] — manage scheduled briefings'
         '\n  [SCHED: create | daily 09:00 | Morning briefing | Give Creator a brief morning status summary]'
         '\n  [SCHED: create | hourly | Hourly check | Check system load and report if anything is abnormal]'
@@ -1909,6 +2098,115 @@ def _build_system(conn):
         _sys_p_cache['mem_count'] = mc
         _sys_p_cache['personality'] = personality_raw
     return p
+
+
+_INDEX_EXTS = {'.py', '.js', '.ts', '.md', '.txt', '.sh', '.json', '.yaml', '.yml',
+               '.toml', '.rs', '.go', '.java', '.cpp', '.c', '.h', '.css', '.html',
+               '.xml', '.sql', '.env', '.conf', '.cfg', '.ini', '.log'}
+
+def _index_file(conn, path: str) -> int:
+    """Chunk a file and store in doc_index. Returns chunk count."""
+    try:
+        text = Path(path).read_text(errors='replace')
+    except Exception:
+        return 0
+    chunk_size = 800
+    overlap    = 100
+    words      = text.split()
+    chunks     = []
+    i = 0
+    while i < len(words):
+        chunk = ' '.join(words[i:i+chunk_size])
+        chunks.append(chunk)
+        i += chunk_size - overlap
+    for idx, chunk in enumerate(chunks):
+        conn.execute(
+            'INSERT OR REPLACE INTO doc_index (path, chunk_idx, content) VALUES (?,?,?)',
+            (path, idx, chunk)
+        )
+    conn.commit()
+    return len(chunks)
+
+def _index_path(path_str: str) -> tuple:
+    """Index a file or directory. Returns (files_indexed, chunks_total)."""
+    conn = _db()
+    p = Path(path_str).expanduser()
+    files, chunks = 0, 0
+    if p.is_file():
+        if p.suffix.lower() in _INDEX_EXTS:
+            n = _index_file(conn, str(p))
+            if n: files, chunks = 1, n
+    elif p.is_dir():
+        for fp in p.rglob('*'):
+            if fp.is_file() and fp.suffix.lower() in _INDEX_EXTS:
+                # Skip common noise dirs
+                if any(part in ('.git','node_modules','__pycache__','.venv','venv')
+                       for part in fp.parts):
+                    continue
+                n = _index_file(conn, str(fp))
+                if n:
+                    files += 1; chunks += n
+    conn.close()
+    return files, chunks
+
+def _search_doc_index(conn, query: str, limit: int = 5) -> list:
+    """Return relevant doc chunks for a query."""
+    q_words = set(w.lower() for w in re.findall(r'\b\w{4,}\b', query))
+    if not q_words:
+        return []
+    rows = conn.execute('SELECT path, content FROM doc_index').fetchall()
+    scored = []
+    for r in rows:
+        m_words = set(w.lower() for w in re.findall(r'\b\w{4,}\b', r['content']))
+        score = len(q_words & m_words)
+        if score > 0:
+            scored.append((score, r['path'], r['content']))
+    scored.sort(key=lambda x: -x[0])
+    return scored[:limit]
+
+def _maybe_summarize_history():
+    """If shared history is too long, compress oldest messages into a summary."""
+    with _shared_lock:
+        if len(_shared_hist) < 32:
+            return
+        to_summarize = _shared_hist[:16]
+        del _shared_hist[:16]
+
+    # Build a summary prompt
+    convo = '\n'.join(
+        f"{'User' if m['role']=='user' else 'NeXiS'}: {m['content'][:300]}"
+        for m in to_summarize
+    )
+    prompt = f"Summarize this conversation excerpt in 3-5 sentences, preserving key facts, decisions, and context that would be useful for future turns:\n\n{convo}"
+
+    summary = ''
+    try:
+        with _model_override_lock: model_key = _model_override
+        model_name = MODELS.get(model_key, MODELS['fast'])['name']
+        msgs = [{'role': 'user', 'content': prompt}]
+        for tok in _stream_chat(msgs, model_name):
+            summary += tok
+    except Exception as e:
+        _log(f'History summarize: {e}', 'WARN')
+        return
+
+    if summary.strip():
+        with _shared_lock:
+            _shared_hist.insert(0, {'role': 'system', 'content': f'[Earlier conversation summary]: {summary.strip()}'})
+        _log(f'History summarized: {len(to_summarize)} messages -> 1 summary')
+
+def _inject_memories(sys_p: str, conn, query: str) -> str:
+    mems = _get_relevant_memories(conn, query)
+    doc_chunks = _search_doc_index(conn, query, limit=3)
+
+    extra = ''
+    if mems:
+        extra += '\n\n## What you remember about Creator\n' + '\n'.join(f'- {m}' for m in mems)
+    if doc_chunks:
+        extra += '\n\n## Relevant indexed documents\n'
+        for score, path, chunk in doc_chunks:
+            extra += f'\n[{Path(path).name}]\n{chunk[:600]}\n'
+    return sys_p + extra if extra else sys_p
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2131,6 +2429,18 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
         else:
             tools[m.group(0)] = ''
 
+    # [WATCH: service]
+    for m in re.finditer(r'\[WATCH:\s*([^\]]+)\]', text):
+        name = m.group(1).strip().lower()
+        with _watchers_lk:
+            if name not in _watchers:
+                stop_ev = threading.Event()
+                t = threading.Thread(target=_watch_service, args=(name, stop_ev), daemon=True)
+                t.start()
+                _watchers[name] = {'thread': t, 'stop': stop_ev}
+                _log(f'WATCH: started monitoring {name}')
+        clean = clean.replace(m.group(0), '').strip()
+
     # SCHED tags — NeXiS can create/delete/list schedules
     for m in re.finditer(r'\[SCHED:\s*(create|delete|list)\s*\|?\s*([^\]]*)\]', text, re.IGNORECASE):
         action = m.group(1).strip().lower()
@@ -2329,23 +2639,23 @@ class Session:
     ]
 
     def _banner_body(self, mc, sc):
-        OR  = _OR; DIM = _DIM; RST = _RST
-        W   = 50; bar = '─' * W
-        now = datetime.now().strftime('%H:%M')
+        OR  = _OR; DIM = _DIM; RST = _RST; OR2 = _OR2
+        W   = 52; bar = '─' * W
+        now = datetime.now().strftime('%H:%M  %a %d %b')
         with _model_override_lock: sel = _model_override
         label = MODELS.get(sel, {}).get('label', sel)
         host  = _socket.gethostname()
-        L = self._LOGO; sep = '─' * 34
-        stt_ind = f'  {_OR2}[STT]{RST}' if _stt_enabled() else ''
+        L = self._LOGO
+        voice_st = f'{OR2}vox{RST}' if _voice_enabled() else f'{DIM}vox{RST}'
+        stt_st   = f'{OR2}mic{RST}' if _stt_enabled()   else f'{DIM}mic{RST}'
         return (
             f'{DIM}  {bar}{RST}\n'
             f'  {OR}{L[0]}{RST}  {OR}◈  N e X i S{RST}  {DIM}v3.1{RST}\n'
-            f'  {OR}{L[1]}{RST}  {DIM}{sep}{RST}\n'
-            f'  {OR}{L[2]}{RST}  {DIM}#{sc+1}  ·  {now}  ·  {mc} mem  ·  {label}{RST}{stt_ind}\n'
-            f'  {OR}{L[3]}{RST}  {DIM}http://{host}:8080{RST}\n'
-            f'  {OR}{L[4]}{RST}  {DIM}//help  ·  //switch  ·  //exit{RST}\n'
-            f'{DIM}  {bar}{RST}\n'
-            '\n'
+            f'  {OR}{L[1]}{RST}  {DIM}{"─"*34}{RST}\n'
+            f'  {OR}{L[2]}{RST}  {DIM}{now}  ·  {mc} mem  ·  #{sc+1}{RST}\n'
+            f'  {OR}{L[3]}{RST}  {DIM}model:{RST} {label}  {voice_st}  {stt_st}\n'
+            f'  {OR}{L[4]}{RST}  {DIM}http://{host}:8080  ·  //help{RST}\n'
+            f'{DIM}  {bar}{RST}\n\n'
         )
 
     def _banner(self, mc, sc):
@@ -2414,7 +2724,8 @@ class Session:
                 self._tx(f'\n{OR}  [session cleared by WebUI — disconnecting]{RST}\n')
                 break
 
-            self._tx(f'\n  {OR}▸{RST}  ')
+            conv_tag = f' {DIM}[conv]{RST}' if _stt_conv_active[0] else ''
+            self._tx(f'\n  {OR}▸{RST}{conv_tag}  ')
 
             # Non-blocking: check inject queue, then STT queue
             try:
@@ -2463,7 +2774,7 @@ class Session:
 
             with _shared_lock:
                 _shared_hist.append({'role': 'user', 'content': user_msg})
-                msgs = [{'role': 'system', 'content': sys_p}] + list(_shared_hist[-30:])
+                msgs = [{'role': 'system', 'content': _inject_memories(sys_p, self.db, user_msg)}] + list(_shared_hist[-30:])
             if pre_ctx:
                 msgs[-1] = {'role': 'user', 'content': user_msg + pre_ctx}
 
@@ -2694,7 +3005,7 @@ class Session:
             final = clean or resp
             with _shared_lock:
                 _shared_hist.append({'role': 'assistant', 'content': final})
-                if len(_shared_hist) > 120: del _shared_hist[:40]
+            _maybe_summarize_history()
 
             # Persist
             try:
@@ -2755,10 +3066,22 @@ class Session:
                         self._tx(f'{_DIM}  · {r["content"]}{_RST}\n')
 
         elif c == 'brief':
-            self._inject.put(
-                'Give me a morning briefing: current time and date, one-line system status '
-                '(CPU/RAM), any scheduled tasks today, one observation. Keep it tight.'
-            )
+            # Fetch weather in background so it's ready
+            def _make_brief():
+                loc  = _get_location()
+                wthr = _get_weather(loc)
+                weather_ctx = f' Current weather: {wthr}.' if wthr else ''
+                scheds = _sched_load()
+                today = datetime.now().strftime('%A %Y-%m-%d %H:%M')
+                sched_str = ', '.join(s.get('name','?') for s in scheds if s.get('active')) or 'none'
+                prompt = (
+                    f'Give me a morning briefing. Today is {today}.{weather_ctx} '
+                    f'Active schedules: {sched_str}. '
+                    'Include: time/date, weather if available, active schedules, one-line system note. Keep it tight.'
+                )
+                self._inject.put(prompt)
+            threading.Thread(target=_make_brief, daemon=True).start()
+            self._tx(f'{_DIM}  fetching brief...{_RST}\n')
 
         elif c == 'forget' and len(parts) > 1:
             term = ' '.join(parts[1:]).lower()
@@ -2793,6 +3116,49 @@ class Session:
         elif c == 'probe':
             self._tx(f'{_DIM}  probing...{_RST}\n')
             self._tx(_md_to_terminal(_system_probe()) + '\n')
+
+        elif c == 'watch':
+            arg = parts[1].lower() if len(parts) > 1 else ''
+            if not arg or arg == 'list':
+                with _watchers_lk:
+                    if not _watchers:
+                        self._tx(f'{_DIM}  no active watchers{_RST}\n')
+                    else:
+                        for n in _watchers:
+                            self._tx(f'{_DIM}  · {n}{_RST}\n')
+            elif arg == 'stop' and len(parts) > 2:
+                name = parts[2].lower()
+                with _watchers_lk:
+                    w = _watchers.pop(name, None)
+                if w:
+                    w['stop'].set()
+                    self._tx(f'{_OR}  stopped watching {name}{_RST}\n')
+                else:
+                    self._tx(f'{_DIM}  not watching {name}{_RST}\n')
+            else:
+                name = arg
+                with _watchers_lk:
+                    if name in _watchers:
+                        self._tx(f'{_DIM}  already watching {name}{_RST}\n')
+                    else:
+                        stop_ev = threading.Event()
+                        t = threading.Thread(target=_watch_service,
+                                            args=(name, stop_ev), daemon=True)
+                        t.start()
+                        _watchers[name] = {'thread': t, 'stop': stop_ev}
+                        self._tx(f'{_OR}  watching {name} — will notify on state change{_RST}\n')
+
+        elif c == 'index':
+            path_str = ' '.join(parts[1:]) if len(parts) > 1 else ''
+            if not path_str:
+                count = self.db.execute('SELECT COUNT(*) FROM doc_index').fetchone()[0]
+                self._tx(f'{_DIM}  {count} chunks indexed  (usage: //index <path>){_RST}\n')
+            else:
+                self._tx(f'{_DIM}  indexing {path_str}...{_RST}\n')
+                def _do_index():
+                    files, chunks = _index_path(path_str)
+                    self._tx(f'{_OR}  indexed {files} files, {chunks} chunks{_RST}\n')
+                threading.Thread(target=_do_index, daemon=True).start()
 
         elif c == 'search' and len(parts) > 1:
             q = ' '.join(parts[1:])
@@ -2913,6 +3279,20 @@ class Session:
                     self._tx(f'{_OR}  voice model: {VOICE_MODELS[arg]["label"]}{_RST}\n')
                 else:
                     self._tx(f'\x1b[38;5;160m  unknown model: {arg}  (//voice model list){_RST}\n')
+            elif sub == 'speed':
+                val = parts[2] if len(parts) > 2 else ''
+                if not val:
+                    self._tx(f'{_DIM}  voice speed: {_tts_speed[0]:.2f}  (0.5=fast … 1.5=slow){_RST}\n')
+                else:
+                    try:
+                        s = float(val)
+                        if 0.4 <= s <= 2.0:
+                            _tts_speed[0] = s
+                            self._tx(f'{_OR}  voice speed set to {s:.2f}{_RST}\n')
+                        else:
+                            self._tx(f'\x1b[38;5;160m  speed must be 0.4–2.0{_RST}\n')
+                    except ValueError:
+                        self._tx(f'\x1b[38;5;160m  usage: //voice speed <0.4–2.0>{_RST}\n')
             elif sub in ('on', 'off', ''):
                 if not _tts_available():
                     self._tx(f'\x1b[38;5;160m  voice not available — run setup{_RST}\n')
@@ -3083,7 +3463,7 @@ class Session:
                 '  //sources          research sources from last query\n'
                 '  //model [name]     select model (fast/deep/code)\n'
                 '  //voice [on|off]   toggle voice synthesis\n'
-                '  //voice model      list/select voice models\n'
+                '  //voice speed <n>  set speed (0.4=fast, 1.0=normal, default 0.85)\n'
                 '  //stt [on|off]     toggle speech-to-text input\n'
                 '  //stt mode <wake|always>   STT listening mode\n'
                 '  //stt mic [list|<idx>]     select microphone\n'
@@ -3229,11 +3609,21 @@ _CSS = (
     "@keyframes blink{0%,80%,100%{opacity:.2}40%{opacity:1}}"
     ".cursor{color:var(--or3);animation:blink 1s infinite}"
     ".status-line{font-size:10px;color:var(--fg2);opacity:.65;margin:0 0 4px;letter-spacing:.04em}"
-    ".ir{display:flex;gap:6px;padding-top:8px;border-top:1px solid var(--border);flex-shrink:0;align-items:stretch;flex-wrap:wrap}"
+    ".ir{display:flex;gap:6px;padding:8px 0 0;flex-shrink:0;align-items:stretch}"
+    ".toolbar{display:flex;gap:4px;padding:6px 0 4px;border-top:1px solid var(--border);"
+    "flex-shrink:0;align-items:center;flex-wrap:wrap}"
+    ".tbtn{background:transparent;border:1px solid var(--border);color:var(--fg2);"
+    "padding:0 10px;height:28px;line-height:28px;font-family:var(--font);font-size:10px;"
+    "text-transform:uppercase;letter-spacing:.08em;cursor:pointer;white-space:nowrap;"
+    "transition:color .15s,border-color .15s}"
+    ".tbtn:hover{color:var(--fg);border-color:var(--fg2)}"
+    ".tbtn.on{color:var(--or);border-color:var(--or2)}"
+    ".tb-sep{width:1px;background:var(--border);height:20px;margin:0 2px;align-self:center}"
     ".ctrl-group{display:flex;align-items:stretch;gap:0}"
-    ".ctrl-lbl{display:flex;align-items:center;padding:0 6px;font-size:10px;color:var(--fg2);"
+    ".ctrl-lbl{display:flex;align-items:center;padding:0 6px;font-size:9px;color:var(--fg2);"
     "border:1px solid var(--border);border-right:none;background:var(--bg2);"
-    "text-transform:uppercase;letter-spacing:.08em;white-space:nowrap}"
+    "text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;height:28px}"
+    "select.btn.sec{height:28px;line-height:28px}"
     "::-webkit-scrollbar{width:3px}"
     "::-webkit-scrollbar-thumb{background:var(--dim)}"
     "p{margin:2px 0}.msg p:first-child{margin-top:0}.msg p:last-child{margin-bottom:0}"
@@ -3255,6 +3645,9 @@ _CSS = (
     ".login-box input:focus{border-color:var(--or2)}"
     ".login-err{color:#c07070;font-size:11px;margin-bottom:8px}"
     "#inp.stt-active{border-color:var(--or);box-shadow:0 0 0 1px var(--or);}"
+    "#conv-badge{display:none;font-size:9px;color:var(--or);border:1px solid var(--or2);"
+    "padding:1px 5px;letter-spacing:.08em;text-transform:uppercase;align-self:center}"
+    "#conv-badge.on{display:inline}"
 )
 
 _EYE_SVG = (
@@ -3537,13 +3930,25 @@ fetch('/api/voice').then(function(r){return r.json();}).then(function(d){
 _populateVoiceModels();
 
 /* STT */
-var _sttOn=false;
+var _sttOn=false,_convMode=false;
 function _updateSttBtn(){
   var btn=document.getElementById('sttbtn');
   if(btn){btn.classList.toggle('on',_sttOn);btn.title=_sttOn?'Voice input on':'Voice input off';}
   var ta=document.getElementById('inp');
   if(ta)ta.classList.toggle('stt-active',_sttOn);
-  if(_sttOn){_startSttPoll();}else{_stopSttPoll();}
+  var cb=document.getElementById('conv-badge');
+  if(cb)cb.classList.toggle('on',_sttOn&&_convMode);
+  if(_sttOn){_startSttPoll();_pollConvMode();}else{_stopSttPoll();if(_convPollTimer){clearTimeout(_convPollTimer);_convPollTimer=null;}}
+}
+var _convPollTimer=null;
+function _pollConvMode(){
+  if(!_sttOn){if(_convPollTimer){clearTimeout(_convPollTimer);_convPollTimer=null;}return;}
+  fetch('/api/stt/mics').then(function(r){return r.json();}).then(function(d){
+    var prev=_convMode;_convMode=d.conv||false;
+    if(prev!==_convMode){var cb=document.getElementById('conv-badge');if(cb)cb.classList.toggle('on',_sttOn&&_convMode);}
+  }).catch(function(){}).finally(function(){
+    if(_sttOn)_convPollTimer=setTimeout(_pollConvMode,2000);
+  });
 }
 function setMic(val){
   var idx=val===''||val===null?null:parseInt(val);
@@ -3581,27 +3986,36 @@ function _refreshMics(cb){
     var sel=document.getElementById('micsel');if(sel)sel.style.display='none';
   });
 }
-var _sttPollTimer=null;
+var _sttXhr=null;
 function _sttSendWhenReady(text,attempts){
   attempts=attempts||0;
-  if(attempts>20)return; // give up after 2s
+  if(attempts>20)return;
   if(_sending){setTimeout(function(){_sttSendWhenReady(text,attempts+1);},100);return;}
   var inp=document.getElementById('inp');
   if(inp){inp.value=text;send();}
 }
-function _sttPoll(){
-  if(!_sttOn){return;}
-  fetch('/api/stt/result').then(function(r){return r.json();}).then(function(d){
-    if(d.text){
-      if(_sending)stopResponse();
-      _sttSendWhenReady(d.text);
-    }
-  }).catch(function(){}).finally(function(){
-    if(_sttOn)_sttPollTimer=setTimeout(_sttPoll,600);
-  });
+function _sttListenLoop(){
+  if(!_sttOn)return;
+  _sttXhr=new XMLHttpRequest();
+  _sttXhr.open('GET','/api/stt/stream',true);
+  _sttXhr.timeout=35000;
+  _sttXhr.onload=function(){
+    try{
+      var lines=_sttXhr.responseText.split('\n');
+      for(var i=0;i<lines.length;i++){
+        var l=lines[i].trim();
+        if(!l.startsWith('data:'))continue;
+        var d=JSON.parse(l.substring(5).trim());
+        if(d.text){if(_sending)stopResponse();_sttSendWhenReady(d.text);}
+      }
+    }catch(e){}
+    if(_sttOn)setTimeout(_sttListenLoop,100);
+  };
+  _sttXhr.onerror=_sttXhr.ontimeout=function(){if(_sttOn)setTimeout(_sttListenLoop,1000);};
+  _sttXhr.send();
 }
-function _startSttPoll(){if(!_sttPollTimer)_sttPollTimer=setTimeout(_sttPoll,600);}
-function _stopSttPoll(){if(_sttPollTimer){clearTimeout(_sttPollTimer);_sttPollTimer=null;}}
+function _startSttPoll(){if(!_sttXhr||_sttXhr.readyState===4)_sttListenLoop();}
+function _stopSttPoll(){if(_sttXhr){try{_sttXhr.abort();}catch(e){}}_sttXhr=null;}
 
 function _initSTT(){_refreshMics();}
 _initSTT();
@@ -3688,24 +4102,30 @@ def _page_chat():
         '<div id=cw>'
         f'<div id=msgs>{mh}</div>'
         '<div class=ir>'
-        '<label class=upl for=fi>\u2191 File</label>'
-        '<input type=file id=fi accept="image/*,text/*,.json,.csv,.md,.sh,.py,.js,.ts,.yaml,.yml,.xml,.log,.pdf">'
-        '<span id=fb class=fbadge></span>'
         '<textarea id=inp rows=2 placeholder="Speak." autofocus></textarea>'
         "<button id=sinp class=btn onclick=send()>Send</button>"
+        '</div>'
+        '<div class=toolbar>'
+        '<label class=tbtn for=fi title="Attach file">\u2191</label>'
+        '<input type=file id=fi accept="image/*,text/*,.json,.csv,.md,.sh,.py,.js,.ts,.yaml,.yml,.xml,.log,.pdf">'
+        '<span id=fb class=fbadge></span>'
+        '<div class=tb-sep></div>'
         "<span class='ctrl-group'>"
         "<span class='ctrl-lbl'>Model</span>"
-        "<select id=msel class='btn sec' onchange=setModel(this.value) title='AI model'></select>"
+        "<select id=msel class='btn sec' onchange=setModel(this.value)></select>"
         "</span>"
-        "<button class='btn sec' onclick=showSrc()>Src</button>"
-        "<button id=vbtn class='btn sec' onclick=toggleVoice() title='Voice off'>Vox</button>"
-        "<span class='ctrl-group'>"
-        "<button id=sttbtn class='btn sec' onclick=toggleSTT() title='Voice input off'>Mic</button>"
+        '<div class=tb-sep></div>'
+        "<button id=vbtn class='tbtn' onclick=toggleVoice() title='Voice output off'>Vox</button>"
+        '<div class=tb-sep></div>'
+        "<button id=sttbtn class='tbtn' onclick=toggleSTT() title='Voice input off'>Mic</button>"
+        "<span id=conv-badge title='Conversation mode'>conv</span>"
         "<select id=micsel class='btn sec' onchange=setMic(this.value) title='Microphone'></select>"
-        "<button class='btn sec' onclick=_refreshMics() title='Refresh microphone list' style='padding:0 7px'>\u21bb</button>"
-        "</span>"
-        "<button class='btn sec' onclick=clr()>Clr</button>"
-        '</div></div>'
+        "<button class='tbtn' onclick=_refreshMics() title='Refresh mics'>\u21bb</button>"
+        '<div class=tb-sep></div>'
+        "<button class='tbtn' onclick=showSrc() title='View sources'>Src</button>"
+        "<button class='tbtn' onclick=clr() title='Clear conversation'>Clr</button>"
+        '</div>'
+        '</div>'
         f'<script>{_CHAT_JS}</script>'
     )
     return _shell(body, 'chat')
@@ -3867,7 +4287,7 @@ def _page_history(db):
 def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
     _web_abort_event.clear()
     with _shared_lock: hist = list(_shared_hist)
-    db = _db(); sys_p = _build_system(db); db.close()
+    db = _db(); sys_p = _build_system(db)
     user_content = msg; images = None
     if file_data:
         if file_type and file_type.startswith('image/'):
@@ -3884,7 +4304,8 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
     for sv in status_buf: yield sv
 
     enriched = user_content + pre_ctx if pre_ctx else user_content
-    msgs = [{'role': 'system', 'content': sys_p}] + hist[-30:] + [{'role': 'user', 'content': enriched}]
+    msgs = [{'role': 'system', 'content': _inject_memories(sys_p, db, user_content)}] + hist[-30:] + [{'role': 'user', 'content': enriched}]
+    db.close()
 
     voice_on  = _voice_enabled() and _tts_available()
     tts_in_q  = _queue.Queue()
@@ -4015,7 +4436,7 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
     with _shared_lock:
         _shared_hist.append({'role': 'user',      'content': user_content})
         _shared_hist.append({'role': 'assistant',  'content': final_text})
-        if len(_shared_hist) > 120: del _shared_hist[:40]
+    _maybe_summarize_history()
 
 
 def _start_web():
@@ -4026,6 +4447,12 @@ def _start_web():
     class TS(ThreadingMixIn, HTTPServer):
         daemon_threads = True; allow_reuse_address = True
 
+    _CORS = {
+        'Access-Control-Allow-Origin':  '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    }
+
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a): pass
 
@@ -4034,14 +4461,27 @@ def _start_web():
             self.send_response(code)
             self.send_header('Content-Type', ct)
             self.send_header('Content-Length', len(b))
+            for k, v in _CORS.items():
+                self.send_header(k, v)
             if headers:
                 for k, v in headers.items():
                     self.send_header(k, v)
             self.end_headers(); self.wfile.write(b)
 
+        def do_OPTIONS(self):
+            self.send_response(204)
+            for k, v in _CORS.items():
+                self.send_header(k, v)
+            self.end_headers()
+
         def _authed(self):
             token = _session_from_request(self.headers)
-            return _session_valid(token)
+            if _session_valid(token):
+                return True
+            auth_header = self.headers.get('Authorization', '')
+            if auth_header.startswith('Bearer '):
+                return _api_token_valid(auth_header[7:].strip())
+            return False
 
         def _redirect(self, location, extra_headers=None):
             self.send_response(302)
@@ -4130,14 +4570,34 @@ def _start_web():
                 elif path == '/api/stt/mics':
                     self._send(200, json.dumps({'mics': _stt_list_mics(),
                         'current': _stt_mic_index(), 'enabled': _stt_enabled(),
-                        'mode': _stt_mode()}), 'application/json')
+                        'mode': _stt_mode(), 'conv': _stt_conv_active[0]}), 'application/json')
                 elif path == '/api/stt/result':
-                    # Pop next pending STT result for WebUI (non-blocking)
+                    # Legacy polling endpoint — kept for compatibility
                     try:
                         text = _web_stt_q.get_nowait()
                     except _queue.Empty:
                         text = None
                     self._send(200, json.dumps({'text': text}), 'application/json')
+                elif path == '/api/stt/stream':
+                    # SSE push: blocks until a result arrives (30s timeout)
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.send_header('Cache-Control', 'no-cache')
+                    self.send_header('Connection', 'keep-alive')
+                    for k, v in _CORS.items():
+                        self.send_header(k, v)
+                    self.end_headers()
+                    try:
+                        text = _web_stt_q.get(timeout=30)
+                        data = json.dumps({'text': text})
+                        self.wfile.write(f'data: {data}\n\n'.encode())
+                        self.wfile.flush()
+                    except _queue.Empty:
+                        self.wfile.write(b'data: {"text":null}\n\n')
+                        self.wfile.flush()
+                    except Exception:
+                        pass
+                    return
                 else:
                     self._send(404, '<pre>404</pre>')
             except Exception as e:
@@ -4165,6 +4625,18 @@ def _start_web():
                     self._send(200, _page_login(str(e)))
                 return
 
+            # Issue a persistent Bearer token — accepts password, no session required
+            if path == '/api/token':
+                try:
+                    data = json.loads(body) if body else {}
+                    if _auth_check(data.get('password', '')):
+                        self._send(200, json.dumps({'token': _api_token_create()}), 'application/json')
+                    else:
+                        self._send(401, json.dumps({'error': 'invalid password'}), 'application/json')
+                except Exception as e:
+                    self._send(500, json.dumps({'error': str(e)}), 'application/json')
+                return
+
             # All other POSTs require auth
             if not self._authed():
                 self._send(401, json.dumps({'error': 'unauthorized'}), 'application/json'); return
@@ -4180,6 +4652,8 @@ def _start_web():
                     self.send_header('Content-Type', 'text/event-stream')
                     self.send_header('Cache-Control', 'no-cache')
                     self.send_header('Connection', 'keep-alive')
+                    for k, v in _CORS.items():
+                        self.send_header(k, v)
                     self.end_headers()
                     try:
                         for chunk in _web_chat_stream(msg, fd, ft, fn):
@@ -4372,6 +4846,7 @@ def main():
     _seed_shared_history()
     _refresh_models()
     threading.Thread(target=_warmup,          daemon=True).start()
+    threading.Thread(target=_warmup_whisper,  daemon=True, name='whisper-warmup').start()
     threading.Thread(target=_cli_tts_worker,  daemon=True, name='tts-cli').start()
     threading.Thread(target=_start_web,       daemon=True, name='web').start()
     threading.Thread(target=_scheduler_thread, daemon=True, name='scheduler').start()
