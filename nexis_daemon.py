@@ -42,32 +42,10 @@ MODEL_VISION = 'qwen2.5vl:7b'
 VOICE_DIR = DATA / 'voice'
 VOICE_MODELS = {
     'default': {
-        'label': 'Default (high)',
-        'desc':  'High-quality character voice — Piper ONNX (AIHeaven)',
-        'onnx':  str(VOICE_DIR / 'en_us-glados-high.onnx'),
-        'json':  str(VOICE_DIR / 'en_us-glados-high.onnx.json'),
-        'backend': 'piper',
-        'fx':    'character',
-    },
-    'glados_med': {
-        'label': 'Default (med)',
-        'desc':  'Character voice medium quality — faster synthesis',
+        'label': 'GlaDOS',
+        'desc':  'GlaDOS character voice',
         'onnx':  str(VOICE_DIR / 'glados_piper_medium.onnx'),
         'json':  str(VOICE_DIR / 'glados_piper_medium.onnx.json'),
-        'backend': 'piper',
-        'fx':    'character',
-    },
-    'robotic': {
-        'label': 'Robotic',
-        'desc':  'Raw formant synthesizer, maximum synthetic quality',
-        'onnx':  None, 'json': None,
-        'backend': 'espeak',
-        'fx':    'heavy',
-    },
-    'custom': {
-        'label': 'Custom',
-        'desc':  'User-provided Piper ONNX model',
-        'onnx':  None, 'json': None,
         'backend': 'piper',
         'fx':    'character',
     },
@@ -838,6 +816,9 @@ def _stt_set_cb(fn):
 _WAKE_WORD_RE = re.compile(
     r'(?i)\b(hey\s+)?(n[ae]x[iy]?[su]s?|nexis|naxis|nexus|nexes|nexes)[,.]?\s*'
 )
+_stt_conv_active  = [False]   # True = in conversation mode, skip wake word
+_stt_conv_ts      = [0.0]     # timestamp of last speech in conversation
+_STT_CONV_TIMEOUT = 30.0      # seconds of silence before leaving conversation
 
 def _stt_worker():
     """Background STT thread using faster-whisper + sounddevice."""
@@ -886,11 +867,24 @@ def _stt_worker():
 
             mode = _stt_mode()
             if mode == 'wake':
-                if not _WAKE_WORD_RE.search(text):
+                # Check conversation timeout
+                if _stt_conv_active[0]:
+                    if time.time() - _stt_conv_ts[0] > _STT_CONV_TIMEOUT:
+                        _stt_conv_active[0] = False
+                        _log('STT: conversation mode timed out')
+
+                if _stt_conv_active[0]:
+                    clean = text  # already in conversation, no wake word needed
+                elif _WAKE_WORD_RE.search(text):
+                    clean = _WAKE_WORD_RE.sub('', text).strip()
+                    _stt_conv_active[0] = True  # enter conversation mode
+                    _log('STT: conversation mode activated')
+                else:
                     continue  # wake word not detected
-                clean = _WAKE_WORD_RE.sub('', text).strip()
             else:
                 clean = text
+
+            _stt_conv_ts[0] = time.time()
 
             if not clean:
                 continue
@@ -2294,6 +2288,7 @@ class Session:
         self._sources      = []
         self._disconnect   = threading.Event()  # set by WebUI /api/clear
         self._stream_abort = threading.Event()  # set to abort current stream
+        self._inject       = _queue.Queue()     # synthetic input (e.g. //brief)
         # Register for push notifications and clear-disconnect
         with _cli_sessions_lk:
             _cli_sessions.append(self)
@@ -2421,12 +2416,16 @@ class Session:
 
             self._tx(f'\n  {OR}▸{RST}  ')
 
-            # Non-blocking: check STT queue first
+            # Non-blocking: check inject queue, then STT queue
             try:
-                inp = _stt_input_queue.get_nowait()
-                self._tx(f'{DIM}[stt]{RST} {inp}\n')
+                inp = self._inject.get_nowait()
+                self._tx(f'{DIM}[brief]{RST} {inp[:60]}...\n')
             except _queue.Empty:
-                inp = self._rx()
+                try:
+                    inp = _stt_input_queue.get_nowait()
+                    self._tx(f'{DIM}[stt]{RST} {inp}\n')
+                except _queue.Empty:
+                    inp = self._rx()
 
             if not inp: continue
             if inp.lower().strip() in ('exit', 'quit', 'bye', 'q', ':q', ':wq'):
@@ -2740,6 +2739,27 @@ class Session:
             if not mems: self._tx(f'{_DIM}  no memories yet{_RST}\n')
             for m in mems: self._tx(f'{_DIM}  · {m}{_RST}\n')
 
+        elif c == 'memory' and len(parts) > 1 and parts[1].lower() == 'search':
+            term = ' '.join(parts[2:]).lower() if len(parts) > 2 else ''
+            if not term:
+                self._tx(f'{_DIM}  usage: //memory search <term>{_RST}\n')
+            else:
+                rows = self.db.execute(
+                    'SELECT content FROM memories WHERE LOWER(content) LIKE ? ORDER BY id DESC',
+                    (f'%{term}%',)
+                ).fetchall()
+                if not rows:
+                    self._tx(f'{_DIM}  no memories matching "{term}"{_RST}\n')
+                else:
+                    for r in rows:
+                        self._tx(f'{_DIM}  · {r["content"]}{_RST}\n')
+
+        elif c == 'brief':
+            self._inject.put(
+                'Give me a morning briefing: current time and date, one-line system status '
+                '(CPU/RAM), any scheduled tasks today, one observation. Keep it tight.'
+            )
+
         elif c == 'forget' and len(parts) > 1:
             term = ' '.join(parts[1:]).lower()
             rows = self.db.execute('SELECT id,content FROM memories').fetchall()
@@ -3051,6 +3071,8 @@ class Session:
             self._tx(
                 f'{_DIM}'
                 '  //memory           what I remember\n'
+                '  //memory search <term>  search memories\n'
+                '  //brief            morning briefing\n'
                 '  //forget <term>    delete matching memories\n'
                 '  //clear            wipe all memories\n'
                 '  //reset            clear shared conversation\n'
@@ -3677,12 +3699,6 @@ def _page_chat():
         "</span>"
         "<button class='btn sec' onclick=showSrc()>Src</button>"
         "<button id=vbtn class='btn sec' onclick=toggleVoice() title='Voice off'>Vox</button>"
-        "<span class='ctrl-group'>"
-        "<span class='ctrl-lbl'>Voice</span>"
-        "<select id=vmodel class='btn sec' onchange=setVoiceModel(this.value) title='Voice model'>"
-        "<option value='default'>Default (high)</option>"
-        "</select>"
-        "</span>"
         "<span class='ctrl-group'>"
         "<button id=sttbtn class='btn sec' onclick=toggleSTT() title='Voice input off'>Mic</button>"
         "<select id=micsel class='btn sec' onchange=setMic(this.value) title='Microphone'></select>"

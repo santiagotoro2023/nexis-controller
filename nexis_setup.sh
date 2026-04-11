@@ -205,7 +205,7 @@ sudo -u "$REAL_USER" mkdir -p "$VOICE_DIR"
 # High-quality Piper voice (default)
 HQ_ONNX="$VOICE_DIR/en_us-glados-high.onnx"
 HQ_JSON="$VOICE_DIR/en_us-glados-high.onnx.json"
-HF_HQ="https://huggingface.co/Jmica/glados/resolve/main/en_us-glados-high"
+HF_HQ="https://huggingface.co/AIHeaven/piper_unofficial_voices/resolve/main/en_US/en_us-glados-high/en_us-glados-high"
 if [[ -f "$HQ_ONNX" && -f "$HQ_JSON" ]]; then
   _ok "Default (high) Piper voice already present"
 else
