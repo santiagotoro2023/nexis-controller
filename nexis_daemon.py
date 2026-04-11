@@ -2277,7 +2277,7 @@ def _github_repo_contents(owner_repo, path='', ref=''):
         if isinstance(data, list):
             entries = []
             for item in data:
-                t = '📁' if item.get('type') == 'dir' else '📄'
+                t = '[dir]' if item.get('type') == 'dir' else '[file]'
                 entries.append(f'{t} {item.get("name","?")} ({item.get("size",0)} bytes)')
             return '\n'.join(entries)
         return str(data)[:4000]
