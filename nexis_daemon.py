@@ -92,6 +92,7 @@ _audio_seq_lk       = threading.Lock()
 _tts_voice_obj      = [None]
 _tts_voice_key      = [None]
 _tts_voice_obj_lk   = threading.Lock()
+_tts_last_error     = [None]   # last piper load error string, shown in /api/voice
 _cli_tts_q          = _queue.Queue(maxsize=8)
 _tts_current_proc   = [None]
 _tts_current_proc_lk = threading.Lock()
@@ -453,11 +454,18 @@ def _tts_load_voice():
             if Path(onnx).exists() and Path(cfg).exists():
                 try:
                     from piper.voice import PiperVoice
-                    _tts_voice_obj[0] = PiperVoice.load(onnx, config_path=cfg, use_cuda=False)
+                    try:
+                        _tts_voice_obj[0] = PiperVoice.load(onnx, config_path=cfg, use_cuda=False)
+                    except TypeError:
+                        # Newer piper-tts dropped use_cuda parameter
+                        _tts_voice_obj[0] = PiperVoice.load(onnx, config_path=cfg)
                     _tts_voice_key[0] = mk
+                    _tts_last_error[0] = None
                     _log(f'TTS voice loaded: {mk}')
                 except Exception as e:
-                    _log(f'TTS piper load ({mk}): {e}', 'WARN')
+                    err = f'piper load ({mk}): {e}'
+                    _log(err, 'WARN')
+                    _tts_last_error[0] = err
         return _tts_voice_obj[0]
 
 def _tts_clean(text: str) -> str:
@@ -1808,6 +1816,17 @@ def _build_system(conn):
         '\n- No markdown lists or headers. Use prose and newlines only.'
         '\n- Research context = primary source. Never invent specific facts, URLs, or dates.'
         '\n- Uncertainty: say "I\'m not certain" — it is more trustworthy than a confident hallucination.'
+        '\n'
+        '\n## STRICT factual rules — violation is worse than admitting ignorance'
+        '\n- NEVER invent file paths, function names, class names, directory structures, variable names, or API shapes.'
+        '\n  If a tool returned a file listing, ONLY reference files that actually appear in that listing.'
+        '\n  If a file is missing from the listing, say it is absent — do NOT suggest what might be there.'
+        '\n- NEVER invent repository structures. If [REPO: ...] shows the root, treat that listing as the complete ground truth.'
+        '\n- Tool results are AUTHORITATIVE. If a tool says something is not found or returns an error, report that fact and STOP.'
+        '\n  Do NOT follow a failure with a list of generic tips or speculative explanations.'
+        '\n  Instead say: "That returned an error. Want me to look for solutions?" and wait for Creator to respond.'
+        '\n- NEVER suggest checking paths that were not confirmed to exist by a tool call.'
+        '\n- If you are uncertain about a technical detail, say so explicitly. Invent nothing.'
     )
     with _sys_p_lock:
         _sys_p_cache['prompt'] = p
@@ -1979,7 +1998,10 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
     for m in re.finditer(r'\[FETCH:\s*([^\]]+)\]', text, re.IGNORECASE):
         url = m.group(1).strip()
         if on_status: on_status(f'fetching: {url[:50]}')
-        tools[m.group(0)] = _fetch_url(url)
+        result = _fetch_url(url)
+        if result.startswith('Fetch failed'):
+            result = f'[TOOL FAILURE] Could not access {url}: {result}. Report this to Creator and ask if they want troubleshooting help. Do NOT invent content or provide unsolicited tips.'
+        tools[m.group(0)] = result
 
     if re.search(r'\[PROBE\]', text, re.IGNORECASE):
         if on_status: on_status('probing system...')
@@ -1994,7 +2016,10 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
         parts = m.group(1).strip().split(None, 1)
         repo = parts[0] if parts else ''; path = parts[1] if len(parts) > 1 else ''
         if on_status: on_status(f'reading: {repo}/{path}')
-        tools[m.group(0)] = _github_repo_contents(repo, path)
+        result = _github_repo_contents(repo, path)
+        if result.startswith('(error'):
+            result = f'[TOOL FAILURE] {result}. Report this to Creator and ask if they want troubleshooting help. Do NOT invent content or suggest paths that were not confirmed to exist.'
+        tools[m.group(0)] = result
 
     for m in re.finditer(r'\[SHELL:\s*([^\]]+)\]', text, re.IGNORECASE):
         cmd = m.group(1).strip()
@@ -2207,17 +2232,10 @@ class Session:
     def _banner(self, mc, sc):
         self._mc = mc; self._sc = sc
         body = self._banner_body(mc, sc)
-        self._tx(
-            '\x1b[2J\x1b[H'
-            + body
-            + f'\x1b[{self._BANNER_H + 1};999r'
-            + f'\x1b[{self._BANNER_H + 1};1H'
-        )
+        self._tx('\x1b[2J\x1b[H' + body)
 
     def _redraw_banner(self):
-        mc = getattr(self, '_mc', 0); sc = getattr(self, '_sc', 0)
-        body = self._banner_body(mc, sc)
-        self._tx('\x1b7\x1b[1;1H' + body.rstrip('\n') + '\x1b8')
+        pass  # no-op without a locked scrolling region
 
     # ── Auth prompt ────────────────────────────────────────────────────────────
 
@@ -2245,8 +2263,19 @@ class Session:
         if not self._auth_prompt():
             self._end(); return
 
-        with self.db.execute('SELECT COUNT(*) FROM memories') as cur:
-            mc = cur.fetchone()[0]
+        try:
+            self._run_session()
+        except Exception as e:
+            _log(f'Session fatal: {e}', 'ERROR')
+            try:
+                self._tx(f'\n\x1b[38;5;160m  fatal error: {e}\x1b[0m\n')
+            except Exception:
+                pass
+        finally:
+            self._end()
+
+    def _run_session(self):
+        mc = self.db.execute('SELECT COUNT(*) FROM memories').fetchone()[0]
         sc = self.db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]
         sys_p = _build_system(self.db)
         self._banner(mc, sc)
@@ -2545,8 +2574,6 @@ class Session:
                             self._tx(f'\x1b[38;5;160m  [{e}]{RST}\n')
                     else:
                         self._tx(f'{DIM}  skipped.{RST}\n')
-
-        self._end()
 
     # ── Commands ───────────────────────────────────────────────────────────────
 
@@ -3157,24 +3184,32 @@ function send(){
 }
 
 function wireCodeCopy(el){
-  el.querySelectorAll('.cbtn[data-code]').forEach(function(btn){
-    if(btn._wired)return;btn._wired=true;
-    btn.addEventListener('click',function(e){
-      e.stopPropagation();
-      var code=decodeURIComponent(btn.getAttribute('data-code'));
-      var done=function(){btn.textContent='Copied';btn.classList.add('ok');
-        setTimeout(function(){btn.textContent='Copy';btn.classList.remove('ok');},1500);};
-      if(navigator.clipboard){navigator.clipboard.writeText(code).then(done).catch(done);}
-      else{var ta=document.createElement('textarea');ta.value=code;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);done();}
-    });
-  });
+  /* new blocks use data-cbid + onclick=_copyCode; this is a no-op kept for compat */
+}
+
+var _codeBlocks={};var _codeBlockIdx=0;
+function _storeCode(code){var id='cb'+(++_codeBlockIdx);_codeBlocks[id]=code;return id;}
+function _copyCode(id){
+  var code=_codeBlocks[id]||'';
+  var btn=document.querySelector('.cbtn[data-cbid="'+id+'"]');
+  var done=function(){if(btn){btn.textContent='Copied';btn.classList.add('ok');setTimeout(function(){btn.textContent='Copy';btn.classList.remove('ok');},1500);}};
+  if(navigator.clipboard&&window.isSecureContext){
+    navigator.clipboard.writeText(code).then(done).catch(function(){_legacyCopy(code);done();});
+  }else{_legacyCopy(code);done();}
+}
+function _legacyCopy(text){
+  var ta=document.createElement('textarea');ta.value=text;
+  ta.style.position='fixed';ta.style.top='-9999px';ta.style.left='-9999px';
+  document.body.appendChild(ta);ta.focus();ta.select();
+  try{document.execCommand('copy');}catch(e){}
+  document.body.removeChild(ta);
 }
 
 function renderMd(t){
   t=t.replace(/```(\w*)\n?([\s\S]*?)```/g,function(m,lang,code){
     var l=lang?'<span class=cl> '+lang+'</span>':'';
-    var enc=encodeURIComponent(code.trim());
-    return '<div class=cb><div class=ch><span>code'+l+'</span><button class=cbtn data-code="'+enc+'">Copy</button></div>'
+    var id=_storeCode(code.trim());
+    return '<div class=cb><div class=ch><span>code'+l+'</span><button class=cbtn data-cbid="'+id+'" onclick="_copyCode(\''+id+'\')">Copy</button></div>'
       +'<pre class=cp>'+code.trim().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</pre></div>';
   });
   t=t.replace(/`([^`\n]+)`/g,'<code>$1</code>');
@@ -3195,19 +3230,25 @@ function renderMd(t){
 document.querySelectorAll('.msg.n').forEach(wireCodeCopy);
 
 function setModel(m){
+  if(!m)return;
   fetch('/api/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m})})
   .then(function(r){return r.json();}).then(function(d){
-    if(d.ok){var el=document.getElementById('msel');if(el){el.textContent=d.label.split(' ')[0];el.title=d.desc;}}
+    if(!d.ok){var sel=document.getElementById('msel');if(sel)_populateModels();}
   });
 }
-function showModels(){
+function _populateModels(){
   fetch('/api/models').then(function(r){return r.json();}).then(function(d){
-    var s='';
-    for(var i=0;i<d.models.length;i++){var m=d.models[i];s+=(m.current?'\u25b8 ':'  ')+m.key+': '+m.label+(m.installed?' \u2713':' \u2717')+'\n';}
-    var c=prompt('Model \u2014 type key to switch:\n\n'+s,'fast');
-    if(c)setModel(c.trim().toLowerCase());
-  });
+    var sel=document.getElementById('msel');if(!sel||!d.models)return;
+    sel.innerHTML='';
+    for(var i=0;i<d.models.length;i++){
+      var m=d.models[i];var opt=document.createElement('option');
+      opt.value=m.key;opt.textContent=m.label+(m.installed?'':' \u2717');
+      opt.title=m.desc+(m.installed?'':' (not installed)');opt.selected=m.current;
+      sel.appendChild(opt);
+    }
+  }).catch(function(){});
 }
+_populateModels();
 function showSrc(){
   fetch('/api/sources').then(function(r){return r.json();}).then(function(d){
     if(!d.sources||!d.sources.length){alert('No sources from last query.');return;}
@@ -3239,14 +3280,20 @@ async function _drainAudioQueue(){
 }
 function _queueAudio(id){if(!_voiceOn)return;_audioQueue.push(id);_drainAudioQueue();}
 function toggleVoice(){
+  /* MUST create/resume AudioContext here — inside user gesture — or browser blocks audio */
+  if(!_audioCtx||_audioCtx.state==='closed'){
+    try{_audioCtx=new(window.AudioContext||window.webkitAudioContext)();}catch(e){_audioCtx=null;}
+  }
+  if(_audioCtx&&_audioCtx.state==='suspended')_audioCtx.resume();
+
   fetch('/api/voice').then(function(r){return r.json();}).then(function(d){
-    if(!d.available){alert('Voice not set up. Run nexis_setup.sh to install voice dependencies.');return;}
+    if(!d.available){alert('Voice not available.\n'+(d.error||'Run nexis_setup.sh to install dependencies.'));return;}
+    if(d.error)console.warn('Voice warning:',d.error);
     var newState=!d.voice;
     fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:newState})})
     .then(function(r){return r.json();}).then(function(rd){
       _voiceOn=rd.voice;var btn=document.getElementById('vbtn');
       if(btn){btn.classList.toggle('on',_voiceOn);btn.title=_voiceOn?'Voice on':'Voice off';}
-      if(_voiceOn&&_audioCtx&&_audioCtx.state==='suspended')_audioCtx.resume();
     });
   });
 }
@@ -3276,6 +3323,49 @@ fetch('/api/voice').then(function(r){return r.json();}).then(function(d){
 }).catch(function(){});
 _populateVoiceModels();
 
+/* STT */
+var _sttOn=false;
+function _updateSttBtn(){
+  var btn=document.getElementById('sttbtn');
+  if(btn){btn.classList.toggle('on',_sttOn);btn.title=_sttOn?'Voice input on':'Voice input off';}
+}
+function setMic(val){
+  var idx=val===''||val===null?null:parseInt(val);
+  fetch('/api/stt',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mic:idx})}).catch(function(){});
+}
+function _populateMics(mics,currentIdx){
+  var sel=document.getElementById('micsel');if(!sel)return;
+  sel.innerHTML='<option value="">Default mic</option>';
+  for(var i=0;i<mics.length;i++){
+    var m=mics[i];
+    if(m.index<0)continue;
+    var opt=document.createElement('option');
+    opt.value=m.index;opt.textContent=m.index+': '+m.name.substring(0,28);
+    if(m.index===currentIdx)opt.selected=true;
+    sel.appendChild(opt);
+  }
+}
+function toggleSTT(){
+  fetch('/api/stt/mics').then(function(r){return r.json();}).then(function(d){
+    var newState=!d.enabled;
+    fetch('/api/stt',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled:newState})})
+    .then(function(r){return r.json();}).then(function(rd){
+      _sttOn=rd.enabled;_updateSttBtn();
+    });
+  }).catch(function(){alert('STT not available — install sounddevice and faster-whisper.');});
+}
+function _initSTT(){
+  fetch('/api/stt/mics').then(function(r){return r.json();}).then(function(d){
+    _sttOn=d.enabled||false;_updateSttBtn();
+    _populateMics(d.mics||[],d.current);
+  }).catch(function(){
+    var sel=document.getElementById('micsel');if(sel)sel.style.display='none';
+  });
+}
+_initSTT();
+
 document.addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey&&document.activeElement.id==='inp'){e.preventDefault();send();}
   if(e.key==='Escape'&&document.activeElement.id==='inp'){document.getElementById('inp').blur();}
@@ -3289,6 +3379,7 @@ def _shell(content, active='chat'):
         for s, l in [('chat','Chat'),('history','History'),('memory','Memory'),
                      ('schedules','Schedules'),('status','Status')]
     )
+    nav += "<a href='/logout' style='margin-left:auto;opacity:.6'>Logout</a>"
     return (
         '<!DOCTYPE html><html lang=en><head>'
         '<meta charset=UTF-8>'
@@ -3347,12 +3438,14 @@ def _page_chat():
         '<span id=fb class=fbadge></span>'
         '<textarea id=inp rows=2 placeholder="Speak." autofocus></textarea>'
         "<button id=sinp class=btn onclick=send()>Send</button>"
-        "<button id=msel class='btn sec' onclick=showModels() title='Quick responses'>Fast</button>"
+        "<select id=msel class='btn sec' onchange=setModel(this.value) title='AI model'></select>"
         "<button class='btn sec' onclick=showSrc()>Src</button>"
         "<button id=vbtn class='btn sec' onclick=toggleVoice() title='Voice off'>Vox</button>"
         "<select id=vmodel class='btn sec' onchange=setVoiceModel(this.value) title='Voice model'>"
         "<option value='default'>Default</option>"
         "</select>"
+        "<button id=sttbtn class='btn sec' onclick=toggleSTT() title='Voice input off'>Mic</button>"
+        "<select id=micsel class='btn sec' onchange=setMic(this.value) title='Microphone'></select>"
         "<button class='btn sec' onclick=clr()>Clr</button>"
         '</div></div>'
         f'<script>{_CHAT_JS}</script>'
@@ -3713,6 +3806,18 @@ def _start_web():
             if path == '/login':
                 self._send(200, _page_login()); return
 
+            # Logout — clear cookie and redirect
+            if path == '/logout':
+                token = _session_from_request(self.headers)
+                if token:
+                    with _web_sessions_lk:
+                        _web_sessions.pop(token, None)
+                self.send_response(302)
+                self.send_header('Set-Cookie', 'nexis_sess=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
+                self.send_header('Location', '/login')
+                self.end_headers()
+                return
+
             # All other pages require auth
             if not self._authed():
                 self._redirect('/login'); return
@@ -3745,7 +3850,8 @@ def _start_web():
                     self._send(200, json.dumps({'sources': src}), 'application/json')
                 elif path == '/api/voice':
                     self._send(200, json.dumps({'voice': _voice_enabled(),
-                        'available': _tts_available(), 'model': _voice_model()}), 'application/json')
+                        'available': _tts_available(), 'model': _voice_model(),
+                        'error': _tts_last_error[0]}), 'application/json')
                 elif path == '/api/voice/models':
                     cur = _voice_model(); mlist = []
                     for k, v in VOICE_MODELS.items():
