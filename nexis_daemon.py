@@ -3030,7 +3030,6 @@ _CSS = (
     ".badge{font-size:9px;padding:1px 5px;border:1px solid;letter-spacing:.06em;text-transform:uppercase}"
     ".badge.ok{color:var(--or3);border-color:var(--or2)}"
     ".badge.off{color:var(--fg2);border-color:var(--border)}"
-    /* Login page */
     ".login-wrap{display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;gap:16px}"
     ".login-box{background:var(--bg2);border:1px solid var(--border);padding:32px;min-width:280px}"
     ".login-box input{width:100%;background:var(--bg3);border:1px solid var(--border);"
