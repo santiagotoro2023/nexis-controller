@@ -599,15 +599,12 @@ def _tts_synth(text: str):
     if backend == 'espeak':
         if shutil.which('espeak-ng'):
             try:
-                wav_buf = io.BytesIO()
-                with wave.open(wav_buf, 'wb') as wf:
-                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(22050)
-                    proc = subprocess.run(
-                        ['espeak-ng', '-v', 'en-us', '-s', '145', '-p', '35',
-                         '--stdout', rhythm_text],
-                        capture_output=True, timeout=30)
-                    if proc.returncode == 0 and proc.stdout:
-                        return _tts_apply_effects(proc.stdout, fx)
+                proc = subprocess.run(
+                    ['espeak-ng', '-v', 'en-us', '-s', '145', '-p', '35',
+                     '--stdout', rhythm_text],
+                    capture_output=True, timeout=30)
+                if proc.returncode == 0 and proc.stdout:
+                    return _tts_apply_effects(proc.stdout, fx)
             except Exception as e:
                 _log(f'TTS espeak: {e}', 'WARN')
         return None
@@ -616,8 +613,10 @@ def _tts_synth(text: str):
     voice = _tts_load_voice()
     if not voice and shutil.which('espeak-ng'):
         try:
+            # Re-process text for espeak (different rhythm markers)
+            espeak_text = _tts_rhythm(clean, 'espeak')
             proc = subprocess.run(
-                ['espeak-ng', '-v', 'en-us', '-s', '145', '-p', '35', '--stdout', rhythm_text],
+                ['espeak-ng', '-v', 'en-us', '-s', '145', '-p', '35', '--stdout', espeak_text],
                 capture_output=True, timeout=30)
             if proc.returncode == 0 and proc.stdout:
                 return _tts_apply_effects(proc.stdout, 'heavy')
@@ -629,7 +628,7 @@ def _tts_synth(text: str):
         try:
             buf = io.BytesIO()
             with wave.open(buf, 'wb') as wf:
-                voice.synthesize(rhythm_text, wf)
+                voice.synthesize_wav(rhythm_text, wf)
             wav_bytes = buf.getvalue()
             if len(wav_bytes) > 44:
                 return _tts_apply_effects(wav_bytes, fx)
@@ -647,6 +646,14 @@ def _run_proc(proc, stdin_data=None, timeout=60):
 
 def _tts_play_local(wav_bytes: bytes):
     env = os.environ.copy()
+    # Ensure PulseAudio socket is reachable when running under systemd
+    if 'XDG_RUNTIME_DIR' not in env:
+        uid = os.getuid()
+        candidate = f'/run/user/{uid}'
+        if Path(candidate).exists():
+            env['XDG_RUNTIME_DIR'] = candidate
+    if 'XDG_RUNTIME_DIR' in env and 'PULSE_RUNTIME_PATH' not in env:
+        env['PULSE_RUNTIME_PATH'] = env['XDG_RUNTIME_DIR'] + '/pulse'
     df = DATA / 'state' / '.display_env'
     if df.exists():
         try:
@@ -673,6 +680,8 @@ def _tts_play_local(wav_bytes: bytes):
             with _tts_current_proc_lk: _tts_current_proc[0] = proc
             rc, stderr = _run_proc(proc)
             if rc == 0: return
+            if stderr:
+                _log(f'TTS paplay rc={rc}: {stderr.decode(errors="replace").strip()[:120]}', 'WARN')
         except Exception as e:
             _log(f'TTS paplay: {e}', 'WARN')
         finally:
@@ -685,7 +694,9 @@ def _tts_play_local(wav_bytes: bytes):
             proc = subprocess.Popen(['aplay', '-q', '-'], stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
             with _tts_current_proc_lk: _tts_current_proc[0] = proc
-            _run_proc(proc, stdin_data=wav_bytes)
+            rc2, stderr2 = _run_proc(proc, stdin_data=wav_bytes)
+            if rc2 != 0 and stderr2:
+                _log(f'TTS aplay rc={rc2}: {stderr2.decode(errors="replace").strip()[:120]}', 'WARN')
         except Exception as e:
             _log(f'TTS aplay: {e}', 'WARN')
 
