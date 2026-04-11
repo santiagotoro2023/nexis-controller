@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#   N e X i S  v3.0  —  Local AI Assistant
+#   N e X i S  v3.1  —  Local AI Assistant
 #   sudo bash nexis_setup.sh
 #   sudo bash nexis_setup.sh --uninstall
 # =============================================================================
@@ -33,7 +33,7 @@ _sigil(){
       ██║ ╚████║███████╗██╔╝ ██╗██║███████║
       ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═╝╚══════╝
 
-      N e X i S   //   v3.0
+      N e X i S   //   v3.1
 SIG
   echo -e "${RST}"
 }
@@ -100,7 +100,7 @@ fi
 # INSTALL
 # =============================================================================
 clear; _sigil
-echo -e "${OR2}  Deployment — v3.0${RST}"
+echo -e "${OR2}  Deployment — v3.1${RST}"
 echo -e "${CY}${DIM}  // Streaming · Web search · File analysis · System probe · Markdown${RST}\n"
 sleep 0.4
 _require_root
@@ -116,7 +116,8 @@ VENV="$NEXIS_DATA/venv"
 _hdr "DEPENDENCIES"
 apt-get update -qq 2>/dev/null || true
 apt-get install -y curl python3-pip python3-venv socat \
-  xclip xdg-utils libnotify-bin wmctrl sox alsa-utils espeak-ng 2>/dev/null || _warn "Some packages unavailable"
+  xclip xdg-utils libnotify-bin wmctrl sox alsa-utils espeak-ng \
+  portaudio19-dev 2>/dev/null || _warn "Some packages unavailable"
 # Install GitHub CLI if not present
 if ! command -v gh &>/dev/null; then
   echo "  installing gh CLI..."
@@ -165,8 +166,8 @@ fi
 _hdr "PYTHON ENVIRONMENT"
 sudo -u "$REAL_USER" "$PYTHON_BIN" -m venv "$VENV"
 sudo -u "$REAL_USER" "$VENV/bin/pip" install --upgrade pip -q
-sudo -u "$REAL_USER" "$VENV/bin/pip" install requests piper-tts -q
-_ok "venv ready (requests + piper-tts)"
+sudo -u "$REAL_USER" "$VENV/bin/pip" install requests piper-tts sounddevice faster-whisper -q
+_ok "venv ready (requests + piper-tts + sounddevice + faster-whisper)"
 
 _hdr "OLLAMA"
 if ! command -v ollama &>/dev/null; then
@@ -305,12 +306,12 @@ else
 fi
 chmod +x "$NEXIS_DATA/nexis-daemon.py"
 chown "$REAL_USER:$(id -gn "$REAL_USER")" "$NEXIS_DATA/nexis-daemon.py"
-_ok "Daemon installed (v3.0)"
+_ok "Daemon installed (v3.1)"
 
 _hdr "SYSTEMD SERVICE"
 cat > /etc/systemd/system/nexis-daemon.service << SVCEOF
 [Unit]
-Description=NeXiS Local AI Assistant v3
+Description=NeXiS Local AI Assistant v3.1
 After=network.target ollama.service
 Wants=ollama.service
 
@@ -368,7 +369,7 @@ _sigil(){
       ██║ ╚████║███████╗██╔╝ ██╗██║███████║
       ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═╝╚══════╝
 
-      N e X i S   //   v3.0
+      N e X i S   //   v3.1
 SIG
   echo -e "${RST}"
 }
@@ -396,17 +397,22 @@ while [[ $# -gt 0 ]]; do
     --web) xdg-open http://localhost:8080 2>/dev/null || echo "http://localhost:8080"; exit 0;;
     --models) ollama list 2>/dev/null | sed 's/^/  /'; exit 0;;
     --help|-h)
-      echo -e "\n  ${OR}${BOLD}NeXiS v3.0${RST}"
+      echo -e "\n  ${OR}${BOLD}NeXiS v3.1${RST}"
       echo -e "  ${DIM}──────────────────────────────────${RST}"
-      echo -e "  ${OR}nexis${RST}              connect"
+      echo -e "  ${OR}nexis${RST}              connect (password required)"
       echo -e "  ${OR}nexis --status${RST}     status"
       echo -e "  ${OR}nexis --start/stop/restart${RST}"
       echo -e "  ${OR}nexis --logs [n]${RST}   daemon log"
       echo -e "  ${OR}nexis --web${RST}        open dashboard"
       echo -e "  ${OR}nexis --models${RST}     installed models"
-      echo -e "\n  ${DIM}  in-session: //memory //forget <term> //clear //status${RST}"
-      echo -e "  ${DIM}  //probe //search <q> //exit //help${RST}"
-      echo -e "  ${DIM}  file paths work inline: /path/to/file.txt or image.png${RST}\n"
+      echo -e "\n  ${DIM}  in-session commands:${RST}"
+      echo -e "  ${DIM}  //memory //forget <term> //clear //status //probe${RST}"
+      echo -e "  ${DIM}  //search <q> //exit //help //voice [on|off]${RST}"
+      echo -e "  ${DIM}  //stt [on|off|wake|open|mic <idx>|mics]${RST}"
+      echo -e "  ${DIM}  //schedule [list|add|delete|pause|resume|run]${RST}"
+      echo -e "  ${DIM}  //workspace / //ws [run|clear|vars|history]${RST}"
+      echo -e "  ${DIM}  //passwd                change your password${RST}"
+      echo -e "  ${DIM}  file paths inline: /path/to/file.txt or image.png${RST}\n"
       exit 0;;
     *) echo -e "${RD}  unknown: $1${RST}  (nexis --help)"; exit 1;;
   esac
@@ -445,22 +451,29 @@ chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$NEXIS_CONF" "$NEXIS_DATA"
 
 clear; _sigil
 echo -e "  ${DIM}────────────────────────────────────────────────────${RST}"
-echo -e "  ${GN}  ✓${RST}  daemon          nexis-daemon.service"
-echo -e "  ${GN}  ✓${RST}  web             http://localhost:8080  (Chat · Memory · Status)"
+echo -e "  ${GN}  ✓${RST}  daemon          nexis-daemon.service (v3.1)"
+echo -e "  ${GN}  ✓${RST}  web             http://localhost:8080  (Chat · Memory · Status · Schedules)"
+echo -e "  ${GN}  ✓${RST}  auth            login required · change password via //passwd or WebUI"
 echo -e "  ${GN}  ✓${RST}  streaming       tokens appear as generated"
-echo -e "  ${GN}  ✓${RST}  markdown        rendered in CLI and web"
+echo -e "  ${GN}  ✓${RST}  markdown        rendered in CLI and web · box-drawing code blocks"
 echo -e "  ${GN}  ✓${RST}  models          qwen2.5:14b fast · qwen2.5vl:7b vision · Omega-Darker deep"
-echo -e "  ${GN}  ✓${RST}  voice           synthetic voice · off by default · //voice on to enable"
+echo -e "  ${GN}  ✓${RST}  voice           synthetic TTS · off by default · //voice on to enable"
+echo -e "  ${GN}  ✓${RST}  voice input     STT via faster-whisper · off by default · //stt on"
 echo -e "  ${GN}  ✓${RST}  smart routing   auto-switches to deep if fast refuses"
 echo -e "  ${GN}  ✓${RST}  web search      DuckDuckGo, no API key"
-echo -e "  ${GN}  ✓${RST}  file analysis   text + images (inline path or upload)"
+echo -e "  ${GN}  ✓${RST}  file pipeline   read · diff · edit · git commit · push"
+echo -e "  ${GN}  ✓${RST}  file analysis   text + images (inline path or upload · 600s timeout)"
 echo -e "  ${GN}  ✓${RST}  system probe    CPU/RAM/GPU/processes/network"
 echo -e "  ${GN}  ✓${RST}  desktop         open · close · launch · notify · clipboard"
+echo -e "  ${GN}  ✓${RST}  scheduled       briefings · //schedule · /schedules WebUI page"
+echo -e "  ${GN}  ✓${RST}  workspace       per-session Python exec · //ws run/clear/vars"
+echo -e "  ${GN}  ✓${RST}  shared history  CLI sessions visible in WebUI · Clr disconnects CLI"
 echo -e "  ${GN}  ✓${RST}  memory          SQLite · persistent · backup on uninstall"
 echo -e "  ${DIM}────────────────────────────────────────────────────${RST}"
 echo ""
 echo -e "  ${OR}    source ~/.bashrc && nexis${RST}"
 echo ""
+echo -e "  ${DIM}  default login: admin / Asdf1234!  (change via //passwd)${RST}"
 echo -e "  ${DIM}  uninstall: sudo bash nexis_setup.sh --uninstall${RST}"
 echo -e "  ${DIM}────────────────────────────────────────────────────${RST}"
 echo ""
