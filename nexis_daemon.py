@@ -74,6 +74,21 @@ _shared_lock    = threading.Lock()
 # ── Abort streaming ───────────────────────────────────────────────────────────
 _web_abort_event = threading.Event()  # set to abort current WebUI response
 
+# ── Cross-device sync (typing indicator + history push) ───────────────────────
+_is_typing        = False
+_sync_subscribers: list = []   # list of queue.SimpleQueue()
+_sync_lock        = threading.Lock()
+
+def _sync_broadcast(event: dict):
+    """Push a JSON event to all connected /api/sync SSE clients."""
+    data = json.dumps(event)
+    with _sync_lock:
+        dead = []
+        for q in _sync_subscribers:
+            try: q.put_nowait(data)
+            except Exception: dead.append(q)
+        for q in dead: _sync_subscribers.remove(q)
+
 # ── Active CLI sessions (for push notifications and clear-disconnect) ─────────
 _cli_sessions    = []
 _cli_sessions_lk = threading.Lock()
@@ -593,6 +608,12 @@ def _tts_expand_acronyms(text: str) -> str:
 def _tts_rhythm(text: str, backend: str = 'piper') -> str:
     text = re.sub(r'\bNeXiS\b', 'Nexis', text)
     text = re.sub(r'\bNEXIS\b', 'Nexis', text)
+    # Technical term pronunciation fixes (before acronym expansion)
+    text = re.sub(r'\bIPv(\d+)\b', lambda m: f'I P version {m.group(1)}', text)
+    text = re.sub(r'\blocalhost\b', 'local host', text)
+    text = re.sub(r'\b(\d+)px\b', r'\1 pixels', text)
+    text = re.sub(r'\b(\d+)ms\b', r'\1 milliseconds', text)
+    text = re.sub(r'\bWi-Fi\b', 'WiFi', text)
     text = _tts_expand_acronyms(text)
     if backend == 'espeak':
         text = re.sub(r':(?=\s+\S)', ': [[slnc 280]]', text)
@@ -797,11 +818,13 @@ def _tts_play_local(wav_bytes: bytes):
 
 
 class _SentenceAccum:
-    """Accumulates streaming tokens and emits complete sentences for TTS."""
+    """Accumulates streaming tokens and emits pairs of sentences for TTS.
+    Batching 2 sentences per chunk reduces pause frequency and sounds more natural."""
     _BOUNDARY = re.compile(r'(?<=[.!?])\s+|(?<=\n)\n|(?<=[;:])\s{2,}')
 
     def __init__(self):
-        self._buf = ''
+        self._buf     = ''
+        self._pending = []   # complete sentences waiting to be paired
 
     def feed(self, token: str):
         self._buf += token
@@ -810,15 +833,24 @@ class _SentenceAccum:
             return None
         m = self._BOUNDARY.search(self._buf)
         if m and len(self._buf[:m.start()].strip()) >= 12:
-            sentence = self._buf[:m.end()]
+            sentence = self._buf[:m.end()].strip()
             self._buf = self._buf[m.end():]
-            return sentence.strip()
+            self._pending.append(sentence)
+            if len(self._pending) >= 2:
+                combined = ' '.join(self._pending)
+                self._pending = []
+                return combined
         return None
 
     def flush(self):
-        s = self._buf.strip()
+        # Emit any leftover pending + buffered text
+        parts = self._pending[:]
+        self._pending = []
+        if self._buf.strip():
+            parts.append(self._buf.strip())
         self._buf = ''
-        return s if s else None
+        combined = ' '.join(parts)
+        return combined if combined else None
 
 def _split_sentences(text: str):
     parts = re.split(r'(?<=[.!?])\s+|(?<=:)\s*\n|\n\n+', text)
@@ -2859,6 +2891,7 @@ class Session:
                 return t
 
             def on_first_tok(t):
+                t = t.replace('\u2014', '-').replace('\u2013', '-')
                 if '```' in t:
                     if not in_code_blk[0]:
                         tail = _cli_sa.flush()
@@ -3655,10 +3688,12 @@ _CSS = (
     "font-family:var(--font);padding:0 4px;text-transform:uppercase;letter-spacing:.06em}"
     ".cbtn:hover{color:var(--or3)}.cbtn.ok{color:var(--or3)}"
     ".mts{font-size:9px;color:var(--fg2);opacity:.5;margin-left:6px;letter-spacing:.04em}"
-    ".dot{display:inline-block;width:4px;height:4px;border-radius:50%;"
-    "background:var(--or2);margin:0 1px;animation:blink 1.2s infinite}"
-    ".dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}"
-    "@keyframes blink{0%,80%,100%{opacity:.2}40%{opacity:1}}"
+    ".dot{display:inline-block;font-size:8px;color:var(--or2);"
+    "margin:0 2px;animation:tri 1.2s infinite}"
+    ".dot::before{content:'\\25B2'}"
+    ".dot:nth-child(2){animation-delay:.3s}.dot:nth-child(3){animation-delay:.6s}"
+    "@keyframes tri{0%,70%,100%{opacity:.15;color:var(--or2)}35%{opacity:1;color:var(--or)}}"
+    "@keyframes blink{0%,80%,100%{opacity:.3}40%{opacity:1}}"
     ".cursor{color:var(--or3);animation:blink 1s infinite}"
     ".status-line{font-size:10px;color:var(--fg2);opacity:.65;margin:0 0 4px;letter-spacing:.04em}"
     ".ir{display:flex;gap:6px;padding:8px 0 0;flex-shrink:0;align-items:stretch}"
@@ -3907,6 +3942,62 @@ function _populateModels(){
   }).catch(function(){});
 }
 _populateModels();
+
+/* Cross-device sync — shows typing indicator when another device is chatting */
+var _syncEs=null,_syncHistLen=-1,_extTypingEl=null;
+function _getOrCreateExtTyping(){
+  if(_extTypingEl&&_extTypingEl.parentNode)return _extTypingEl;
+  var el=document.createElement('div');el.className='msg n';el.id='ext-typing';
+  el.innerHTML='<div class=who>NeXiS</div><span class=nc><span class=dot></span><span class=dot></span><span class=dot></span></span>';
+  M.appendChild(el);M.scrollTop=M.scrollHeight;_extTypingEl=el;return el;
+}
+function _removeExtTyping(){
+  if(_extTypingEl&&_extTypingEl.parentNode){_extTypingEl.parentNode.removeChild(_extTypingEl);}
+  _extTypingEl=null;
+}
+function _fetchAndAppendHistory(fromIdx){
+  fetch('/api/history').then(function(r){return r.json();}).then(function(d){
+    if(!d.history)return;
+    var msgs=d.history;var newLen=msgs.length;
+    if(newLen<=fromIdx)return;
+    for(var i=fromIdx;i<newLen;i++){
+      var m=msgs[i];
+      if(m.role==='user'){
+        var u=document.createElement('div');u.className='msg u';
+        var txt=m.content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+        u.innerHTML='<div class=who>Creator<span class=mts>'+ts()+'</span></div><p>'+txt+'</p>';
+        M.appendChild(u);
+      }else if(m.role==='assistant'){
+        var n=document.createElement('div');n.className='msg n';
+        n.innerHTML='<div class=who>NeXiS<span class=mts>'+ts()+'</span></div><div class=nc></div>';
+        M.appendChild(n);
+        try{n.querySelector('.nc').innerHTML=renderMd(m.content);}catch(e){n.querySelector('.nc').innerHTML=m.content;}
+        wireCodeCopy(n);
+      }
+    }
+    _syncHistLen=newLen;M.scrollTop=M.scrollHeight;
+  }).catch(function(){});
+}
+function _startSync(){
+  if(_syncEs){try{_syncEs.close();}catch(e){}}
+  _syncEs=new EventSource('/api/sync');
+  _syncEs.onmessage=function(e){
+    try{var d=JSON.parse(e.data);}catch(ex){return;}
+    var hl=d.hist_len||0;
+    if(_syncHistLen<0){
+      /* First event: calibrate to current server hist without fetching (page already rendered) */
+      _syncHistLen=hl;return;
+    }
+    if(d.typing&&!_sending){_getOrCreateExtTyping();}
+    else if(!d.typing){
+      _removeExtTyping();
+      if(!_sending&&hl>_syncHistLen){_fetchAndAppendHistory(_syncHistLen);_syncHistLen=hl;}
+    }
+  };
+  _syncEs.onerror=function(){setTimeout(_startSync,5000);};
+}
+_startSync();
+
 function showSrc(){
   fetch('/api/sources').then(function(r){return r.json();}).then(function(d){
     if(!d.sources||!d.sources.length){alert('No sources from last query.');return;}
@@ -4337,7 +4428,10 @@ def _page_history(db):
 
 
 def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
+    global _is_typing
     _web_abort_event.clear()
+    _is_typing = True
+    _sync_broadcast({'typing': True})
     with _shared_lock: hist = list(_shared_hist)
     db = _db(); sys_p = _build_system(db)
     user_content = msg; images = None
@@ -4422,6 +4516,7 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         while True:
             try:
                 tok = q.get(timeout=0.05)
+                tok = tok.replace('\u2014', '-').replace('\u2013', '-')
                 collected.append(tok); yield tok
                 _feed_tts(tok)
                 for ar in _drain_ready(): yield ar
@@ -4430,6 +4525,7 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                     try:
                         while True:
                             tok = q.get_nowait()
+                            tok = tok.replace('\u2014', '-').replace('\u2013', '-')
                             collected.append(tok); yield tok
                             _feed_tts(tok)
                     except _queue.Empty: pass
@@ -4489,6 +4585,10 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         _shared_hist.append({'role': 'user',      'content': user_content})
         _shared_hist.append({'role': 'assistant',  'content': final_text})
     _maybe_summarize_history()
+    global _is_typing
+    _is_typing = False
+    with _shared_lock: hl = len(_shared_hist)
+    _sync_broadcast({'typing': False, 'hist_len': hl})
 
 
 def _start_web():
@@ -4596,6 +4696,40 @@ def _start_web():
                     if wav: self._send(200, wav, 'audio/wav')
                     else:   self._send(404, b'not found')
                     return
+                elif path == '/api/sync':
+                    # SSE stream: pushes typing state + hist_len changes to all clients
+                    q: _queue.SimpleQueue = _queue.SimpleQueue()
+                    with _sync_lock: _sync_subscribers.append(q)
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.send_header('Cache-Control', 'no-cache')
+                    self.send_header('Connection', 'keep-alive')
+                    for k, v in _CORS.items(): self.send_header(k, v)
+                    self.end_headers()
+                    try:
+                        # Send current state immediately
+                        with _shared_lock: hl = len(_shared_hist)
+                        init = json.dumps({'typing': _is_typing, 'hist_len': hl})
+                        self.wfile.write(f'data: {init}\n\n'.encode()); self.wfile.flush()
+                        while True:
+                            try:
+                                evt = q.get(timeout=25)
+                                self.wfile.write(f'data: {evt}\n\n'.encode()); self.wfile.flush()
+                            except _queue.Empty:
+                                # Keepalive comment
+                                self.wfile.write(b': ping\n\n'); self.wfile.flush()
+                    except Exception:
+                        pass
+                    finally:
+                        with _sync_lock:
+                            try: _sync_subscribers.remove(q)
+                            except ValueError: pass
+                    return
+                elif path == '/api/history':
+                    # Returns shared conversation history (user+assistant only)
+                    with _shared_lock:
+                        hist = [m for m in _shared_hist if m['role'] in ('user', 'assistant')]
+                    self._send(200, json.dumps({'history': hist}), 'application/json')
                 elif path == '/api/models':
                     with _model_override_lock: current = _model_override
                     mlist = [{'key': k, 'label': v['label'], 'desc': v['desc'],
