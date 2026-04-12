@@ -4432,9 +4432,142 @@ def _page_history(db):
     return _shell(f"<div class=page><div class=ph>History</div>{items}</div>", 'history')
 
 
+def _web_cmd(cmd) -> str:
+    """Execute a // slash command from the web API and return the result as a string."""
+    global _model_override
+    parts = cmd.split(); c = parts[0].lower() if parts else ''
+    lines = []
+
+    if c == 'help':
+        lines = [
+            '**Available commands** (prefix with `//`)',
+            '',
+            '`memory` — what Nexis remembers',
+            '`memory search <term>` — search memories',
+            '`forget <term>` — delete matching memories',
+            '`reset` — clear current conversation',
+            '`status` — session info',
+            '`search <query>` — web search',
+            '`model [fast|deep|code]` — view or switch model',
+            '`history` — recent chat sessions',
+        ]
+
+    elif c == 'memory':
+        db = _db()
+        if len(parts) > 1 and parts[1].lower() == 'search':
+            term = ' '.join(parts[2:]).lower() if len(parts) > 2 else ''
+            if not term:
+                lines = ['Usage: `//memory search <term>`']
+            else:
+                rows = db.execute(
+                    'SELECT content FROM memories WHERE LOWER(content) LIKE ? ORDER BY id DESC',
+                    (f'%{term}%',)
+                ).fetchall()
+                if not rows:
+                    lines = [f'No memories matching "{term}"']
+                else:
+                    lines = [f'· {r["content"]}' for r in rows]
+        else:
+            mems = _get_memories(db, 30)
+            lines = [f'· {m}' for m in mems] if mems else ['No memories yet']
+        db.close()
+
+    elif c == 'forget' and len(parts) > 1:
+        term = ' '.join(parts[1:]).lower()
+        db = _db()
+        rows = db.execute('SELECT id,content FROM memories').fetchall()
+        d = 0
+        for r in rows:
+            if term in r['content'].lower():
+                db.execute('DELETE FROM memories WHERE id=?', (r['id'],)); d += 1
+        db.commit(); db.close()
+        lines = [f'Deleted {d} memories matching "{term}"']
+
+    elif c == 'reset':
+        with _shared_lock: _shared_hist.clear()
+        with _shared_lock: hl = len(_shared_hist)
+        _sync_broadcast({'typing': False, 'hist_len': hl})
+        lines = ['Conversation reset. Nexis still has its memories.']
+
+    elif c == 'status':
+        db = _db()
+        mc = db.execute('SELECT COUNT(*) FROM memories').fetchone()[0]
+        sc = db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]
+        db.close()
+        with _model_override_lock: m = _model_override
+        lines = [
+            f'memories: {mc}',
+            f'sessions: {sc}',
+            f'model: {MODELS.get(m, {}).get("label", m)}',
+            f'time: {datetime.now().strftime("%H:%M")}',
+        ]
+
+    elif c == 'model':
+        if len(parts) < 2:
+            with _model_override_lock: current = _model_override
+            lines = ['**Models**']
+            for k, v in MODELS.items():
+                marker = ' ← active' if k == current else ''
+                lines.append(f'`{k}` — {v["label"]}: {v["desc"]}{marker}')
+            lines.append('Usage: `//model <fast|deep|code>`')
+        else:
+            choice = parts[1].strip().lower()
+            if choice in MODELS:
+                with _model_override_lock: _model_override = choice
+                lines = [f'Model set to **{MODELS[choice]["label"]}**']
+            else:
+                lines = [f'Unknown model: `{choice}`']
+
+    elif c == 'search' and len(parts) > 1:
+        q = ' '.join(parts[1:])
+        result = _web_search(q)
+        lines = [result] if result else ['No results']
+
+    elif c == 'history':
+        db = _db()
+        rows = db.execute(
+            'SELECT DISTINCT session_id, MIN(created_at) as started '
+            'FROM chat_history GROUP BY session_id ORDER BY started DESC LIMIT 10'
+        ).fetchall()
+        db.close()
+        if not rows:
+            lines = ['No chat history yet']
+        else:
+            for s in rows:
+                sid = s['session_id']; ts = str(s['started'])[:16]
+                src = '(cli)' if sid.startswith('cli_') else '(web)'
+                lines.append(f'{ts} {src}')
+
+    elif c in ('exit', 'quit', 'bye', 'disconnect'):
+        lines = ['Use the app navigation to disconnect.']
+
+    else:
+        lines = [f'Unknown command: `{c}`. Type `//help` to see available commands.']
+
+    return '\n'.join(lines)
+
+
 def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
     global _is_typing
     _web_abort_event.clear()
+
+    # Handle slash commands (// prefix) — return result directly without AI
+    if msg and msg.startswith('//'):
+        cmd_str = msg[2:].strip()
+        result  = _web_cmd(cmd_str)
+        _is_typing = True
+        _sync_broadcast({'typing': True})
+        # Store in history so sync reflects the exchange
+        with _shared_lock:
+            _shared_hist.append({'role': 'user',      'content': msg})
+            _shared_hist.append({'role': 'assistant',  'content': result})
+        with _shared_lock: hl = len(_shared_hist)
+        _web_chat_stream._last = (msg, result)
+        _is_typing = False
+        _sync_broadcast({'typing': False, 'hist_len': hl})
+        yield result
+        return
+
     _is_typing = True
     _sync_broadcast({'typing': True})
     with _shared_lock: hist = list(_shared_hist)
@@ -4590,7 +4723,6 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         _shared_hist.append({'role': 'user',      'content': user_content})
         _shared_hist.append({'role': 'assistant',  'content': final_text})
     _maybe_summarize_history()
-    global _is_typing
     _is_typing = False
     with _shared_lock: hl = len(_shared_hist)
     _sync_broadcast({'typing': False, 'hist_len': hl})
@@ -4978,6 +5110,12 @@ def _start_web():
 
                 elif path == '/api/chat/abort':
                     _web_abort_event.set()
+                    self._send(200, json.dumps({'ok': True}), 'application/json')
+
+                elif path == '/api/clear':
+                    with _shared_lock: _shared_hist.clear()
+                    with _shared_lock: hl = len(_shared_hist)
+                    _sync_broadcast({'typing': False, 'hist_len': hl})
                     self._send(200, json.dumps({'ok': True}), 'application/json')
 
                 elif path == '/api/passwd':
