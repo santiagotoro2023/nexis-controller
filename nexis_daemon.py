@@ -238,6 +238,17 @@ def _api_token_valid(token: str) -> bool:
     stored = _api_token_get()
     return stored is not None and secrets.compare_digest(stored, token)
 
+# ── Client app config (Porcupine key, etc.) ───────────────────────────────────
+_PORCUPINE_KEY = 'porcupine_access_key'
+
+def _porcupine_key_get() -> str:
+    return _auth_load().get(_PORCUPINE_KEY, '')
+
+def _porcupine_key_set(key: str):
+    creds = _auth_load()
+    creds[_PORCUPINE_KEY] = key
+    AUTH_FILE.write_text(json.dumps(creds, indent=2))
+
 
 # ── TLS certificate (self-signed, generated once on first run) ────────────────
 
@@ -4006,7 +4017,12 @@ function showSrc(){
 }
 function clr(){
   if(!confirm('Clear conversation and disconnect active CLI sessions?'))return;
-  fetch('/api/clear',{method:'POST'}).then(function(){location.reload();});
+  fetch('/api/clear',{method:'POST',credentials:'same-origin'})
+    .then(function(r){
+      if(r.status===401){window.location='/login';return;}
+      location.reload();
+    })
+    .catch(function(){location.reload();});
 }
 
 /* Voice / Audio */
@@ -4390,7 +4406,34 @@ def _page_status(db):
         "<button type=submit class=btn>Update</button>"
         "</form></div>"
     )
-    return _shell(f"<div class=page><div class=ph>Status</div>{rows}{pw_form}</div>", 'status')
+    # Porcupine key config (fetched by Android app automatically)
+    pk = _porcupine_key_get()
+    pk_form = (
+        "<div style='margin-top:12px;padding-top:12px;border-top:1px solid var(--border)'>"
+        "<div class=ph>Wake word access key</div>"
+        "<div style='color:var(--fg2);font-size:11px;margin-bottom:8px'>"
+        "Picovoice Porcupine key for always-on 'Hey Nexis' detection on Android. "
+        "Get a free key at <a href='https://console.picovoice.ai' target=_blank style='color:var(--or)'>console.picovoice.ai</a>. "
+        "The app fetches this automatically on login.</div>"
+        f"<div style='display:flex;gap:8px;align-items:center'>"
+        f"<input id=pkInput type=text value='{_esc(pk)}' placeholder='Paste access key here' "
+        "style='flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--fg);padding:6px 8px;font-family:var(--font);font-size:11px;outline:none'>"
+        "<button onclick=\"_savePk()\" class=btn>Save</button>"
+        f"</div>"
+        "<div id=pkStatus style='font-size:11px;color:var(--fg2);margin-top:4px'>"
+        f"{'key configured' if pk else 'no key set'}</div>"
+        "</div>"
+        "<script>"
+        "function _savePk(){"
+        "  var k=document.getElementById('pkInput').value.trim();"
+        "  fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "    body:JSON.stringify({porcupine_access_key:k}),credentials:'same-origin'})"
+        "  .then(function(r){return r.json();})"
+        "  .then(function(d){document.getElementById('pkStatus').textContent=d.ok?'saved':'error';});"
+        "}"
+        "</script>"
+    )
+    return _shell(f"<div class=page><div class=ph>Status</div>{rows}{pw_form}{pk_form}</div>", 'status')
 
 
 def _page_history(db):
@@ -4730,6 +4773,11 @@ def _start_web():
                     with _shared_lock:
                         hist = [m for m in _shared_hist if m['role'] in ('user', 'assistant')]
                     self._send(200, json.dumps({'history': hist}), 'application/json')
+                elif path == '/api/config':
+                    # Returns non-sensitive app config for authenticated clients
+                    self._send(200, json.dumps({
+                        'porcupine_access_key': _porcupine_key_get(),
+                    }), 'application/json')
                 elif path == '/api/models':
                     with _model_override_lock: current = _model_override
                     mlist = [{'key': k, 'label': v['label'], 'desc': v['desc'],
@@ -4884,12 +4932,24 @@ def _start_web():
                         self._send(400, json.dumps({'error': f'Unknown model: {choice}'}), 'application/json')
 
                 elif path == '/api/clear':
+                    global _is_typing
                     with _shared_lock: _shared_hist.clear()
+                    _is_typing = False
+                    # Notify all sync subscribers that history is now empty
+                    _sync_broadcast({'typing': False, 'hist_len': 0})
                     # Signal all CLI sessions to disconnect
                     with _cli_sessions_lk:
                         for sess in list(_cli_sessions):
                             sess._disconnect.set()
                     self._send(200, json.dumps({'ok': True}), 'application/json')
+
+                elif path == '/api/config':
+                    data = json.loads(body) if body else {}
+                    key = data.get('porcupine_access_key', '').strip()
+                    if key:
+                        _porcupine_key_set(key)
+                    self._send(200, json.dumps({'ok': True,
+                        'porcupine_access_key': _porcupine_key_get()}), 'application/json')
 
                 elif path == '/api/voice':
                     data = json.loads(body) if body else {}
