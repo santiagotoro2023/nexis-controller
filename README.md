@@ -111,20 +111,11 @@ server {
 
 ## Wake word (always-on "Hey Nexis" on Android)
 
-The Android app supports always-on wake word detection via [Picovoice Porcupine](https://picovoice.ai/products/porcupine/), which runs entirely on-device.
+The Android app supports always-on wake word detection via [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx), which runs entirely on-device.
 
-**One-time server setup:**
-1. Create a free account at [console.picovoice.ai](https://console.picovoice.ai) and copy your access key.
-2. Open the controller web UI → **Status** → paste the key in the **Wake word access key** field and save.
+**No setup required.** The app downloads the detection model (~15 MB) automatically on first use. No accounts, no API keys, no extra files.
 
-The Android app fetches the key automatically on every login — no manual entry needed in the app.
-
-**One-time model setup** (optional, for the actual "Hey Nexis" phrase):
-1. Go to [console.picovoice.ai/ppn](https://console.picovoice.ai/ppn), type `Hey Nexis`, select Android.
-2. Download the `.ppn` file, rename it `hey-nexis_android.ppn`.
-3. Place it in `nexis-worker/app/src/main/assets/` and rebuild the app.
-
-Without the model file the service starts but falls back to the built-in "Porcupine" keyword.
+To enable: open Settings in the app → toggle "hey nexis" on. A persistent notification appears while listening.
 
 ---
 
@@ -169,8 +160,6 @@ curl -k https://localhost:8443/api/models \
 | `GET` | `/api/voice` | Voice status |
 | `POST` | `/api/voice` | Enable/disable TTS `{"on":true}` |
 | `GET` | `/api/audio/{id}` | Fetch a TTS audio chunk (WAV) |
-| `GET` | `/api/config` | App config (Porcupine access key, etc.) |
-| `POST` | `/api/config` | Update app config `{"porcupine_access_key":"..."}` |
 | `GET` | `/api/memories` | List memories |
 | `POST` | `/api/memories` | Add / delete / clear memories |
 | `GET` | `/api/schedules` | List scheduled tasks |
