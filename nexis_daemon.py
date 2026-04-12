@@ -3,7 +3,7 @@
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
-import shutil, mimetypes, io, wave, tempfile, time, hashlib, secrets, difflib
+import shutil, mimetypes, io, wave, tempfile, time, hashlib, secrets, difflib, ssl
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +15,8 @@ SOCK_PATH = Path('/run/nexis/nexis.sock')
 LOG_PATH  = DATA / 'logs' / 'daemon.log'
 AUTH_FILE  = CONF / 'auth.json'
 SCHED_FILE = CONF / 'schedules.json'
+TLS_KEY    = CONF / 'server.key'
+TLS_CERT   = CONF / 'server.crt'
 
 (DATA / 'memory').mkdir(parents=True, exist_ok=True)
 (DATA / 'logs').mkdir(exist_ok=True)
@@ -220,6 +222,56 @@ def _api_token_valid(token: str) -> bool:
         return False
     stored = _api_token_get()
     return stored is not None and secrets.compare_digest(stored, token)
+
+
+# ── TLS certificate (self-signed, generated once on first run) ────────────────
+
+def _ensure_tls_cert():
+    """Generate a self-signed TLS certificate and key on first run.
+    Uses the `cryptography` library (installed with piper-tts).
+    Falls back to the `openssl` CLI if unavailable."""
+    if TLS_KEY.exists() and TLS_CERT.exists():
+        return
+    CONF.mkdir(parents=True, exist_ok=True)
+    _log('Generating self-signed TLS certificate (first run)…')
+    try:
+        import datetime as _dt, ipaddress as _ip
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes as _h, serialization as _s
+        from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+        key = _rsa.generate_private_key(65537, 4096)
+        TLS_KEY.write_bytes(key.private_bytes(
+            _s.Encoding.PEM, _s.PrivateFormat.TraditionalOpenSSL, _s.NoEncryption()))
+        TLS_KEY.chmod(0o600)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'nexis-controller')])
+        cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(_dt.datetime.now(_dt.timezone.utc))
+            .not_valid_after(_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=3650))
+            .add_extension(x509.SubjectAlternativeName([
+                x509.DNSName('nexis-controller'), x509.DNSName('localhost'),
+                x509.IPAddress(_ip.IPv4Address('127.0.0.1')),
+            ]), critical=False)
+            .sign(key, _h.SHA256()))
+        TLS_CERT.write_bytes(cert.public_bytes(_s.Encoding.PEM))
+        TLS_CERT.chmod(0o644)
+    except ImportError:
+        subprocess.run([
+            'openssl', 'req', '-x509', '-newkey', 'rsa:4096',
+            '-keyout', str(TLS_KEY), '-out', str(TLS_CERT),
+            '-days', '3650', '-nodes', '-subj', '/CN=nexis-controller',
+        ], check=True, capture_output=True)
+        TLS_KEY.chmod(0o600); TLS_CERT.chmod(0o644)
+    _log('TLS certificate ready')
+
+def _tls_fingerprint() -> str:
+    """SHA-256 fingerprint of the server cert in AA:BB:CC… format."""
+    der = ssl.PEM_cert_to_DER_cert(TLS_CERT.read_text())
+    h   = hashlib.sha256(der).hexdigest()
+    return ':'.join(h[i:i+2] for i in range(0, len(h), 2))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2654,7 +2706,7 @@ class Session:
             f'  {OR}{L[1]}{RST}  {DIM}{"─"*34}{RST}\n'
             f'  {OR}{L[2]}{RST}  {DIM}{now}  ·  {mc} mem  ·  #{sc+1}{RST}\n'
             f'  {OR}{L[3]}{RST}  {DIM}model:{RST} {label}  {voice_st}  {stt_st}\n'
-            f'  {OR}{L[4]}{RST}  {DIM}http://{host}:8080  ·  //help{RST}\n'
+            f'  {OR}{L[4]}{RST}  {DIM}https://{host}:8443  ·  //help{RST}\n'
             f'{DIM}  {bar}{RST}\n\n'
         )
 
@@ -4444,6 +4496,11 @@ def _start_web():
     from socketserver import ThreadingMixIn
     from urllib.parse import urlparse, parse_qs
 
+    # TLS context — cert was generated at startup
+    _tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    _tls_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    _tls_ctx.load_cert_chain(certfile=str(TLS_CERT), keyfile=str(TLS_KEY))
+
     class TS(ThreadingMixIn, HTTPServer):
         daemon_threads = True; allow_reuse_address = True
 
@@ -4808,10 +4865,11 @@ def _start_web():
                 try: self._send(500, json.dumps({'error': str(e)}), 'application/json')
                 except Exception: pass
 
-    for port in (8080, 8081, 8082):
+    for port in (8443, 8444, 8445):
         try:
             srv = TS(('0.0.0.0', port), H)
-            _log(f'Web on :{port}')
+            srv.socket = _tls_ctx.wrap_socket(srv.socket, server_side=True)
+            _log(f'Web on :{port} (HTTPS/TLS)')
             srv.serve_forever()
             break
         except OSError:
@@ -4842,7 +4900,8 @@ def _seed_shared_history():
 
 def main():
     _log('NeXiS v3.1 starting')
-    _auth_load()   # ensure credentials file exists
+    _auth_load()         # ensure credentials file exists
+    _ensure_tls_cert()   # generate self-signed TLS cert if not present
     _seed_shared_history()
     _refresh_models()
     threading.Thread(target=_warmup,          daemon=True).start()
