@@ -1,6 +1,6 @@
 # nexis-controller
 
-Local AI assistant daemon running on your PC. Handles LLM inference, memory, voice synthesis, speech recognition, and scheduling. Accessed via a terminal CLI or web browser — and remotely by the [nexis-worker](https://github.com/santiagotoro2023/nexis-worker) Android app.
+Local AI assistant daemon running on your PC. Handles LLM inference, persistent memory, voice synthesis, speech recognition, web search, and scheduling. Accessed via a terminal CLI, a web browser, or the [nexis-worker](https://github.com/santiagotoro2023/nexis-worker) Android app — all in sync in real time.
 
 ---
 
@@ -9,9 +9,10 @@ Local AI assistant daemon running on your PC. Handles LLM inference, memory, voi
 - Linux (systemd)
 - Python 3.11+
 - [Ollama](https://ollama.ai) with at least one model pulled
-- Piper TTS 1.4.2 (`pip install piper-tts`)
-- faster-whisper (`pip install faster-whisper`)
-- sounddevice (`pip install sounddevice`)
+- `piper-tts` — `pip install piper-tts`
+- `faster-whisper` — `pip install faster-whisper`
+- `sounddevice` — `pip install sounddevice`
+- `sox` (optional, for voice effects) — `sudo apt install sox`
 
 ---
 
@@ -23,102 +24,107 @@ cd nexis-controller
 sudo bash nexis_setup.sh
 ```
 
-The setup script installs the daemon as a systemd service, downloads the GlaDOS voice model, and sets a default password (`Asdf1234!` — change it immediately).
+The setup script installs the daemon as a systemd service, downloads the GlaDOS voice model, and sets a default password (`Asdf1234!` — change it immediately via the web UI).
 
 ---
 
-## CLI usage
+## Access
 
-Connect via the Unix socket:
+### Web UI
 
-```bash
-socat - UNIX-CONNECT:/run/nexis/nexis.sock
+```
+https://localhost:8443
 ```
 
-Or use the alias the setup script installs:
+The daemon generates a self-signed TLS certificate automatically on first start — accept the browser warning once. The Android app pins the certificate on first connection (TOFU) and trusts it permanently after that.
+
+Default password: `Asdf1234!` — change it at **Status → Change password**.
+
+### CLI
+
+Connect via the Unix socket using the alias installed by the setup script:
 
 ```bash
 nexis
 ```
 
-### Built-in commands
+Or directly:
 
-| Command | What it does |
+```bash
+socat - UNIX-CONNECT:/run/nexis/nexis.sock
+```
+
+---
+
+## CLI commands
+
+| Command | Description |
 |---|---|
 | `//help` | Show all commands |
 | `//brief` | Morning briefing: time, weather, pending memories |
 | `//memory list` | Show all stored facts |
 | `//memory search <term>` | Search memories by keyword |
-| `//memory add <text>` | Add a fact manually |
+| `//memory add <text>` | Manually add a fact |
 | `//memory clear` | Wipe all memories |
 | `//voice on/off` | Toggle TTS output |
-| `//voice speed <0.4–2.0>` | Adjust speaking speed (default 0.85) |
+| `//voice speed <0.4–2.0>` | Adjust speaking rate |
 | `//stt on/off` | Toggle microphone listening |
-| `//stt mode wake/always` | Wake-word mode vs always-on |
+| `//stt mode wake/always` | Wake-word vs always-on mode |
 | `//watch <service>` | Watch a systemd service for state changes |
 | `//watch list` | Show active watchers |
 | `//watch stop <service>` | Stop a watcher |
 | `//index <path>` | Index a file or directory for RAG retrieval |
-| `//model fast/deep/code` | Switch LLM model |
+| `//model fast/deep/code` | Switch active LLM |
 | `//schedule list` | Show scheduled tasks |
-| `//history` | Print recent chat history |
-| `//clear` | Clear current session history |
+| `//history` | Print recent session history |
+| `//reset` | Clear shared conversation history |
+| `//clear` | Wipe all memories |
 
-Anything without `//` prefix is sent to the AI as a normal message.
-
----
-
-## Web UI
-
-Open `http://localhost:8080` in a browser. Default password: `Asdf1234!`.
-
-Change the password at **Status → Change password** or via the CLI:
-
-```bash
-# POST to the API directly
-curl -b "$(cat /tmp/nexis_cookie)" -X POST http://localhost:8080/api/passwd \
-  -d 'password=NewPass&confirm=NewPass'
-```
+Anything without a `//` prefix is sent to the AI as a message.
 
 ---
 
-## Exposing remotely (for nexis-worker)
+## Exposing remotely (for the Android app)
 
-To use the Android app over the internet you need HTTPS. Quick setup with nginx:
+The controller already runs HTTPS on port **8443** — no nginx or Certbot required. To make it reachable from outside your home network:
 
-```bash
-sudo apt install nginx certbot python3-certbot-nginx
-```
+1. **Port-forward 8443** on your router to the PC running the controller.
+2. Use your public IP or a dynamic-DNS hostname as the server URL in the Android app (e.g. `https://nexis.yourdomain.com:8443`).
 
-Create `/etc/nginx/sites-available/nexis`:
+If you want port 443 (no port number in the URL), either port-forward 443→8443 on your router, or put nginx in front:
 
 ```nginx
 server {
-    listen 80; server_name your.domain.com;
-    return 301 https://$host$request_uri;
-}
-server {
     listen 443 ssl; http2 on;
-    server_name your.domain.com;
-    ssl_certificate     /etc/letsencrypt/live/your.domain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/your.domain.com/privkey.pem;
-    proxy_buffering off; proxy_read_timeout 300s;
-    proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme;
-    location / { proxy_pass http://127.0.0.1:8080; }
+    server_name nexis.yourdomain.com;
+    ssl_certificate     /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+    location / { proxy_pass https://127.0.0.1:8443; proxy_ssl_verify off; }
 }
 ```
 
-```bash
-sudo certbot --nginx -d your.domain.com
-sudo ln -s /etc/nginx/sites-available/nexis /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-```
+> The self-signed cert is fine for the Android app (TOFU pinning). Browser users will see a warning on first visit only.
 
-Firewall — block direct port 8080, allow 443:
+---
 
-```bash
-sudo ufw allow 443/tcp && sudo ufw deny 8080/tcp && sudo ufw --force enable
-```
+## Wake word (always-on "Hey Nexis" on Android)
+
+The Android app supports always-on wake word detection via [Picovoice Porcupine](https://picovoice.ai/products/porcupine/), which runs entirely on-device.
+
+**One-time server setup:**
+1. Create a free account at [console.picovoice.ai](https://console.picovoice.ai) and copy your access key.
+2. Open the controller web UI → **Status** → paste the key in the **Wake word access key** field and save.
+
+The Android app fetches the key automatically on every login — no manual entry needed in the app.
+
+**One-time model setup** (optional, for the actual "Hey Nexis" phrase):
+1. Go to [console.picovoice.ai/ppn](https://console.picovoice.ai/ppn), type `Hey Nexis`, select Android.
+2. Download the `.ppn` file, rename it `hey-nexis_android.ppn`.
+3. Place it in `nexis-worker/app/src/main/assets/` and rebuild the app.
+
+Without the model file the service starts but falls back to the built-in "Porcupine" keyword.
 
 ---
 
@@ -132,13 +138,13 @@ sudo journalctl -u nexis-daemon -f      # live logs
 
 ---
 
-## API (for developers / Android app)
+## API
 
-All endpoints require a session cookie **or** a Bearer token.
+All endpoints require a session cookie (browser) **or** a `Authorization: Bearer <token>` header (Android app / scripts).
 
-**Get a Bearer token** (used by the Android app):
+**Get a Bearer token:**
 ```bash
-curl -X POST https://your.domain.com/api/token \
+curl -k -X POST https://localhost:8443/api/token \
   -H 'Content-Type: application/json' \
   -d '{"password":"YourPassword"}'
 # → {"token": "abc123..."}
@@ -146,24 +152,26 @@ curl -X POST https://your.domain.com/api/token \
 
 **Use the token:**
 ```bash
-curl https://your.domain.com/api/models \
+curl -k https://localhost:8443/api/models \
   -H 'Authorization: Bearer abc123...'
 ```
 
-Key endpoints:
-
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/token` | Get Bearer token (no auth needed, password in body) |
+| `POST` | `/api/token` | Get Bearer token (password in body, no auth needed) |
 | `POST` | `/api/chat` | Send message → SSE token stream |
 | `POST` | `/api/chat/abort` | Abort current generation |
-| `GET` | `/api/models` | List available LLM models |
+| `GET` | `/api/history` | Full conversation history (user + assistant) |
+| `GET` | `/api/sync` | SSE stream — `{typing, hist_len}` events for cross-device sync |
+| `POST` | `/api/clear` | Clear conversation history and disconnect CLI sessions |
+| `GET` | `/api/models` | List LLM models and which is active |
 | `POST` | `/api/model` | Switch model `{"model":"fast"}` |
 | `GET` | `/api/voice` | Voice status |
 | `POST` | `/api/voice` | Enable/disable TTS `{"on":true}` |
-| `GET` | `/api/audio/{id}` | Fetch a TTS audio chunk (WAV, one-time) |
-| `GET` | `/api/stt/stream` | SSE — push of speech-to-text result (30s timeout) |
+| `GET` | `/api/audio/{id}` | Fetch a TTS audio chunk (WAV) |
+| `GET` | `/api/config` | App config (Porcupine access key, etc.) |
+| `POST` | `/api/config` | Update app config `{"porcupine_access_key":"..."}` |
 | `GET` | `/api/memories` | List memories |
-| `POST` | `/api/memories` | Add/delete/clear memories |
+| `POST` | `/api/memories` | Add / delete / clear memories |
 | `GET` | `/api/schedules` | List scheduled tasks |
-| `POST` | `/api/schedules` | Add/delete/toggle/run a schedule |
+| `POST` | `/api/schedules` | Add / delete / toggle / run a schedule |
