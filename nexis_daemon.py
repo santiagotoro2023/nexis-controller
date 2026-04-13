@@ -4674,28 +4674,6 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         yield result
         return
 
-    # Auto model routing: if user hasn't manually overridden, pick model by query type
-    _DEEP_RE = re.compile(
-        r'\b(explain|analyze|analyz|compare|why\s+does|how\s+does|what\s+causes|'
-        r'in\s+depth|in\s+detail|thoroughly|comprehensive|deep\s+dive|'
-        r'essay|dissertation|research|literature|philosophy|theory|'
-        r'write\s+a\s+report|write\s+an?\s+essay|tell\s+me\s+everything)\b',
-        re.IGNORECASE)
-    _CODE_RE = re.compile(
-        r'\b(write\s+code|implement|function|class|script|program|debug|'
-        r'fix\s+this\s+code|refactor|unit\s+test|algorithm|leetcode|'
-        r'sql\s+query|bash\s+script|python\s+script)\b',
-        re.IGNORECASE)
-    with _model_override_lock: _auto_model = _model_override
-    _auto_restored = False
-    if _auto_model == 'fast' and msg:
-        if _CODE_RE.search(msg):
-            with _model_override_lock: _model_override = 'code'
-            _auto_restored = True
-        elif _DEEP_RE.search(msg):
-            with _model_override_lock: _model_override = 'deep'
-            _auto_restored = True
-
     _is_typing = True
     _sync_broadcast({'typing': True})
     with _shared_lock: hist = list(_shared_hist)
@@ -4851,10 +4829,6 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                     yield f'[AUDIOREADY:{sid}]'
             except _queue.Empty:
                 pass
-
-    # Restore auto-routed model back to 'fast'
-    if _auto_restored:
-        with _model_override_lock: _model_override = 'fast'
 
     final_text = clean or resp
     _web_chat_stream._last = (user_content, final_text)
