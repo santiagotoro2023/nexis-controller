@@ -4,6 +4,7 @@
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
 import shutil, mimetypes, io, wave, tempfile, time, hashlib, secrets, difflib, ssl
+import math, struct
 from datetime import datetime
 from pathlib import Path
 
@@ -66,6 +67,20 @@ _model_override      = 'fast'
 _model_override_lock = threading.Lock()
 AVAILABLE            = []
 _log_lock            = threading.Lock()
+
+# ── Integrations config (optional) ──────────────────────────────────────────
+_INTEG_FILE = CONF / 'integrations.json'
+def _load_integ():
+    try:
+        if _INTEG_FILE.exists():
+            return json.loads(_INTEG_FILE.read_text())
+    except Exception: pass
+    return {}
+_INTEG = _load_integ()
+
+# ── Embedding model availability cache ───────────────────────────────────────
+_embed_ok = None   # None=unchecked, True=available, False=unavailable
+_embed_lk = threading.Lock()
 
 # ── Shared conversation history (CLI + WebUI unified) ────────────────────────
 _shared_hist    = []
@@ -1379,6 +1394,34 @@ def _web_search(query, max_results=5):
             result, ts = _search_cache[cache_key]
             if time.time() - ts < 600:
                 return result
+
+    # Brave Search API (if key configured in ~/.config/nexis/integrations.json)
+    brave_key = _INTEG.get('brave_search_api_key', '')
+    if brave_key:
+        try:
+            q = urllib.parse.quote_plus(query)
+            req = urllib.request.Request(
+                f'https://api.search.brave.com/res/v1/web/search?q={q}&count={max_results}&text_decorations=false',
+                headers={
+                    'Accept': 'application/json',
+                    'X-Subscription-Token': brave_key,
+                })
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read())
+            results = []
+            for item in data.get('web', {}).get('results', [])[:max_results]:
+                title = item.get('title', '')
+                desc  = item.get('description', '')
+                url   = item.get('url', '')
+                if title and url:
+                    results.append(f'**{title}**\n{desc}\n{url}')
+            if results:
+                out = '\n\n'.join(results)
+                with _search_cache_lk: _search_cache[cache_key] = (out, time.time())
+                return out
+        except Exception as e:
+            _log(f'Brave: {e}', 'WARN')
+
     def _hc(t):
         t = re.sub(r'<[^>]+>', '', t)
         for e, c in [('&amp;','&'),('&lt;','<'),('&gt;','>'),('&quot;','"'),("&#x27;","'"),('&nbsp;',' ')]:
@@ -1684,7 +1727,49 @@ def _db():
         );
     """)
     conn.commit()
+    # Migrations
+    try:
+        conn.execute('ALTER TABLE memories ADD COLUMN embedding BLOB')
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return conn
+
+def _embed(text: str):
+    """Get embedding from Ollama nomic-embed-text. Returns list[float] or None."""
+    global _embed_ok
+    with _embed_lk:
+        if _embed_ok is False:
+            return None
+    try:
+        body = json.dumps({'model': 'nomic-embed-text', 'input': text}).encode()
+        req  = urllib.request.Request(
+            f'{OLLAMA}/api/embed', data=body,
+            headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        embs = data.get('embeddings', [])
+        if embs:
+            with _embed_lk: _embed_ok = True
+            return embs[0]
+    except Exception:
+        pass
+    with _embed_lk: _embed_ok = False
+    return None
+
+def _vec_bytes(vec):
+    return struct.pack(f'{len(vec)}f', *vec)
+
+def _bytes_vec(b):
+    n = len(b) // 4
+    return struct.unpack(f'{n}f', b)
+
+def _cosine(a, b):
+    dot   = sum(x*y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x*x for x in a))
+    mag_b = math.sqrt(sum(y*y for y in b))
+    return dot / (mag_a * mag_b) if mag_a and mag_b else 0.0
+
 
 def _store_memory(conn, messages):
     if len(messages) < 2: return
@@ -1715,7 +1800,9 @@ def _store_memory(conn, messages):
             if len(line) < 15 or len(line) > 150: continue
             if re.search(r'^\d+[.)]', line): continue
             if any(s in line.lower() for s in SKIP): continue
-            conn.execute('INSERT INTO memories(content) VALUES(?)', (line,))
+            emb = _embed(line)
+            emb_bytes = _vec_bytes(emb) if emb else None
+            conn.execute('INSERT INTO memories(content, embedding) VALUES(?,?)', (line, emb_bytes))
             stored += 1
         if stored:
             conn.execute('INSERT INTO sessions(started_at,summary) VALUES(?,?)',
@@ -1730,21 +1817,41 @@ def _get_memories(conn, limit=20):
     return [r['content'] for r in rows]
 
 def _get_relevant_memories(conn, query: str, limit=12) -> list:
-    """Return memories relevant to query via keyword overlap, fall back to recent."""
-    all_rows = conn.execute('SELECT content FROM memories ORDER BY id DESC').fetchall()
+    """Return memories relevant to query. Uses semantic (embedding) search when available,
+    falls back to keyword overlap."""
+    all_rows = conn.execute('SELECT content, embedding FROM memories ORDER BY id DESC').fetchall()
     if not all_rows:
         return []
-    # Tokenise query into meaningful words (≥4 chars)
+
+    # Try semantic search if embed model is reachable
+    with _embed_lk:
+        embed_ready = _embed_ok is not False
+    if embed_ready:
+        q_emb = _embed(query)
+        if q_emb:
+            scored = []
+            for r in all_rows:
+                emb_b = r['embedding']
+                if emb_b:
+                    try:
+                        sim = _cosine(q_emb, _bytes_vec(emb_b))
+                    except Exception:
+                        sim = 0.0
+                else:
+                    sim = 0.0   # unembedded memory — keep at bottom
+                scored.append((sim, r['content']))
+            scored.sort(key=lambda x: -x[0])
+            return [c for _, c in scored[:limit]]
+
+    # Keyword-overlap fallback
     q_words = set(w.lower() for w in re.findall(r'\b\w{4,}\b', query))
     if not q_words:
         return [r['content'] for r in all_rows[:limit]]
     scored = []
     for r in all_rows:
         m_words = set(w.lower() for w in re.findall(r'\b\w{4,}\b', r['content']))
-        score = len(q_words & m_words)
-        scored.append((score, r['content']))
+        scored.append((len(q_words & m_words), r['content']))
     scored.sort(key=lambda x: -x[0])
-    # Always include top keyword matches + pad with recent ones
     top = [c for s, c in scored if s > 0][:limit]
     if len(top) < 4:
         recent = [r['content'] for r in all_rows[:limit]]
@@ -1855,6 +1962,27 @@ def _youtube_latest(query):
     return ''
 
 
+def _youtube_transcript(url: str) -> str | None:
+    """Fetch the auto-generated/manual transcript for a YouTube video URL."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        vid_id = None
+        for pat in [r'youtube\.com/watch\?.*v=([A-Za-z0-9_-]{11})',
+                    r'youtu\.be/([A-Za-z0-9_-]{11})',
+                    r'youtube\.com/shorts/([A-Za-z0-9_-]{11})']:
+            m = re.search(pat, url)
+            if m: vid_id = m.group(1); break
+        if not vid_id: return None
+        segments = YouTubeTranscriptApi.get_transcript(vid_id, languages=['en', 'en-US', 'en-GB'])
+        text = ' '.join(s['text'] for s in segments)
+        return text[:6000]
+    except ImportError:
+        return None
+    except Exception as e:
+        _log(f'YT transcript {url[:60]}: {e}', 'WARN')
+        return None
+
+
 def _get_location() -> str:
     """Get approximate location from IP geolocation."""
     try:
@@ -1909,6 +2037,13 @@ def _pre_research(text, on_status=None, hist=None):
 
     urls_in_msg = re.findall(r'https?://[^\s\]>),"]+', text_clean)
     for url in urls_in_msg[:2]:
+        is_yt = bool(re.search(r'(youtube\.com/watch|youtu\.be/|youtube\.com/shorts)', url))
+        if is_yt:
+            if on_status: on_status(f'transcript: {url[:55]}')
+            transcript = _youtube_transcript(url)
+            if transcript:
+                results.append(f'[YouTube transcript {url[:60]}]:\n{transcript}')
+                continue
         if on_status: on_status(f'fetching: {url[:55]}')
         r = _fetch_url(url)
         if r and not r.startswith('Fetch failed'):
