@@ -70,6 +70,7 @@ _log_lock            = threading.Lock()
 # ── Shared conversation history (CLI + WebUI unified) ────────────────────────
 _shared_hist    = []
 _shared_lock    = threading.Lock()
+_daemon_start   = time.time()   # used by /api/health for uptime
 
 # ── Abort streaming ───────────────────────────────────────────────────────────
 _web_abort_event = threading.Event()  # set to abort current WebUI response
@@ -4893,6 +4894,24 @@ def _start_web():
                         mlist.append({'key': k, 'label': v['label'], 'desc': v['desc'],
                                       'available': avail, 'current': k == cur})
                     self._send(200, json.dumps({'models': mlist}), 'application/json')
+                elif path == '/api/health':
+                    with _model_override_lock: model = _model_override
+                    _hdb = _db()
+                    mc = _hdb.execute('SELECT COUNT(*) FROM memories').fetchone()[0]
+                    sc = _hdb.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]
+                    _hdb.close()
+                    with _shared_lock: hl = len(_shared_hist)
+                    uptime_s = int(time.time() - _daemon_start)
+                    self._send(200, json.dumps({
+                        'model':       model,
+                        'model_label': MODELS.get(model, {}).get('label', model),
+                        'voice':       _voice_enabled(),
+                        'voice_model': _voice_model(),
+                        'memories':    mc,
+                        'sessions':    sc,
+                        'hist_len':    hl,
+                        'uptime':      uptime_s,
+                    }), 'application/json')
                 elif path == '/api/schedules':
                     self._send(200, json.dumps({'schedules': _sched_load()}), 'application/json')
                 elif path == '/api/stt/mics':
