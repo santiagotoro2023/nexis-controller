@@ -1803,6 +1803,14 @@ def _store_memory(conn, messages):
             'to improve','it is important','specifically','clear communication',
             'i found','search results','according to',
         ]
+        # Load existing embeddings once for dedup check
+        existing = conn.execute('SELECT content, embedding FROM memories').fetchall()
+        existing_embs = []
+        for r in existing:
+            if r['embedding']:
+                try: existing_embs.append(_bytes_vec(r['embedding']))
+                except Exception: pass
+
         stored = 0
         for line in raw.splitlines():
             line = line.strip().lstrip('- ').strip()
@@ -1810,8 +1818,14 @@ def _store_memory(conn, messages):
             if re.search(r'^\d+[.)]', line): continue
             if any(s in line.lower() for s in SKIP): continue
             emb = _embed(line)
+            # Deduplication: skip if too similar to an existing memory
+            if emb and existing_embs:
+                if any(_cosine(emb, ev) > 0.92 for ev in existing_embs):
+                    _log(f'Memory dedup skip: {line[:60]}')
+                    continue
             emb_bytes = _vec_bytes(emb) if emb else None
             conn.execute('INSERT INTO memories(content, embedding) VALUES(?,?)', (line, emb_bytes))
+            if emb: existing_embs.append(tuple(emb))
             stored += 1
         if stored:
             conn.execute('INSERT INTO sessions(started_at,summary) VALUES(?,?)',
@@ -2490,7 +2504,15 @@ def _maybe_summarize_history():
         _log(f'History summarized: {len(to_summarize)} messages -> 1 summary')
 
 def _inject_memories(sys_p: str, conn, query: str) -> str:
-    mems = _get_relevant_memories(conn, query)
+    relevant = _get_relevant_memories(conn, query, limit=12)
+    # Always surface 3 most-recent memories regardless of relevance score
+    recent_rows = conn.execute(
+        'SELECT content FROM memories ORDER BY id DESC LIMIT 3').fetchall()
+    recent = [r['content'] for r in recent_rows]
+    # Merge: recent first, then relevant (dedup)
+    seen = set(recent)
+    mems = list(recent) + [m for m in relevant if m not in seen]
+
     doc_chunks = _search_doc_index(conn, query, limit=3)
 
     extra = ''
