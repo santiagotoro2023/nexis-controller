@@ -5593,7 +5593,6 @@ def _start_web():
                         self._send(400, json.dumps({'error': 'unknown action'}), 'application/json')
 
                 elif path == '/api/history/load':
-                    global _is_typing
                     data = json.loads(body) if body else {}
                     sid  = data.get('session_id', '')
                     if not sid:
