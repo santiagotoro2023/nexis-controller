@@ -73,7 +73,9 @@ _shared_lock    = threading.Lock()
 _daemon_start   = time.time()   # used by /api/health for uptime
 
 # ── Abort streaming ───────────────────────────────────────────────────────────
-_web_abort_event = threading.Event()  # set to abort current WebUI response
+_web_abort_event  = threading.Event()  # set to abort current WebUI response
+_search_cache     = {}   # query -> (result_str, stored_at) — 10-min TTL
+_search_cache_lk  = threading.Lock()
 
 # ── Cross-device sync (typing indicator + history push) ───────────────────────
 _is_typing        = False
@@ -103,7 +105,7 @@ _VOICE_ENABLED      = False
 _voice_lk           = threading.Lock()
 _VOICE_MODEL        = 'default'
 _voice_model_lk     = threading.Lock()
-_audio_store        = {}
+_audio_store        = {}   # chunk_id -> (wav_bytes, stored_ts)
 _audio_store_lk     = threading.Lock()
 _audio_seq          = [0]
 _audio_seq_lk       = threading.Lock()
@@ -1370,6 +1372,13 @@ def _system_probe():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _web_search(query, max_results=5):
+    # Cache: return cached result if < 10 minutes old
+    cache_key = f'{query}|{max_results}'
+    with _search_cache_lk:
+        if cache_key in _search_cache:
+            result, ts = _search_cache[cache_key]
+            if time.time() - ts < 600:
+                return result
     def _hc(t):
         t = re.sub(r'<[^>]+>', '', t)
         for e, c in [('&amp;','&'),('&lt;','<'),('&gt;','>'),('&quot;','"'),("&#x27;","'"),('&nbsp;',' ')]:
@@ -1406,7 +1415,9 @@ def _web_search(query, max_results=5):
                 results.append(f'**{title}**\n{snip}\n{url_dec}')
             if len(results) >= max_results: break
         if results:
-            return '\n\n'.join(results)
+            out = '\n\n'.join(results)
+            with _search_cache_lk: _search_cache[cache_key] = (out, time.time())
+            return out
         _log('DDG: no results parsed', 'WARN')
     except Exception as e:
         _log(f'DDG: {e}', 'WARN')
@@ -1427,7 +1438,9 @@ def _web_search(query, max_results=5):
                 results.append(f'**{title}**\n{url_g}')
             if len(results) >= max_results: break
         if results:
-            return '\n\n'.join(results)
+            out = '\n\n'.join(results)
+            with _search_cache_lk: _search_cache[cache_key] = (out, time.time())
+            return out
     except Exception as e:
         _log(f'Google: {e}', 'WARN')
     return f'No results found for: {query}'
@@ -2131,18 +2144,28 @@ def _build_system(conn):
         '\n  [PYWS: print("hello")]'
         '\n  [PYWS: import math\\nresult = math.sqrt(42)]'
         '\n'
-        '\n### [DESKTOP: action | argument] — GUI control'
-        '\n  [DESKTOP: open | steam]              open app'
+        '\n### [DESKTOP: action | argument] — GUI & PC control'
+        '\n  [DESKTOP: open | steam]              open application'
+        '\n  [DESKTOP: close | spotify]           close/kill application'
         '\n  [DESKTOP: tab | https://example.com] open browser tab'
+        '\n  [DESKTOP: windows]                   list open windows'
         '\n  [DESKTOP: notify | message]          desktop notification'
         '\n  [DESKTOP: clip | text]               copy to clipboard'
-        '\nONLY when Creator explicitly asks to open/launch/start/close something.'
-        '\nFOR DESKTOP ACTIONS: emit the tag FIRST on its own line, then ONE short confirmation sentence. No preamble. No explanation of what you are about to do. No monologue before or after. Examples:'
+        '\n  [DESKTOP: volume | 60]               set volume 0-100'
+        '\n  [DESKTOP: mute]                      mute audio'
+        '\n  [DESKTOP: unmute]                    unmute audio'
+        '\n  [DESKTOP: brightness | 80]           set display brightness 1-100'
+        '\n  [DESKTOP: media | play]              media control (play/pause/next/previous/stop)'
+        '\n  [DESKTOP: lock]                      lock screen'
+        '\n  [DESKTOP: sleep]                     suspend/sleep PC'
+        '\n  [DESKTOP: screenshot]                take screenshot and describe what is visible'
+        '\nUse for any request to open/close/launch/kill/control something on the PC, adjust volume/brightness, control media playback, or take a screenshot.'
+        '\nFOR DESKTOP ACTIONS: emit the tag FIRST on its own line, then ONE short confirmation sentence. No preamble. Examples:'
         '\n  [DESKTOP: open | steam]'
         '\n  Opened.'
         '\n  ---'
-        '\n  [DESKTOP: open | spotify]'
-        '\n  Done.'
+        '\n  [DESKTOP: volume | 40]'
+        '\n  Volume set to 40%.'
         '\n'
         '\n### [WATCH: service] — monitor a service/process'
         '\nEmit when Creator asks to monitor something, or when it would be useful (e.g. "keep an eye on nginx", "let me know if X crashes").'
@@ -2437,6 +2460,84 @@ def _desktop(action, arg):
                     return 'copied to clipboard'
                 except Exception: continue
             return '(clip unavailable)'
+        elif act == 'windows':
+            r = subprocess.run(['wmctrl','-l'], capture_output=True, text=True, env=env)
+            if r.returncode == 0 and r.stdout.strip():
+                lines = [' '.join(l.split()[3:]) for l in r.stdout.strip().splitlines() if len(l.split()) > 3]
+                visible = [l for l in lines if l.strip()]
+                return 'Open windows: ' + ', '.join(visible[:20]) if visible else 'No windows found'
+            return '(wmctrl unavailable or no windows)'
+        elif act in ('volume', 'vol'):
+            try:
+                pct = int(''.join(c for c in arg if c.isdigit()))
+                pct = max(0, min(150, pct))
+                subprocess.run(['pactl','set-sink-volume','@DEFAULT_SINK@',f'{pct}%'],
+                               capture_output=True, env=env)
+                return f'volume set to {pct}%'
+            except Exception as e:
+                return f'(volume failed: {e})'
+        elif act == 'mute':
+            subprocess.run(['pactl','set-sink-mute','@DEFAULT_SINK@','1'],
+                           capture_output=True, env=env)
+            return 'muted'
+        elif act == 'unmute':
+            subprocess.run(['pactl','set-sink-mute','@DEFAULT_SINK@','0'],
+                           capture_output=True, env=env)
+            return 'unmuted'
+        elif act == 'brightness':
+            try:
+                pct = int(''.join(c for c in arg if c.isdigit()))
+                pct = max(1, min(100, pct))
+                for cmd in (['brightnessctl','set',f'{pct}%'],
+                            ['xrandr','--output','eDP-1','--brightness',str(pct/100)]):
+                    if shutil.which(cmd[0]):
+                        subprocess.run(cmd, capture_output=True, env=env)
+                        return f'brightness set to {pct}%'
+                return '(brightness control unavailable)'
+            except Exception as e:
+                return f'(brightness failed: {e})'
+        elif act == 'lock':
+            for cmd in (['loginctl','lock-session'], ['xdg-screensaver','lock'],
+                        ['gnome-screensaver-command','-l'], ['xlock']):
+                if shutil.which(cmd[0]):
+                    subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return 'screen locked'
+            return '(no lock command found)'
+        elif act == 'sleep':
+            subprocess.Popen(['systemctl','suspend'], env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return 'suspending'
+        elif act == 'media':
+            sub = arg.strip().lower() if arg.strip() else 'play-pause'
+            media_map = {
+                'play': 'play', 'pause': 'pause', 'play-pause': 'play-pause',
+                'toggle': 'play-pause', 'next': 'next', 'previous': 'previous',
+                'prev': 'previous', 'stop': 'stop',
+            }
+            pcmd = media_map.get(sub, 'play-pause')
+            if shutil.which('playerctl'):
+                r = subprocess.run(['playerctl', pcmd], capture_output=True, text=True, env=env)
+                return f'media: {pcmd}' + (f' ({r.stdout.strip()})' if r.stdout.strip() else '')
+            return '(playerctl unavailable)'
+        elif act == 'screenshot':
+            import base64 as _b64, tempfile as _tf
+            tmp = _tf.NamedTemporaryFile(suffix='.png', delete=False, prefix='/tmp/nx_screen_')
+            tmp.close()
+            for scmd in (['scrot', tmp.name], ['import', '-window', 'root', tmp.name],
+                         ['gnome-screenshot', '-f', tmp.name]):
+                if shutil.which(scmd[0]):
+                    r = subprocess.run(scmd, capture_output=True, env=env, timeout=10)
+                    if r.returncode == 0:
+                        try:
+                            with open(tmp.name, 'rb') as f: raw = f.read()
+                            b64 = _b64.b64encode(raw).decode()
+                            msgs_v = [{'role': 'user', 'content': 'Describe what is visible on this screenshot in 2-3 sentences. Be specific about application names, content, and notable details.'}]
+                            result, _ = _smart_chat(msgs_v, images=[b64], temperature=0.3)
+                            import os; os.unlink(tmp.name)
+                            return f'Screenshot: {result.strip()}'
+                        except Exception as e:
+                            return f'(screenshot captured but vision failed: {e})'
+            return '(no screenshot tool found — install scrot)'
     except Exception as e:
         return f'({act} failed: {e})'
     return f'(unknown: {act})'
@@ -2507,7 +2608,11 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
             tools[m.group(0)] = f'[workspace output]:\n{result}'
 
     # DESKTOP
-    user_wants_desktop = bool(re.search(r'\b(open|launch|start|close|run)\b\s+\S', user_text, re.IGNORECASE)) if user_text else False
+    user_wants_desktop = bool(re.search(
+        r'\b(open|launch|start|close|kill|run|volume|mute|unmute|brightness|screenshot|'
+        r'take a screenshot|what.{0,10}screen|lock screen|suspend|sleep|media|'
+        r'play|pause|skip|next track|previous track|what.{0,15}running|what.{0,15}open)\b',
+        user_text, re.IGNORECASE)) if user_text else False
     for m in re.finditer(r'\[DESKTOP:\s*(\w+)\s*\|\s*([^\]]+)\]', text, re.IGNORECASE):
         if user_wants_desktop:
             tools[m.group(0)] = _desktop(m.group(1).strip().lower(), m.group(2).strip())
@@ -4569,6 +4674,28 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         yield result
         return
 
+    # Auto model routing: if user hasn't manually overridden, pick model by query type
+    _DEEP_RE = re.compile(
+        r'\b(explain|analyze|analyz|compare|why\s+does|how\s+does|what\s+causes|'
+        r'in\s+depth|in\s+detail|thoroughly|comprehensive|deep\s+dive|'
+        r'essay|dissertation|research|literature|philosophy|theory|'
+        r'write\s+a\s+report|write\s+an?\s+essay|tell\s+me\s+everything)\b',
+        re.IGNORECASE)
+    _CODE_RE = re.compile(
+        r'\b(write\s+code|implement|function|class|script|program|debug|'
+        r'fix\s+this\s+code|refactor|unit\s+test|algorithm|leetcode|'
+        r'sql\s+query|bash\s+script|python\s+script)\b',
+        re.IGNORECASE)
+    with _model_override_lock: _auto_model = _model_override
+    _auto_restored = False
+    if _auto_model == 'fast' and msg:
+        if _CODE_RE.search(msg):
+            with _model_override_lock: _model_override = 'code'
+            _auto_restored = True
+        elif _DEEP_RE.search(msg):
+            with _model_override_lock: _model_override = 'deep'
+            _auto_restored = True
+
     _is_typing = True
     _sync_broadcast({'typing': True})
     with _shared_lock: hist = list(_shared_hist)
@@ -4621,7 +4748,11 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                     tts_out_q.put(None); break
                 sid, wav = item
                 if wav:
-                    with _audio_store_lk: _audio_store[sid] = wav
+                    with _audio_store_lk:
+                        _audio_store[sid] = (wav, time.time())
+                        # GC: remove chunks older than 90 seconds
+                        old = [k for k, (_, ts) in _audio_store.items() if time.time() - ts > 90]
+                        for k in old: del _audio_store[k]
                     out.append(f'[AUDIOREADY:{sid}]')
             except _queue.Empty:
                 break
@@ -4713,10 +4844,17 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                 if item is None: break
                 sid, wav = item
                 if wav:
-                    with _audio_store_lk: _audio_store[sid] = wav
+                    with _audio_store_lk:
+                        _audio_store[sid] = (wav, time.time())
+                        old = [k for k, (_, ts) in _audio_store.items() if time.time() - ts > 90]
+                        for k in old: del _audio_store[k]
                     yield f'[AUDIOREADY:{sid}]'
             except _queue.Empty:
                 pass
+
+    # Restore auto-routed model back to 'fast'
+    if _auto_restored:
+        with _model_override_lock: _model_override = 'fast'
 
     final_text = clean or resp
     _web_chat_stream._last = (user_content, final_text)
@@ -4830,7 +4968,8 @@ def _start_web():
                     except ValueError:
                         self._send(400, b'bad id'); return
                     with _audio_store_lk:
-                        wav = _audio_store.pop(chunk_id, None)
+                        entry = _audio_store.pop(chunk_id, None)
+                    wav = entry[0] if entry else None
                     if wav: self._send(200, wav, 'audio/wav')
                     else:   self._send(404, b'not found')
                     return
