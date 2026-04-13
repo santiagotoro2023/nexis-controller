@@ -2358,6 +2358,13 @@ def _build_system(conn):
         '\n  [DESKTOP: volume | 40]'
         '\n  Volume set to 40%.'
         '\n'
+        '\n### [INDEX: path] — index a file or directory for RAG retrieval'
+        '\n  [INDEX: ~/Documents/notes]          index all text files in a directory'
+        '\n  [INDEX: ~/projects/README.md]        index a single file'
+        '\nAfter indexing, relevant chunks are automatically included in future responses.'
+        '\nSupported: .txt .md .py .js .ts .go .rs .java .kt .sh .json .yaml .toml .csv and more.'
+        '\nUse when Creator asks you to "read my notes", "index my project", or "remember this document".'
+        '\n'
         '\n### [HA: action | entity | value] — control Home Assistant devices'
         '\n  [HA: turn on | light.living_room]      turn on a light or switch'
         '\n  [HA: turn off | switch.coffee_maker]   turn something off'
@@ -2965,6 +2972,15 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
                 target = open_m.group(1).strip().rstrip('?!.')
                 result = _desktop('open', target)
                 if result: tools[f'[DESKTOP: open | {target}]'] = result
+
+    for m in re.finditer(r'\[INDEX:\s*([^\]]+)\]', text, re.IGNORECASE):
+        path_arg = m.group(1).strip()
+        if on_status: on_status(f'indexing: {path_arg[:50]}')
+        try:
+            files, chunks = _index_path(path_arg)
+            tools[m.group(0)] = f'Indexed {files} file(s), {chunks} chunks stored in doc_index.'
+        except Exception as e:
+            tools[m.group(0)] = f'(index error: {e})'
 
     for m in re.finditer(r'\[HA:\s*([^\]]+)\]', text, re.IGNORECASE):
         parts = [p.strip() for p in m.group(1).split('|')]
