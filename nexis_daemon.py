@@ -1217,6 +1217,10 @@ def _sched_execute(sched: dict):
                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
+        # ntfy push notification (configure ntfy_topic in integrations.json)
+        short_ntfy = re.sub(r'\*\*|`|#', '', result)[:300]
+        threading.Thread(target=_ntfy_push, args=(f'NeXiS — {name}', short_ntfy),
+                         daemon=True).start()
     except Exception as e:
         _log(f'Scheduler execute "{name}": {e}', 'WARN')
 
@@ -1733,6 +1737,11 @@ def _db():
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
+    try:
+        conn.execute('ALTER TABLE chat_history ADD COLUMN session_title TEXT')
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return conn
 
 def _embed(text: str):
@@ -1811,6 +1820,39 @@ def _store_memory(conn, messages):
             _log(f'Stored {stored} memories')
     except Exception as e:
         _log(f'Store memory: {e}', 'WARN')
+
+def _generate_session_title(session_id: str, first_user_msg: str):
+    """Generate a short title for a chat session and store it. Runs in background thread."""
+    try:
+        raw, _ = _smart_chat([{'role': 'user', 'content':
+            f'Generate a title for a conversation that starts with:\n"{first_user_msg[:200]}"\n\n'
+            'Rules: 4-8 words max. No quotes. No punctuation at end. Title case.\n'
+            'Respond with ONLY the title, nothing else.'}],
+            temperature=0.3, num_ctx=512)
+        if not raw: return
+        title = raw.strip().strip('"\'').split('\n')[0].strip()[:80]
+        if not title: return
+        dbc = _db()
+        dbc.execute(
+            'UPDATE chat_history SET session_title=? WHERE session_id=? AND session_title IS NULL',
+            (title, session_id))
+        dbc.commit(); dbc.close()
+        _log(f'Session title: {title}')
+    except Exception as e:
+        _log(f'Title gen: {e}', 'WARN')
+
+def _ntfy_push(title: str, body: str):
+    """Send a push notification via ntfy.sh (configure ntfy_topic in integrations.json)."""
+    topic = _INTEG.get('ntfy_topic', '')
+    if not topic: return
+    url = topic if topic.startswith('http') else f'https://ntfy.sh/{topic}'
+    try:
+        req = urllib.request.Request(url, data=body.encode(), method='POST',
+            headers={'Title': title, 'Priority': 'default', 'Content-Type': 'text/plain'})
+        urllib.request.urlopen(req, timeout=6)
+    except Exception as e:
+        _log(f'ntfy: {e}', 'WARN')
+
 
 def _get_memories(conn, limit=20):
     rows = conn.execute('SELECT content FROM memories ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
@@ -2302,6 +2344,15 @@ def _build_system(conn):
         '\n  [DESKTOP: volume | 40]'
         '\n  Volume set to 40%.'
         '\n'
+        '\n### [HA: action | entity | value] — control Home Assistant devices'
+        '\n  [HA: turn on | light.living_room]      turn on a light or switch'
+        '\n  [HA: turn off | switch.coffee_maker]   turn something off'
+        '\n  [HA: toggle | light.bedroom]            toggle state'
+        '\n  [HA: state | sensor.temperature]        get current state/reading'
+        '\n  [HA: brightness | light.desk | 70]      set brightness 0-100'
+        '\nRequires home_assistant.url + home_assistant.token in ~/.config/nexis/integrations.json.'
+        '\nUse for any request to control smart home devices, lights, switches, thermostats, sensors.'
+        '\n'
         '\n### [WATCH: service] — monitor a service/process'
         '\nEmit when Creator asks to monitor something, or when it would be useful (e.g. "keep an eye on nginx", "let me know if X crashes").'
         '\nAlso proactively suggest it: if Creator mentions a service and monitoring seems useful, ask "Want me to watch [service] for state changes?"'
@@ -2679,6 +2730,82 @@ def _desktop(action, arg):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+def _ha_action(action: str, entity: str, value: str = '') -> str:
+    """Call the Home Assistant REST API. Configure in ~/.config/nexis/integrations.json:
+    { "home_assistant": { "url": "http://homeassistant.local:8123", "token": "..." } }
+    """
+    ha_cfg = _INTEG.get('home_assistant', {})
+    ha_url = ha_cfg.get('url', '').rstrip('/')
+    ha_tok = ha_cfg.get('token', '')
+    if not ha_url or not ha_tok:
+        return '(Home Assistant not configured — add url and token to ~/.config/nexis/integrations.json)'
+    headers = {
+        'Authorization': f'Bearer {ha_tok}',
+        'Content-Type': 'application/json',
+    }
+    try:
+        if action in ('state', 'get', 'status'):
+            if not entity: return '(entity name required)'
+            req = urllib.request.Request(
+                f'{ha_url}/api/states/{entity}', headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read())
+            state = data.get('state', '?')
+            attrs = data.get('attributes', {})
+            friendly = attrs.get('friendly_name', entity)
+            return f'{friendly}: {state}'
+        elif action in ('turn on', 'on'):
+            domain = entity.split('.')[0] if '.' in entity else 'light'
+            body = json.dumps({'entity_id': entity}).encode()
+            req  = urllib.request.Request(
+                f'{ha_url}/api/services/{domain}/turn_on',
+                data=body, headers=headers, method='POST')
+            urllib.request.urlopen(req, timeout=8)
+            return f'Turned on {entity}'
+        elif action in ('turn off', 'off'):
+            domain = entity.split('.')[0] if '.' in entity else 'light'
+            body = json.dumps({'entity_id': entity}).encode()
+            req  = urllib.request.Request(
+                f'{ha_url}/api/services/{domain}/turn_off',
+                data=body, headers=headers, method='POST')
+            urllib.request.urlopen(req, timeout=8)
+            return f'Turned off {entity}'
+        elif action == 'toggle':
+            domain = entity.split('.')[0] if '.' in entity else 'light'
+            body = json.dumps({'entity_id': entity}).encode()
+            req  = urllib.request.Request(
+                f'{ha_url}/api/services/{domain}/toggle',
+                data=body, headers=headers, method='POST')
+            urllib.request.urlopen(req, timeout=8)
+            return f'Toggled {entity}'
+        elif action in ('set', 'brightness'):
+            # set | light.bedroom | 80  (brightness 0-100)
+            domain = entity.split('.')[0] if '.' in entity else 'light'
+            pct = int(value) if value.isdigit() else 100
+            bright_val = int(pct * 2.55)
+            body = json.dumps({'entity_id': entity, 'brightness': bright_val}).encode()
+            req  = urllib.request.Request(
+                f'{ha_url}/api/services/{domain}/turn_on',
+                data=body, headers=headers, method='POST')
+            urllib.request.urlopen(req, timeout=8)
+            return f'Set {entity} brightness to {pct}%'
+        else:
+            # Generic service call: action = domain/service
+            if '/' in action:
+                domain, service = action.split('/', 1)
+                data_body = {'entity_id': entity}
+                if value: data_body['value'] = value
+                body = json.dumps(data_body).encode()
+                req  = urllib.request.Request(
+                    f'{ha_url}/api/services/{domain}/{service}',
+                    data=body, headers=headers, method='POST')
+                urllib.request.urlopen(req, timeout=8)
+                return f'Called {domain}.{service} on {entity}'
+            return f'(unknown HA action: {action})'
+    except Exception as e:
+        return f'(HA error: {e})'
+
+
 # Tool processor
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2816,6 +2943,14 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
                 target = open_m.group(1).strip().rstrip('?!.')
                 result = _desktop('open', target)
                 if result: tools[f'[DESKTOP: open | {target}]'] = result
+
+    for m in re.finditer(r'\[HA:\s*([^\]]+)\]', text, re.IGNORECASE):
+        parts = [p.strip() for p in m.group(1).split('|')]
+        action = parts[0].lower() if parts else ''
+        arg1   = parts[1] if len(parts) > 1 else ''
+        arg2   = parts[2] if len(parts) > 2 else ''
+        if on_status: on_status(f'HA: {action} {arg1}')
+        tools[m.group(0)] = _ha_action(action, arg1, arg2)
 
     clean = text
     for tag in tools: clean = clean.replace(tag, '')
@@ -5175,7 +5310,8 @@ def _start_web():
                 elif path == '/api/history/sessions':
                     hdb      = _db()
                     sessions = hdb.execute(
-                        'SELECT DISTINCT session_id, MIN(created_at) as started '
+                        'SELECT DISTINCT session_id, MIN(created_at) as started, '
+                        'MAX(session_title) as title '
                         'FROM chat_history GROUP BY session_id ORDER BY started DESC LIMIT 50'
                     ).fetchall()
                     result = []
@@ -5190,6 +5326,7 @@ def _start_web():
                             'session_id': sid,
                             'started':    str(s['started'])[:16],
                             'source':     source,
+                            'title':      s['title'] or '',
                             'preview':    [{'role': m['role'], 'content': m['content']} for m in msgs],
                         })
                     hdb.close()
@@ -5301,7 +5438,15 @@ def _start_web():
                                 (_web_session_id, 'user', uc))
                             dbc.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
                                 (_web_session_id, 'assistant', ar))
-                            dbc.commit(); dbc.close()
+                            dbc.commit()
+                            # Generate title on first exchange in this session
+                            count = dbc.execute(
+                                'SELECT COUNT(*) FROM chat_history WHERE session_id=?',
+                                (_web_session_id,)).fetchone()[0]
+                            dbc.close()
+                            if count <= 2:
+                                threading.Thread(target=_generate_session_title,
+                                    args=(_web_session_id, uc), daemon=True).start()
                             threading.Thread(target=_store_memory, args=(_db(),
                                 [{'role':'user','content':uc},{'role':'assistant','content':ar}]),
                                 daemon=True).start()
