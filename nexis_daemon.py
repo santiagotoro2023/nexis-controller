@@ -4914,6 +4914,38 @@ def _start_web():
                     }), 'application/json')
                 elif path == '/api/schedules':
                     self._send(200, json.dumps({'schedules': _sched_load()}), 'application/json')
+                elif path == '/api/memories':
+                    mdb  = _db()
+                    rows = mdb.execute(
+                        'SELECT id, content, created_at FROM memories ORDER BY id DESC'
+                    ).fetchall()
+                    mdb.close()
+                    self._send(200, json.dumps({'memories': [
+                        {'id': r['id'], 'content': r['content'], 'created_at': str(r['created_at'])}
+                        for r in rows
+                    ]}), 'application/json')
+                elif path == '/api/history/sessions':
+                    hdb      = _db()
+                    sessions = hdb.execute(
+                        'SELECT DISTINCT session_id, MIN(created_at) as started '
+                        'FROM chat_history GROUP BY session_id ORDER BY started DESC LIMIT 50'
+                    ).fetchall()
+                    result = []
+                    for s in sessions:
+                        sid  = s['session_id']
+                        msgs = hdb.execute(
+                            'SELECT role, content FROM chat_history WHERE session_id=? ORDER BY id LIMIT 4',
+                            (sid,)
+                        ).fetchall()
+                        source = 'cli' if sid.startswith('cli_') else 'web'
+                        result.append({
+                            'session_id': sid,
+                            'started':    str(s['started'])[:16],
+                            'source':     source,
+                            'preview':    [{'role': m['role'], 'content': m['content']} for m in msgs],
+                        })
+                    hdb.close()
+                    self._send(200, json.dumps({'sessions': result}), 'application/json')
                 elif path == '/api/stt/mics':
                     self._send(200, json.dumps({'mics': _stt_list_mics(),
                         'current': _stt_mic_index(), 'enabled': _stt_enabled(),
@@ -5116,6 +5148,41 @@ def _start_web():
                         self._send(404, json.dumps({'error': 'not found'}), 'application/json')
                     else:
                         self._send(400, json.dumps({'error': 'unknown action'}), 'application/json')
+
+                elif path == '/api/memories':
+                    data   = json.loads(body) if body else {}
+                    action = data.get('action', '')
+                    if action == 'delete':
+                        mem_id = int(data.get('id', -1))
+                        mdb = _db()
+                        mdb.execute('DELETE FROM memories WHERE id=?', (mem_id,))
+                        mdb.commit(); mdb.close()
+                        self._send(200, json.dumps({'ok': True}), 'application/json')
+                    else:
+                        self._send(400, json.dumps({'error': 'unknown action'}), 'application/json')
+
+                elif path == '/api/history/load':
+                    global _is_typing
+                    data = json.loads(body) if body else {}
+                    sid  = data.get('session_id', '')
+                    if not sid:
+                        self._send(400, json.dumps({'error': 'session_id required'}), 'application/json')
+                    else:
+                        ldb  = _db()
+                        msgs = ldb.execute(
+                            'SELECT role, content FROM chat_history WHERE session_id=? ORDER BY id',
+                            (sid,)
+                        ).fetchall()
+                        ldb.close()
+                        with _shared_lock:
+                            _shared_hist.clear()
+                            for m in msgs:
+                                if m['role'] in ('user', 'assistant'):
+                                    _shared_hist.append({'role': m['role'], 'content': m['content']})
+                            hl = len(_shared_hist)
+                        _is_typing = False
+                        _sync_broadcast({'typing': False, 'hist_len': hl})
+                        self._send(200, json.dumps({'ok': True, 'loaded': hl}), 'application/json')
 
                 elif path == '/api/stt':
                     data = json.loads(body) if body else {}
