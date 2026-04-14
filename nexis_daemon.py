@@ -37,6 +37,7 @@ if 'XDG_RUNTIME_DIR' in os.environ:
         os.environ['PIPEWIRE_RUNTIME_DIR'] = os.environ['XDG_RUNTIME_DIR']
 
 OLLAMA       = 'http://localhost:11434'
+EXTERNAL_DOMAIN = 'nexis.toroag.ch'   # external hostname for TLS cert SAN
 MODEL_FAST   = 'qwen2.5:14b'
 MODEL_DEEP   = 'hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M'
 MODEL_CODE   = 'qwen3-coder-next'
@@ -287,7 +288,7 @@ def _ensure_tls_cert():
             .add_extension(x509.SubjectAlternativeName([
                 x509.DNSName('nexis-controller'), x509.DNSName('localhost'),
                 x509.IPAddress(_ip.IPv4Address('127.0.0.1')),
-            ]), critical=False)
+            ] + ([x509.DNSName(EXTERNAL_DOMAIN)] if EXTERNAL_DOMAIN else [])), critical=False)
             .sign(key, _h.SHA256()))
         TLS_CERT.write_bytes(cert.public_bytes(_s.Encoding.PEM))
         TLS_CERT.chmod(0o644)
@@ -5106,11 +5107,11 @@ def _page_remote():
       <div class=card-head>Volume</div>
       <div class=card-body>
         <div class=rm-vol-row>
-          <span style='color:var(--fg2);font-size:13px'>🔈</span>
+          <span class='material-icons' style='color:var(--fg2);font-size:18px;line-height:1'>volume_mute</span>
           <input type=range id=d-vol class=rm-vol min=0 max=100 value=50
             oninput="document.getElementById('d-vol-val').textContent=this.value+'%'"
             onchange=da('volume',this.value)>
-          <span style='color:var(--fg2);font-size:13px'>🔊</span>
+          <span class='material-icons' style='color:var(--fg2);font-size:18px;line-height:1'>volume_up</span>
           <span id=d-vol-val class=rm-vol-val>50%</span>
         </div>
         <div class=rm-row>
@@ -5182,11 +5183,11 @@ def _page_remote():
       <div class=card-head>Volume</div>
       <div class=card-body>
         <div class=rm-vol-row>
-          <span style='color:var(--fg2);font-size:13px'>🔈</span>
+          <span class='material-icons' style='color:var(--fg2);font-size:18px;line-height:1'>volume_mute</span>
           <input type=range id=m-vol class=rm-vol min=0 max=100 value=50
             oninput="document.getElementById('m-vol-val').textContent=this.value+'%'"
             onchange=mc('volume',this.value)>
-          <span style='color:var(--fg2);font-size:13px'>🔊</span>
+          <span class='material-icons' style='color:var(--fg2);font-size:18px;line-height:1'>volume_up</span>
           <span id=m-vol-val class=rm-vol-val>50%</span>
         </div>
         <div class=rm-row>
