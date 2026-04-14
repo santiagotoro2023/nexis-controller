@@ -2474,7 +2474,7 @@ def _build_system(conn):
         '\n  [PYWS: import math\\nresult = math.sqrt(42)]'
         '\n'
         '\n### [DESKTOP: action | argument] — GUI & PC control'
-        '\n  [DESKTOP: open | steam]              open application'
+        '\n  [DESKTOP: open | steam]              open application or URL'
         '\n  [DESKTOP: close | spotify]           close/kill application'
         '\n  [DESKTOP: tab | https://example.com] open browser tab'
         '\n  [DESKTOP: windows]                   list open windows'
@@ -2484,28 +2484,37 @@ def _build_system(conn):
         '\n  [DESKTOP: mute]                      mute audio'
         '\n  [DESKTOP: unmute]                    unmute audio'
         '\n  [DESKTOP: brightness | 80]           set display brightness 1-100'
-        '\n  [DESKTOP: media | play]              media control (play/pause/next/previous/stop)'
+        '\n  [DESKTOP: media | play]              media: play/pause/next/previous/stop/seek_forward/seek_backward'
         '\n  [DESKTOP: lock]                      lock screen'
+        '\n  [DESKTOP: unlock]                    unlock screen (uses stored password)'
         '\n  [DESKTOP: sleep]                     suspend/sleep PC'
+        '\n  [DESKTOP: wake]                      wake display'
         '\n  [DESKTOP: screenshot]                take screenshot and describe what is visible'
+        '\n  [DESKTOP: clip_read]                 read clipboard content from PC'
         '\nCreator runs Debian Linux on this machine.'
-        '\nUse for any request to open/close/launch/kill/control something on the PC, adjust volume/brightness, control media playback, or take a screenshot.'
-        '\nFOR DESKTOP ACTIONS: emit the tag FIRST on its own line, then ONE ultra-short confirmation. 2-5 words. No preamble, no elaboration, no personality flair. Examples:'
+        '\nUSE THESE TOOLS whenever Creator says things like: "open X", "set volume to N", "lock/sleep my PC",'
+        '\n"play/pause/next/skip", "take a screenshot", "mute", "turn up/down the volume", "what\'s on screen".'
+        '\nNatural language maps directly to tools — never ask "would you like me to open that?" just do it.'
+        '\nFOR DESKTOP ACTIONS: emit the tag FIRST on its own line, then ONE ultra-short confirmation. 2-5 words.'
         '\n  [DESKTOP: open | steam]'
         '\n  Opened.'
         '\n  ---'
         '\n  [DESKTOP: volume | 40]'
         '\n  Done.'
         '\n  ---'
-        '\n  [DESKTOP: close | spotify]'
-        '\n  Closed.'
+        '\n  [DESKTOP: lock]'
+        '\n  Locked.'
         '\n'
         '\n### [ANDROID: device_id | action | arg] — send a command to a registered mobile device'
         '\n  [ANDROID: primary_mobile | open_url | https://maps.google.com]   open URL on phone'
-        '\n  [ANDROID: primary_mobile | open_app | com.spotify.music]         open app by package'
+        '\n  [ANDROID: primary_mobile | open_app | com.spotify.music]         open app by package name'
         '\n  [ANDROID: primary_mobile | notify  | Reminder: meeting in 5 min] push notification'
         '\n  [ANDROID: primary_mobile | clip    | some text]                  copy to phone clipboard'
+        '\n  [ANDROID: primary_mobile | media   | play]                       media control (play/pause/next/previous/stop)'
+        '\n  [ANDROID: primary_mobile | volume  | 70]                         set phone volume 0-100'
         '\nUse device ID from the device inventory above, or "primary_mobile" as shorthand.'
+        '\nUSE THESE TOOLS when Creator says things like: "open X on my phone", "send me a notification",'
+        '\n"play music on my phone", "set phone volume to N", "open [app] on my [phone/mobile]".'
         '\nFOR ANDROID ACTIONS: emit the tag FIRST on its own line, then ONE ultra-short confirmation.'
         '\n'
         '\n### [INDEX: path] — index a file or directory for RAG retrieval'
@@ -3186,17 +3195,9 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
             result = _ws_exec(session_id, code)
             tools[m.group(0)] = f'[workspace output]:\n{result}'
 
-    # DESKTOP
-    user_wants_desktop = bool(re.search(
-        r'\b(open|launch|start|close|kill|run|volume|mute|unmute|brightness|screenshot|'
-        r'take a screenshot|what.{0,10}screen|lock screen|suspend|sleep|media|'
-        r'play|pause|skip|next track|previous track|what.{0,15}running|what.{0,15}open)\b',
-        user_text, re.IGNORECASE)) if user_text else False
-    for m in re.finditer(r'\[DESKTOP:\s*(\w+)\s*\|\s*([^\]]+)\]', text, re.IGNORECASE):
-        if user_wants_desktop:
-            tools[m.group(0)] = _desktop(m.group(1).strip().lower(), m.group(2).strip())
-        else:
-            tools[m.group(0)] = ''
+    # DESKTOP — match both [DESKTOP: action | arg] and [DESKTOP: action]
+    for m in re.finditer(r'\[DESKTOP:\s*(\w+)(?:\s*\|\s*([^\]]*))?\]', text, re.IGNORECASE):
+        tools[m.group(0)] = _desktop(m.group(1).strip().lower(), (m.group(2) or '').strip())
 
     # [ANDROID: device_id | action | arg]
     for m in re.finditer(r'\[ANDROID:\s*([^\|\]]+)\|\s*([^\|\]]+)(?:\|\s*([^\]]*))?\]', text, re.IGNORECASE):
@@ -3271,13 +3272,17 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
             else:
                 tools[m.group(0)] = 'No schedules configured.'
 
-    if user_wants_desktop and not any('[DESKTOP:' in k for k in tools):
+    # Fallback: if no [DESKTOP:] tag was emitted but the user clearly asked to open something,
+    # execute it directly rather than waiting for a second model pass.
+    if user_text and not any('[DESKTOP:' in k for k in tools):
         tab_req = re.search(r'\b(?:open|new)\b.{0,15}\b(?:tab|new tab)\b', user_text, re.IGNORECASE)
         if tab_req:
             result = _desktop('tab', '')
             if result: tools['[DESKTOP: tab | ]'] = result
         else:
-            open_m = re.search(r'\b(?:open|launch|start)\s+(.+)', user_text, re.IGNORECASE)
+            open_m = re.search(
+                r'\b(?:open|launch|start)\s+([\w\s./-]+?)(?:\s+(?:for|on|please|now))?\s*$',
+                user_text, re.IGNORECASE)
             if open_m:
                 target = open_m.group(1).strip().rstrip('?!.')
                 result = _desktop('open', target)
