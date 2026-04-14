@@ -2542,6 +2542,7 @@ def _inject_memories(sys_p: str, conn, query: str) -> str:
 
 def _load_display_env():
     env = os.environ.copy()
+    # Load overrides from state file first
     df = DATA / 'state' / '.display_env'
     if df.exists():
         try:
@@ -2550,6 +2551,21 @@ def _load_display_env():
                     k, v = ln.split('=', 1)
                     if v.strip(): env[k.strip()] = v.strip()
         except Exception: pass
+    # Auto-detect DISPLAY from /tmp/.X11-unix if not set
+    if not env.get('DISPLAY'):
+        import glob as _glob
+        socks = sorted(_glob.glob('/tmp/.X11-unix/X*'))
+        if socks:
+            env['DISPLAY'] = ':' + socks[0].split('X')[-1]
+    # Auto-detect XAUTHORITY from home dir if not set
+    if not env.get('XAUTHORITY'):
+        xa = Path.home() / '.Xauthority'
+        if xa.exists():
+            env['XAUTHORITY'] = str(xa)
+    # Ensure DBUS session bus is set for loginctl/systemctl --user commands
+    if not env.get('DBUS_SESSION_BUS_ADDRESS'):
+        uid = os.getuid()
+        env['DBUS_SESSION_BUS_ADDRESS'] = f'unix:path=/run/user/{uid}/bus'
     return env
 
 def _run_cmd(cmd_str, confirm_fn=None, timeout=60):
@@ -2716,16 +2732,19 @@ def _desktop(action, arg):
             except Exception as e:
                 return f'(brightness failed: {e})'
         elif act == 'lock':
-            for cmd in (['loginctl','lock-session'], ['xdg-screensaver','lock'],
-                        ['gnome-screensaver-command','-l'], ['xlock']):
+            for cmd in (['xdg-screensaver','lock'], ['loginctl','lock-session'],
+                        ['gnome-screensaver-command','-l'], ['xlock','-nolock']):
+                if shutil.which(cmd[0]):
+                    r = subprocess.run(cmd, env=env, capture_output=True, timeout=5)
+                    if r.returncode == 0:
+                        return 'locked'
+            return '(lock failed — no working lock command found)'
+        elif act == 'sleep':
+            for cmd in (['loginctl','suspend'], ['systemctl','suspend']):
                 if shutil.which(cmd[0]):
                     subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    return 'screen locked'
-            return '(no lock command found)'
-        elif act == 'sleep':
-            subprocess.Popen(['systemctl','suspend'], env=env,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return 'suspending'
+                    return 'suspending'
+            return '(suspend failed)'
         elif act == 'media':
             sub = arg.strip().lower() if arg.strip() else 'play-pause'
             media_map = {
@@ -2742,21 +2761,39 @@ def _desktop(action, arg):
             import base64 as _b64, tempfile as _tf
             tmp = _tf.NamedTemporaryFile(suffix='.png', delete=False, prefix='/tmp/nx_screen_')
             tmp.close()
-            for scmd in (['scrot', tmp.name], ['import', '-window', 'root', tmp.name],
-                         ['gnome-screenshot', '-f', tmp.name]):
-                if shutil.which(scmd[0]):
-                    r = subprocess.run(scmd, capture_output=True, env=env, timeout=10)
-                    if r.returncode == 0:
-                        try:
-                            with open(tmp.name, 'rb') as f: raw = f.read()
-                            b64 = _b64.b64encode(raw).decode()
-                            msgs_v = [{'role': 'user', 'content': 'Describe what is visible on this screenshot in 2-3 sentences. Be specific about application names, content, and notable details.'}]
-                            result, _ = _smart_chat(msgs_v, images=[b64], temperature=0.3)
-                            import os; os.unlink(tmp.name)
-                            return f'Screenshot: {result.strip()}'
-                        except Exception as e:
-                            return f'(screenshot captured but vision failed: {e})'
-            return '(no screenshot tool found — install scrot)'
+            captured = False
+            # Try ffmpeg x11grab first (most reliable on Debian without scrot)
+            if shutil.which('ffmpeg') and env.get('DISPLAY'):
+                # Get screen dimensions
+                try:
+                    xi = subprocess.run(['xdpyinfo'], capture_output=True, text=True, env=env, timeout=5)
+                    dim = '1920x1080'
+                    for l in xi.stdout.splitlines():
+                        if 'dimensions:' in l:
+                            dim = l.split()[1]; break
+                except Exception: dim = '1920x1080'
+                r = subprocess.run(
+                    ['ffmpeg', '-f', 'x11grab', '-video_size', dim,
+                     '-i', env['DISPLAY'], '-vframes', '1', tmp.name, '-y'],
+                    capture_output=True, env=env, timeout=15)
+                if r.returncode == 0: captured = True
+            # Fallbacks
+            if not captured:
+                for scmd in (['scrot', tmp.name], ['gnome-screenshot', '-f', tmp.name]):
+                    if shutil.which(scmd[0]):
+                        r = subprocess.run(scmd, capture_output=True, env=env, timeout=10)
+                        if r.returncode == 0: captured = True; break
+            if captured:
+                try:
+                    with open(tmp.name, 'rb') as f: raw = f.read()
+                    b64 = _b64.b64encode(raw).decode()
+                    msgs_v = [{'role': 'user', 'content': 'Describe what is visible on this screenshot in 2-3 sentences. Be specific about application names, content, and notable details.'}]
+                    result, _ = _smart_chat(msgs_v, images=[b64], temperature=0.3)
+                    import os as _os; _os.unlink(tmp.name)
+                    return f'Screenshot: {result.strip()}'
+                except Exception as e:
+                    return f'(screenshot captured but vision failed: {e})'
+            return '(screenshot failed — no working capture tool found)'
     except Exception as e:
         return f'({act} failed: {e})'
     return f'(unknown: {act})'
@@ -4978,6 +5015,48 @@ def _web_cmd(cmd) -> str:
                 src = '(cli)' if sid.startswith('cli_') else '(web)'
                 lines.append(f'{ts} {src}')
 
+    elif c == 'brief':
+        import concurrent.futures as _cf
+        today = datetime.now().strftime('%A, %d %B %Y, %H:%M')
+        # Fetch weather and news in parallel
+        with _cf.ThreadPoolExecutor(max_workers=2) as ex:
+            weather_f = ex.submit(lambda: _get_weather(_get_location()))
+            news_f    = ex.submit(lambda: _web_search('top news today', max_results=5))
+        weather = weather_f.result() or 'unavailable'
+        news    = news_f.result() or ''
+        # Pull recent conversation work context
+        db = _db()
+        recent = db.execute(
+            "SELECT role, content FROM chat_history WHERE session_id != '' "
+            "ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
+        db.close()
+        recent_text = ''
+        if recent:
+            recent_text = '\n'.join(
+                f"{r['role'].upper()}: {r['content'][:200]}" for r in reversed(recent)
+            )
+        prompt_parts = [
+            f'Today is {today}.',
+            f'Weather: {weather}.',
+        ]
+        if news:
+            prompt_parts.append(f'News headlines:\n{news}')
+        if recent_text:
+            prompt_parts.append(f'Recent conversation context:\n{recent_text}')
+        prompt_parts.append(
+            'Give Creator a tight morning briefing in 3-8 sentences. '
+            'Cover: the date/time, weather, 2-3 notable news items, '
+            'and one line about what we were working on recently. '
+            'Stay in character as NeXiS.'
+        )
+        summary_msgs = [
+            {'role': 'system', 'content': 'You are NeXiS. Be sardonic, precise, and brief.'},
+            {'role': 'user',   'content': '\n\n'.join(prompt_parts)},
+        ]
+        result = _stream_chat(summary_msgs, MODEL_FAST, 0.7, 2048)
+        lines = [result] if result else ['Brief unavailable — network or model error.']
+
     elif c in ('exit', 'quit', 'bye', 'disconnect'):
         lines = ['Use the app navigation to disconnect.']
 
@@ -5133,11 +5212,21 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                                    session_id=_web_session_id)
     if tools:
         yield '[CLEAR]'
-        ctx   = '\n\n'.join(f'[{k}]:\n{v}' for k, v in tools.items())
+        ctx = '\n\n'.join(f'[{k}]:\n{v}' for k, v in tools.items())
+        is_desktop_only = all('[DESKTOP:' in k for k in tools)
+        if is_desktop_only:
+            instruction = (
+                'DESKTOP ACTION COMPLETE. Reply in ONE sentence, maximum 8 words. '
+                'Just confirm it happened. No personality. No elaboration. No "Creator". '
+                'Examples: "Done." / "Opened." / "Volume set to 50%." / "Screen locked."'
+            )
+        else:
+            instruction = (
+                'Answer the original question fully and accurately using the tool results. '
+                'Stay in character as NeXiS. Do not mention that you ran tools.'
+            )
         fmsgs = msgs + [{'role': 'user', 'content': (
-            f'[Tool results]:\n{ctx}\n\nOriginal question: {msg}\n\n'
-            'Answer the original question fully and accurately using the tool results. '
-            'Stay in character as NeXiS. Do not mention that you ran tools.'
+            f'[Tool results]:\n{ctx}\n\nOriginal question: {msg}\n\n{instruction}'
         )}]
         collected2 = []
         for tok in _live_stream(fmsgs, tts_sa=_SentenceAccum() if voice_on else None):
