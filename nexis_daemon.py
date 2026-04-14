@@ -4353,42 +4353,64 @@ _CSS = (
     "--border:#1a1a12;--font:'JetBrains Mono',monospace}"
     "*{box-sizing:border-box;margin:0;padding:0}"
     "body{background:var(--bg);color:var(--fg);font-family:var(--font);"
-    "font-size:13px;line-height:1.6;height:100vh;display:flex;flex-direction:column}"
+    "font-size:13px;line-height:1.6;height:100vh;display:flex;overflow:hidden}"
     "a{color:var(--or2)}"
-    ".top{background:var(--bg2);border-bottom:1px solid var(--border);"
-    "padding:8px 16px;display:flex;align-items:center;gap:14px;flex-shrink:0}"
-    ".brand{color:var(--or);font-weight:700;font-size:13px;letter-spacing:.15em}"
-    ".ver{color:var(--fg2);font-size:10px}"
-    ".nav{margin-left:auto;display:flex;gap:4px}"
-    ".nav a{color:var(--fg2);font-size:10px;padding:3px 9px;"
-    "border:1px solid transparent;text-decoration:none;"
-    "text-transform:uppercase;letter-spacing:.06em}"
-    ".nav a:hover,.nav a.on{color:var(--or);border-color:var(--or2);"
-    "background:rgba(232,114,12,.06)}"
-    "#cw{flex:1;display:flex;flex-direction:column;padding:12px 16px;"
-    "overflow:hidden;min-height:0}"
+
+    ".sidebar{width:240px;background:var(--bg2);border-right:1px solid var(--border);"
+    "display:flex;flex-direction:column;flex-shrink:0;height:100vh;z-index:10}"
+    ".sb-brand{padding:18px 16px 14px;display:flex;align-items:center;gap:11px;"
+    "border-bottom:1px solid var(--border)}"
+    ".sb-brand-text{line-height:1.2}"
+    ".sb-name{color:var(--or);font-weight:700;font-size:13px;letter-spacing:.2em;display:block}"
+    ".sb-ver{color:var(--fg2);font-size:9px;letter-spacing:.08em}"
+    ".sb-nav{flex:1;padding:6px 0;overflow-y:auto}"
+    ".nav-item{display:flex;align-items:center;padding:11px 18px;color:var(--fg2);"
+    "text-decoration:none;font-size:10px;text-transform:uppercase;letter-spacing:.1em;"
+    "border-left:3px solid transparent;transition:color .15s,background .15s,border-color .15s;"
+    "white-space:nowrap;gap:10px}"
+    ".nav-item:hover{color:var(--fg);background:rgba(255,255,255,.025);border-left-color:var(--dim)}"
+    ".nav-item.on{color:var(--or);background:rgba(232,114,12,.07);border-left-color:var(--or)}"
+    ".nav-icon{font-size:13px;opacity:.7;flex-shrink:0}"
+    ".nav-item.on .nav-icon{opacity:1}"
+    ".sb-footer{padding:14px 16px;border-top:1px solid var(--border)}"
+    ".sb-logout{display:block;padding:6px 2px;color:var(--fg2);text-decoration:none;"
+    "font-size:10px;text-transform:uppercase;letter-spacing:.1em;opacity:.55;"
+    "transition:opacity .15s}"
+    ".sb-logout:hover{opacity:1;color:var(--fg)}"
+
+    ".main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}"
+    ".page-head{padding:14px 20px;border-bottom:1px solid var(--border);color:var(--or);"
+    "font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;flex-shrink:0}"
+    ".page{flex:1;overflow-y:auto;padding:20px}"
+
+    "#cw{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}"
     "#msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;"
-    "gap:10px;padding-bottom:8px;min-height:0}"
-    ".msg{padding:9px 13px;font-size:13px;line-height:1.7;"
-    "max-width:90%;word-break:break-word}"
-    ".msg.u{align-self:flex-end;background:rgba(232,114,12,.07);"
-    "border:1px solid var(--or2)}"
-    ".msg.n{align-self:flex-start;background:var(--bg2);"
-    "border:1px solid var(--border);min-width:200px}"
-    ".who{font-size:9px;font-weight:700;letter-spacing:.1em;"
-    "margin-bottom:4px;text-transform:uppercase}"
+    "gap:10px;padding:16px 20px 8px;min-height:0}"
+    ".msg{padding:10px 14px;font-size:13px;line-height:1.7;"
+    "max-width:78%;word-break:break-word;border-radius:2px}"
+    ".msg.u{align-self:flex-end;background:rgba(232,114,12,.07);border:1px solid var(--or2)}"
+    ".msg.n{align-self:flex-start;background:var(--bg2);border:1px solid var(--border);min-width:200px}"
+    ".who{font-size:9px;font-weight:700;letter-spacing:.1em;margin-bottom:4px;text-transform:uppercase}"
     ".msg.u .who{color:var(--or2)}.msg.n .who{color:var(--or)}"
+
+    ".chat-input-wrap{padding:0 20px 14px;flex-shrink:0}"
+    ".ir{display:flex;gap:6px;padding:10px 0 0;align-items:stretch}"
     "textarea{flex:1;background:var(--bg2);border:1px solid var(--border);"
-    "border-bottom:1px solid var(--or2);"
-    "color:var(--fg);padding:8px 10px;font-family:var(--font);"
-    "font-size:13px;outline:none;resize:none;height:34px;line-height:1.5;"
-    "transition:border-color .2s}"
+    "border-bottom:2px solid var(--or2);"
+    "color:var(--fg);padding:8px 12px;font-family:var(--font);"
+    "font-size:13px;outline:none;resize:none;height:36px;line-height:1.5;"
+    "transition:border-color .2s;border-radius:2px 2px 0 0}"
     "textarea:focus{border-color:var(--or2)}"
+    ".toolbar{display:flex;gap:4px;padding:5px 0 0;border-top:1px solid var(--border);"
+    "flex-shrink:0;align-items:center;flex-wrap:wrap}"
+    "#fi{display:none}"
+    ".fbadge{font-size:10px;color:var(--or3);padding:0 4px;display:none}"
+
     ".btn{background:var(--or2);border:1px solid var(--or2);color:var(--bg);"
-    "padding:0 14px;height:34px;line-height:34px;"
+    "padding:0 14px;height:36px;line-height:36px;"
     "font-family:var(--font);font-size:11px;text-transform:uppercase;"
     "cursor:pointer;font-weight:700;letter-spacing:.08em;white-space:nowrap;"
-    "transition:background .15s,color .15s}"
+    "transition:background .15s,color .15s;border-radius:2px}"
     ".btn:hover:not(:disabled){background:var(--or3);border-color:var(--or3)}"
     ".btn:disabled{opacity:.45;cursor:not-allowed}"
     ".btn.sec{background:transparent;color:var(--fg2);border:1px solid var(--border)}"
@@ -4398,22 +4420,40 @@ _CSS = (
     "select.btn.sec{-webkit-appearance:none;appearance:none;cursor:pointer;"
     "padding:0 8px;outline:none;max-width:90px}"
     "select.btn.sec:focus{border-color:var(--or2);color:var(--fg)}"
-    ".upl{cursor:pointer;background:var(--bg3);border:1px solid var(--border);"
-    "color:var(--fg2);padding:8px 10px;font-size:11px;text-transform:uppercase;"
-    "letter-spacing:.06em;white-space:nowrap}"
-    ".upl:hover{color:var(--fg);border-color:var(--or2)}"
-    "#fi{display:none}"
-    ".fbadge{font-size:10px;color:var(--or3);padding:0 4px;display:none}"
-    ".page{padding:16px;overflow-y:auto;flex:1}"
-    ".ph{color:var(--or);font-size:14px;font-weight:700;margin-bottom:12px;"
-    "padding-bottom:8px;border-bottom:1px solid var(--border)}"
-    ".mi{padding:7px 0;border-bottom:1px solid var(--border);"
-    "color:var(--fg2);font-size:12px}"
+    ".tbtn{background:transparent;border:1px solid var(--border);color:var(--fg2);"
+    "padding:0 10px;height:26px;line-height:26px;font-family:var(--font);font-size:10px;"
+    "text-transform:uppercase;letter-spacing:.08em;cursor:pointer;white-space:nowrap;"
+    "transition:color .15s,border-color .15s}"
+    ".tbtn:hover{color:var(--fg);border-color:var(--fg2)}"
+    ".tbtn.on{color:var(--or);border-color:var(--or2)}"
+    ".tb-sep{width:1px;background:var(--border);height:18px;margin:0 2px;align-self:center}"
+    ".ctrl-group{display:flex;align-items:stretch;gap:0}"
+    ".ctrl-lbl{display:flex;align-items:center;padding:0 6px;font-size:9px;color:var(--fg2);"
+    "border:1px solid var(--border);border-right:none;background:var(--bg2);"
+    "text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;height:26px}"
+    "select.btn.sec{height:26px;line-height:26px}"
+
+    ".card{background:var(--bg2);border:1px solid var(--border);border-radius:4px;margin-bottom:14px}"
+    ".card-head{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--or);"
+    "font-size:9px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}"
+    ".card-body{padding:12px 14px}"
+    ".ph{color:var(--or);font-size:11px;font-weight:700;margin-bottom:14px;"
+    "padding-bottom:8px;border-bottom:1px solid var(--border);letter-spacing:.1em;text-transform:uppercase}"
+    ".mi{padding:8px 0;border-bottom:1px solid var(--border);color:var(--fg2);font-size:12px}"
     ".mi:last-child{border:none}"
     ".ts{color:var(--dim);font-size:10px;display:block;margin-bottom:2px}"
-    ".st{display:flex;justify-content:space-between;padding:6px 0;"
+    ".st{display:flex;justify-content:space-between;padding:7px 0;"
     "border-bottom:1px solid var(--border);font-size:12px}"
     ".sk{color:var(--fg2)}.sv{color:var(--or3)}"
+    ".sched-row{display:flex;justify-content:space-between;align-items:center;"
+    "padding:10px 0;border-bottom:1px solid var(--border);font-size:12px;gap:10px}"
+    ".sched-row:last-child{border:none}"
+    ".sched-name{color:var(--or);font-weight:700;margin-bottom:3px}"
+    ".sched-meta{color:var(--fg2);font-size:10px;margin-top:2px}"
+    ".badge{font-size:9px;padding:2px 6px;border:1px solid;letter-spacing:.06em;text-transform:uppercase;border-radius:2px}"
+    ".badge.ok{color:var(--or3);border-color:var(--or2)}"
+    ".badge.off{color:var(--fg2);border-color:var(--border)}"
+
     ".msg h1{color:var(--or3);font-size:15px;margin:8px 0 4px}"
     ".msg h2{color:var(--or);font-size:14px;margin:6px 0 3px}"
     ".msg h3{color:var(--or2);font-size:13px;margin:4px 0 2px}"
@@ -4447,45 +4487,39 @@ _CSS = (
     "@keyframes blink{0%,80%,100%{opacity:.3}40%{opacity:1}}"
     ".cursor{color:var(--or3);animation:blink 1s infinite}"
     ".status-line{font-size:10px;color:var(--fg2);opacity:.65;margin:0 0 4px;letter-spacing:.04em}"
-    ".ir{display:flex;gap:6px;padding:8px 0 0;flex-shrink:0;align-items:stretch}"
-    ".toolbar{display:flex;gap:4px;padding:6px 0 4px;border-top:1px solid var(--border);"
-    "flex-shrink:0;align-items:center;flex-wrap:wrap}"
-    ".tbtn{background:transparent;border:1px solid var(--border);color:var(--fg2);"
-    "padding:0 10px;height:28px;line-height:28px;font-family:var(--font);font-size:10px;"
-    "text-transform:uppercase;letter-spacing:.08em;cursor:pointer;white-space:nowrap;"
-    "transition:color .15s,border-color .15s}"
-    ".tbtn:hover{color:var(--fg);border-color:var(--fg2)}"
-    ".tbtn.on{color:var(--or);border-color:var(--or2)}"
-    ".tb-sep{width:1px;background:var(--border);height:20px;margin:0 2px;align-self:center}"
-    ".ctrl-group{display:flex;align-items:stretch;gap:0}"
-    ".ctrl-lbl{display:flex;align-items:center;padding:0 6px;font-size:9px;color:var(--fg2);"
-    "border:1px solid var(--border);border-right:none;background:var(--bg2);"
-    "text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;height:28px}"
-    "select.btn.sec{height:28px;line-height:28px}"
+
+    ".login-wrap{display:flex;justify-content:center;align-items:center;"
+    "height:100vh;flex-direction:column;gap:20px;background:var(--bg)}"
+    ".login-box{background:var(--bg2);border:1px solid var(--border);"
+    "border-radius:4px;padding:32px 36px;min-width:300px}"
+    ".login-box input{width:100%;background:var(--bg3);border:1px solid var(--border);"
+    "border-radius:2px;color:var(--fg);padding:9px 11px;font-family:var(--font);"
+    "font-size:13px;outline:none;margin-bottom:10px;transition:border-color .2s}"
+    ".login-box input:focus{border-color:var(--or2)}"
+    ".login-err{color:#c07070;font-size:11px;margin-bottom:10px}"
+
+    "#inp.stt-active{border-color:var(--or);box-shadow:0 0 0 1px var(--or)}"
+    "#conv-badge{display:none;font-size:9px;color:var(--or);border:1px solid var(--or2);"
+    "padding:1px 5px;letter-spacing:.08em;text-transform:uppercase;align-self:center}"
+    "#conv-badge.on{display:inline}"
     "::-webkit-scrollbar{width:3px}"
     "::-webkit-scrollbar-thumb{background:var(--dim)}"
     "p{margin:2px 0}.msg p:first-child{margin-top:0}.msg p:last-child{margin-bottom:0}"
     "@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}"
     ".msg{animation:fadein .15s ease}"
-    ".sched-row{display:flex;justify-content:space-between;align-items:center;"
-    "padding:8px 0;border-bottom:1px solid var(--border);font-size:12px}"
-    ".sched-row:last-child{border:none}"
-    ".sched-name{color:var(--or);font-weight:700;margin-bottom:2px}"
-    ".sched-meta{color:var(--fg2);font-size:10px}"
-    ".sched-active{color:var(--or3)}.sched-paused{color:var(--fg2)}"
-    ".badge{font-size:9px;padding:1px 5px;border:1px solid;letter-spacing:.06em;text-transform:uppercase}"
-    ".badge.ok{color:var(--or3);border-color:var(--or2)}"
-    ".badge.off{color:var(--fg2);border-color:var(--border)}"
-    ".login-wrap{display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;gap:16px}"
-    ".login-box{background:var(--bg2);border:1px solid var(--border);padding:32px;min-width:280px}"
-    ".login-box input{width:100%;background:var(--bg3);border:1px solid var(--border);"
-    "color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:13px;outline:none;margin-bottom:10px}"
-    ".login-box input:focus{border-color:var(--or2)}"
-    ".login-err{color:#c07070;font-size:11px;margin-bottom:8px}"
-    "#inp.stt-active{border-color:var(--or);box-shadow:0 0 0 1px var(--or);}"
-    "#conv-badge{display:none;font-size:9px;color:var(--or);border:1px solid var(--or2);"
-    "padding:1px 5px;letter-spacing:.08em;text-transform:uppercase;align-self:center}"
-    "#conv-badge.on{display:inline}"
+
+    "@media(max-width:640px){"
+    "body{flex-direction:column}"
+    ".sidebar{width:100%;height:auto;border-right:none;border-bottom:1px solid var(--border);flex-direction:row}"
+    ".sb-brand{padding:10px 14px;border-bottom:none;border-right:1px solid var(--border);flex-shrink:0}"
+    ".sb-ver{display:none}"
+    ".sb-nav{display:flex;flex-direction:row;padding:0;overflow-x:auto;overflow-y:hidden}"
+    ".nav-item{padding:10px 14px;border-left:none;border-bottom:3px solid transparent;flex-direction:column;gap:2px;font-size:9px}"
+    ".nav-item.on{border-left-color:transparent;border-bottom-color:var(--or)}"
+    ".nav-item:hover{border-left-color:transparent}"
+    ".sb-footer{display:none}"
+    ".main{min-height:0}"
+    "}"
 )
 
 _EYE_SVG = (
@@ -4942,12 +4976,20 @@ document.addEventListener('keydown',function(e){
 
 
 def _shell(content, active='chat'):
-    nav = ''.join(
-        f"<a href='/{s}' class='{'on' if active==s else ''}'>{l}</a>"
-        for s, l in [('chat','Chat'),('remote','Remote'),('history','History'),('memory','Memory'),
-                     ('schedules','Schedules'),('devices','Devices'),('status','Status')]
+    nav_items = [
+        ('chat',      '💬', 'Chat'),
+        ('remote',    '🎮', 'Remote'),
+        ('history',   '📋', 'History'),
+        ('memory',    '🧠', 'Memory'),
+        ('schedules', '⏰', 'Schedules'),
+        ('devices',   '📱', 'Devices'),
+        ('status',    '⚡', 'Status'),
+    ]
+    nav_html = ''.join(
+        f"<a href='/{s}' class='nav-item {'on' if active==s else ''}'>"
+        f"<span class=nav-icon>{icon}</span>{label}</a>"
+        for s, icon, label in nav_items
     )
-    nav += "<a href='/logout' style='margin-left:auto;opacity:.6'>Logout</a>"
     return (
         '<!DOCTYPE html><html lang=en><head>'
         '<meta charset=UTF-8>'
@@ -4956,129 +4998,158 @@ def _shell(content, active='chat'):
         "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<link href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' rel=stylesheet>"
         f'<style>{_CSS}</style></head><body>'
-        '<div class=top>'
+        '<div class=sidebar>'
+        '<div class=sb-brand>'
         f'{_EYE_SVG}'
-        '<span class=brand>N e X i S</span>'
-        '<span class=ver>v3.1</span>'
-        f'<div class=nav>{nav}</div>'
-        f'</div>{content}</body></html>'
+        '<div class=sb-brand-text>'
+        '<span class=sb-name>N e X i S</span>'
+        '<span class=sb-ver>v3.1</span>'
+        '</div>'
+        '</div>'
+        f'<nav class=sb-nav>{nav_html}</nav>'
+        '<div class=sb-footer>'
+        "<a href='/logout' class=sb-logout>↩ Logout</a>"
+        '</div>'
+        '</div>'
+        f'<div class=main>{content}</div>'
+        '</body></html>'
     )
 
 
 def _page_remote():
     return _shell(r"""
 <style>
-.rm-page{padding:16px;overflow-y:auto;flex:1;max-width:800px;width:100%}
-.rm-sec{margin-bottom:20px}
-.rm-sec-lbl{color:var(--or);font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
-  padding-bottom:6px;border-bottom:1px solid var(--border);margin-bottom:10px}
+.rm-wrap{max-width:680px}
 .rm-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-.rm-input{width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--fg);
-  padding:7px 10px;font-family:var(--font);font-size:12px;outline:none;margin-bottom:8px}
+.rm-input{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:2px;
+  color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;
+  margin-bottom:8px;transition:border-color .2s}
 .rm-input:focus{border-color:var(--or2)}
-.rm-btn{background:transparent;border:1px solid var(--border);color:var(--fg2);
-  padding:0 12px;height:36px;line-height:36px;font-family:var(--font);font-size:10px;
-  text-transform:uppercase;letter-spacing:.07em;cursor:pointer;white-space:nowrap;
+.rm-btn{background:transparent;border:1px solid var(--border);border-radius:2px;color:var(--fg2);
+  padding:0 14px;height:34px;line-height:34px;font-family:var(--font);font-size:10px;
+  text-transform:uppercase;letter-spacing:.08em;cursor:pointer;white-space:nowrap;
   transition:color .15s,border-color .15s;flex:1;min-width:70px}
 .rm-btn:hover:not(:disabled){color:var(--or);border-color:var(--or2)}
 .rm-btn:disabled{opacity:.35;cursor:not-allowed}
 .rm-btn.wide{flex:2}
 .rm-btn.accent{color:var(--or);border-color:var(--or2)}
-.rm-dev-bar{display:flex;gap:8px;align-items:center;margin-bottom:20px;flex-wrap:wrap}
-.rm-dev-sel{flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--fg);
-  padding:7px 10px;font-family:var(--font);font-size:12px;outline:none;cursor:pointer;min-width:160px}
+.rm-dev-bar{display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap}
+.rm-dev-sel{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:2px;
+  color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;
+  cursor:pointer;min-width:160px;transition:border-color .2s}
 .rm-dev-sel:focus{border-color:var(--or2)}
 .rm-vol{width:100%;accent-color:var(--or);cursor:pointer;height:4px;outline:none}
 .rm-vol-row{display:flex;gap:10px;align-items:center;margin-bottom:8px}
 .rm-vol-val{color:var(--fg2);font-size:10px;min-width:34px;text-align:right}
 .rm-result{background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--or2);
-  padding:10px 12px;font-size:11px;color:var(--fg);white-space:pre-wrap;word-break:break-all;
-  margin-top:16px;display:none}
-.rm-loading{display:none;color:var(--fg2);font-size:10px;letter-spacing:.06em;text-transform:uppercase}
-.rm-offline-note{color:var(--fg2);font-size:10px;padding:8px 0;letter-spacing:.04em}
+  border-radius:2px;padding:10px 12px;font-size:11px;color:var(--fg);white-space:pre-wrap;
+  word-break:break-all;margin-top:4px;display:none}
+.rm-loading{display:none;color:var(--fg2);font-size:10px;letter-spacing:.06em;text-transform:uppercase;padding:8px 0}
+.rm-offline{color:var(--or2);font-size:10px;padding:6px 0;letter-spacing:.04em;display:none}
 </style>
 
-<div class=rm-page>
-  <div class=rm-dev-bar>
-    <select id=devsel class=rm-dev-sel onchange=selectDev()>
-      <option value=''>loading devices…</option>
-    </select>
-    <button class=rm-btn onclick=loadDevices() style='flex:0;min-width:70px'>Refresh</button>
-    <button class=rm-btn onclick=probeSelected() style='flex:0;min-width:60px'>Probe</button>
+<div class=page-head>Remote Control</div>
+<div class=page>
+<div class=rm-wrap>
+
+  <!-- Device selector -->
+  <div class=card>
+    <div class=card-head>Target Device</div>
+    <div class=card-body>
+      <div class=rm-dev-bar>
+        <select id=devsel class=rm-dev-sel onchange=selectDev()>
+          <option value=''>loading devices…</option>
+        </select>
+        <button class=rm-btn onclick=loadDevices() style='flex:0;min-width:80px'>Refresh</button>
+        <button class=rm-btn onclick=probeSelected() style='flex:0;min-width:70px'>Probe</button>
+      </div>
+      <div id=offline-note class=rm-offline>⚠ device offline — commands queue and deliver when back online</div>
+    </div>
   </div>
-  <div id=offline-note class=rm-offline-note style=display:none>⚠ device offline — commands queue and deliver when back online</div>
 
   <!-- Desktop sections -->
   <div id=sec-desktop style=display:none>
 
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>app control</div>
-      <input id=d-app class=rm-input placeholder='app name or URL (e.g. spotify, https://…)'>
-      <div class=rm-row>
-        <button class=rm-btn onclick=da('open',gv('d-app'))>Open</button>
-        <button class=rm-btn onclick=da('close',gv('d-app'))>Close</button>
-        <button class=rm-btn onclick=da('windows','')>List Windows</button>
+    <div class=card>
+      <div class=card-head>App Control</div>
+      <div class=card-body>
+        <input id=d-app class=rm-input placeholder='app name or URL (e.g. spotify, https://…)'>
+        <div class=rm-row>
+          <button class=rm-btn onclick=da('open',gv('d-app'))>Open</button>
+          <button class=rm-btn onclick=da('close',gv('d-app'))>Close</button>
+          <button class=rm-btn onclick=da('windows','')>List Windows</button>
+        </div>
       </div>
     </div>
 
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>media</div>
-      <div class=rm-row>
-        <button class=rm-btn onclick=da('media','previous')>⏮ Prev</button>
-        <button class='rm-btn wide accent' onclick=da('media','play-pause')>⏯ Play/Pause</button>
-        <button class=rm-btn onclick=da('media','next')>Next ⏭</button>
-      </div>
-      <div class=rm-row>
-        <button class=rm-btn onclick=da('media','seek_backward')>−10s</button>
-        <button class=rm-btn onclick=da('media','seek_forward')>+10s</button>
-        <button class=rm-btn onclick=da('media','stop')>Stop</button>
-      </div>
-    </div>
-
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>volume</div>
-      <div class=rm-vol-row>
-        <span style='color:var(--fg2);font-size:11px'>🔈</span>
-        <input type=range id=d-vol class=rm-vol min=0 max=100 value=50
-          oninput="document.getElementById('d-vol-val').textContent=this.value+'%'"
-          onchange=da('volume',this.value)>
-        <span style='color:var(--fg2);font-size:11px'>🔊</span>
-        <span id=d-vol-val class=rm-vol-val>50%</span>
-      </div>
-      <div class=rm-row>
-        <button class=rm-btn onclick=da('mute','')>Mute</button>
-        <button class=rm-btn onclick=da('unmute','')>Unmute</button>
+    <div class=card>
+      <div class=card-head>Media</div>
+      <div class=card-body>
+        <div class=rm-row>
+          <button class=rm-btn onclick=da('media','previous')>⏮ Prev</button>
+          <button class='rm-btn wide accent' onclick=da('media','play-pause')>⏯ Play / Pause</button>
+          <button class=rm-btn onclick=da('media','next')>Next ⏭</button>
+        </div>
+        <div class=rm-row>
+          <button class=rm-btn onclick=da('media','seek_backward')>−10s</button>
+          <button class=rm-btn onclick=da('media','seek_forward')>+10s</button>
+          <button class=rm-btn onclick=da('media','stop')>Stop</button>
+        </div>
       </div>
     </div>
 
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>clipboard</div>
-      <input id=d-clip class=rm-input placeholder='text to copy to PC clipboard'>
-      <div class=rm-row>
-        <button class=rm-btn onclick=da('clip',gv('d-clip'))>Copy to PC</button>
-        <button class=rm-btn onclick=pasteFromPc()>Paste PC → Browser</button>
+    <div class=card>
+      <div class=card-head>Volume</div>
+      <div class=card-body>
+        <div class=rm-vol-row>
+          <span style='color:var(--fg2);font-size:13px'>🔈</span>
+          <input type=range id=d-vol class=rm-vol min=0 max=100 value=50
+            oninput="document.getElementById('d-vol-val').textContent=this.value+'%'"
+            onchange=da('volume',this.value)>
+          <span style='color:var(--fg2);font-size:13px'>🔊</span>
+          <span id=d-vol-val class=rm-vol-val>50%</span>
+        </div>
+        <div class=rm-row>
+          <button class=rm-btn onclick=da('mute','')>Mute</button>
+          <button class=rm-btn onclick=da('unmute','')>Unmute</button>
+        </div>
       </div>
     </div>
 
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>notify</div>
-      <input id=d-notify class=rm-input placeholder='notification text'>
-      <div class=rm-row>
-        <button class='rm-btn wide' onclick=da('notify',gv('d-notify'))>Send Notification</button>
+    <div class=card>
+      <div class=card-head>Clipboard</div>
+      <div class=card-body>
+        <input id=d-clip class=rm-input placeholder='text to copy to PC clipboard'>
+        <div class=rm-row>
+          <button class=rm-btn onclick=da('clip',gv('d-clip'))>Copy to PC</button>
+          <button class=rm-btn onclick=pasteFromPc()>Paste PC → Browser</button>
+        </div>
       </div>
     </div>
 
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>system</div>
-      <div class=rm-row>
-        <button class=rm-btn onclick=da('lock','')>Lock</button>
-        <button class=rm-btn onclick=da('unlock','')>Unlock</button>
-        <button class=rm-btn onclick=da('sleep','')>Sleep</button>
-        <button class=rm-btn onclick=da('wake','')>Wake Display</button>
+    <div class=card>
+      <div class=card-head>Notification</div>
+      <div class=card-body>
+        <input id=d-notify class=rm-input placeholder='notification text'>
+        <div class=rm-row>
+          <button class='rm-btn wide' onclick=da('notify',gv('d-notify'))>Send Notification</button>
+        </div>
       </div>
-      <div class=rm-row>
-        <button class='rm-btn wide' onclick=da('screenshot','')>Screenshot + Describe</button>
-        <button id=d-wol class=rm-btn onclick=wolDev()>Wake on LAN</button>
+    </div>
+
+    <div class=card>
+      <div class=card-head>System</div>
+      <div class=card-body>
+        <div class=rm-row>
+          <button class=rm-btn onclick=da('lock','')>Lock</button>
+          <button class=rm-btn onclick=da('unlock','')>Unlock</button>
+          <button class=rm-btn onclick=da('sleep','')>Sleep</button>
+          <button class=rm-btn onclick=da('wake','')>Wake Display</button>
+        </div>
+        <div class=rm-row>
+          <button class='rm-btn wide' onclick=da('screenshot','')>Screenshot + Describe</button>
+          <button id=d-wol class=rm-btn onclick=wolDev()>Wake on LAN</button>
+        </div>
       </div>
     </div>
 
@@ -5087,58 +5158,68 @@ def _page_remote():
   <!-- Mobile sections -->
   <div id=sec-mobile style=display:none>
 
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>media</div>
-      <div class=rm-row>
-        <button class=rm-btn onclick=mc('media','previous')>⏮ Prev</button>
-        <button class='rm-btn wide accent' onclick=mc('media','play-pause')>⏯ Play/Pause</button>
-        <button class=rm-btn onclick=mc('media','next')>Next ⏭</button>
-      </div>
-      <div class=rm-row>
-        <button class=rm-btn onclick=mc('media','seek_backward')>−10s</button>
-        <button class=rm-btn onclick=mc('media','seek_forward')>+10s</button>
-        <button class=rm-btn onclick=mc('media','stop')>Stop</button>
-      </div>
-    </div>
-
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>volume</div>
-      <div class=rm-vol-row>
-        <span style='color:var(--fg2);font-size:11px'>🔈</span>
-        <input type=range id=m-vol class=rm-vol min=0 max=100 value=50
-          oninput="document.getElementById('m-vol-val').textContent=this.value+'%'"
-          onchange=mc('volume',this.value)>
-        <span style='color:var(--fg2);font-size:11px'>🔊</span>
-        <span id=m-vol-val class=rm-vol-val>50%</span>
-      </div>
-      <div class=rm-row>
-        <button class=rm-btn onclick=mc('volume','0')>Mute</button>
-        <button class=rm-btn onclick=mc('volume','100')>Max</button>
+    <div class=card>
+      <div class=card-head>Media</div>
+      <div class=card-body>
+        <div class=rm-row>
+          <button class=rm-btn onclick=mc('media','previous')>⏮ Prev</button>
+          <button class='rm-btn wide accent' onclick=mc('media','play-pause')>⏯ Play / Pause</button>
+          <button class=rm-btn onclick=mc('media','next')>Next ⏭</button>
+        </div>
+        <div class=rm-row>
+          <button class=rm-btn onclick=mc('media','seek_backward')>−10s</button>
+          <button class=rm-btn onclick=mc('media','seek_forward')>+10s</button>
+          <button class=rm-btn onclick=mc('media','stop')>Stop</button>
+        </div>
       </div>
     </div>
 
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>open</div>
-      <input id=m-open class=rm-input placeholder='app name, package name, or URL'>
-      <div class=rm-row>
-        <button class=rm-btn onclick=mc('open_url',gv('m-open'))>Open URL</button>
-        <button class=rm-btn onclick=mc('open_app',gv('m-open'))>Open App</button>
+    <div class=card>
+      <div class=card-head>Volume</div>
+      <div class=card-body>
+        <div class=rm-vol-row>
+          <span style='color:var(--fg2);font-size:13px'>🔈</span>
+          <input type=range id=m-vol class=rm-vol min=0 max=100 value=50
+            oninput="document.getElementById('m-vol-val').textContent=this.value+'%'"
+            onchange=mc('volume',this.value)>
+          <span style='color:var(--fg2);font-size:13px'>🔊</span>
+          <span id=m-vol-val class=rm-vol-val>50%</span>
+        </div>
+        <div class=rm-row>
+          <button class=rm-btn onclick=mc('volume','0')>Mute</button>
+          <button class=rm-btn onclick=mc('volume','100')>Max Volume</button>
+        </div>
       </div>
     </div>
 
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>clipboard</div>
-      <input id=m-clip class=rm-input placeholder='text to copy to phone clipboard'>
-      <div class=rm-row>
-        <button class='rm-btn wide' onclick=mc('clip',gv('m-clip'))>Copy to Phone</button>
+    <div class=card>
+      <div class=card-head>Open</div>
+      <div class=card-body>
+        <input id=m-open class=rm-input placeholder='app name, package name, or URL'>
+        <div class=rm-row>
+          <button class=rm-btn onclick=mc('open_url',gv('m-open'))>Open URL</button>
+          <button class=rm-btn onclick=mc('open_app',gv('m-open'))>Open App</button>
+        </div>
       </div>
     </div>
 
-    <div class=rm-sec>
-      <div class=rm-sec-lbl>notify</div>
-      <input id=m-notify class=rm-input placeholder='notification text'>
-      <div class=rm-row>
-        <button class='rm-btn wide' onclick=mc('notify',gv('m-notify'))>Send Notification</button>
+    <div class=card>
+      <div class=card-head>Clipboard</div>
+      <div class=card-body>
+        <input id=m-clip class=rm-input placeholder='text to copy to phone clipboard'>
+        <div class=rm-row>
+          <button class='rm-btn wide' onclick=mc('clip',gv('m-clip'))>Copy to Phone</button>
+        </div>
+      </div>
+    </div>
+
+    <div class=card>
+      <div class=card-head>Notification</div>
+      <div class=card-body>
+        <input id=m-notify class=rm-input placeholder='notification text'>
+        <div class=rm-row>
+          <button class='rm-btn wide' onclick=mc('notify',gv('m-notify'))>Send Notification</button>
+        </div>
       </div>
     </div>
 
@@ -5146,6 +5227,7 @@ def _page_remote():
 
   <div id=rm-loading class=rm-loading>working…</div>
   <div id=rm-result class=rm-result></div>
+</div>
 </div>
 
 <script>
@@ -5339,8 +5421,8 @@ function setRole(devId, role) {
 
     probe_out = "<div id='probe-out' style='margin-top:12px;color:var(--fg2);font-size:11px'></div>"
     return _shell(
-        f"<div class=page><div class=ph>Device Inventory &mdash; {len(devices)} device{'s' if len(devices)!=1 else ''}</div>"
-        f"{rows_html}{probe_out}</div>{js}",
+        f"<div class=page-head>Device Inventory &mdash; {len(devices)} device{'s' if len(devices)!=1 else ''}</div>"
+        f"<div class=page><div class=card><div class=card-body>{rows_html}</div></div>{probe_out}</div>{js}",
         'devices')
 
 
@@ -5349,11 +5431,12 @@ def _page_login(error=''):
     return (
         '<!DOCTYPE html><html lang=en><head>'
         '<meta charset=UTF-8><title>NeXiS — Login</title>'
+        "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<link href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' rel=stylesheet>"
-        f'<style>{_CSS}</style></head><body>'
+        f'<style>{_CSS}</style></head><body style="display:block">'
         '<div class=login-wrap>'
         f'{_EYE_SVG}'
-        '<span class=brand style="font-size:18px;letter-spacing:.2em">N e X i S</span>'
+        '<span style="color:var(--or);font-weight:700;font-size:16px;letter-spacing:.22em">N e X i S</span>'
         '<div class=login-box>'
         f'{err_html}'
         '<form method=POST action=/login>'
@@ -5375,10 +5458,11 @@ def _page_chat():
         else: ct = '<p>' + _esc(m['content']).replace('\n', '<br>') + '</p>'
         mh += f"<div class='msg {cls}'><div class=who>{who}</div>{ct}</div>"
     if not mh:
-        mh = "<div style='color:var(--fg2);text-align:center;padding:60px 20px;font-size:11px;opacity:.4;letter-spacing:.15em;text-transform:uppercase'>Operational. Speak.</div>"
+        mh = "<div style='color:var(--fg2);text-align:center;padding:80px 20px;font-size:11px;opacity:.35;letter-spacing:.15em;text-transform:uppercase'>Operational. Speak.</div>"
     body = (
         '<div id=cw>'
         f'<div id=msgs>{mh}</div>'
+        '<div class=chat-input-wrap>'
         '<div class=ir>'
         '<textarea id=inp rows=2 placeholder="Speak." autofocus></textarea>'
         "<button id=sinp class=btn onclick=send()>Send</button>"
@@ -5404,6 +5488,7 @@ def _page_chat():
         "<button class='tbtn' onclick=clr() title='Clear conversation'>Clr</button>"
         '</div>'
         '</div>'
+        '</div>'
         f'<script>{_CHAT_JS}</script>'
     )
     return _shell(body, 'chat')
@@ -5414,8 +5499,11 @@ def _page_memory(db):
     items = ''.join(
         f"<div class=mi><span class=ts>{_esc(str(r['created_at'])[:16])}</span>{_esc(r['content'])}</div>"
         for r in rows
-    ) or "<div style='color:var(--fg2);padding:12px'>No memories yet.</div>"
-    return _shell(f"<div class=page><div class=ph>Memory &mdash; {len(rows)} facts</div>{items}</div>", 'memory')
+    ) or "<div style='color:var(--fg2);padding:12px 0'>No memories yet.</div>"
+    return _shell(
+        f"<div class=page-head>Memory &mdash; {len(rows)} facts</div>"
+        f"<div class=page><div class=card><div class=card-body>{items}</div></div></div>",
+        'memory')
 
 
 def _page_schedules():
@@ -5442,15 +5530,19 @@ def _page_schedules():
         rows_html = "<div style='color:var(--fg2);padding:12px'>No scheduled tasks.</div>"
 
     add_form = (
-        "<div style='margin-top:16px;padding-top:12px;border-top:1px solid var(--border)'>"
-        "<div class=ph>Add schedule</div>"
-        "<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px'>"
-        "<input id=sn placeholder='Name' style='background:var(--bg2);border:1px solid var(--border);color:var(--fg);padding:6px 8px;font-family:var(--font);font-size:12px;outline:none'>"
-        "<input id=se placeholder='Expr: daily 08:00 / hourly :30 / weekly mon 09:00' style='background:var(--bg2);border:1px solid var(--border);color:var(--fg);padding:6px 8px;font-family:var(--font);font-size:12px;outline:none'>"
+        "<div class=card>"
+        "<div class=card-head>Add Schedule</div>"
+        "<div class=card-body>"
+        "<style>.sched-inp{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:2px;"
+        "color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;"
+        "margin-bottom:8px;transition:border-color .2s}.sched-inp:focus{border-color:var(--or2)}</style>"
+        "<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:0'>"
+        "<input id=sn class=sched-inp placeholder='Name'>"
+        "<input id=se class=sched-inp placeholder='Expr: daily 08:00 / hourly :30 / weekly mon 09:00'>"
         "</div>"
-        "<input id=sp placeholder='Prompt (what NeXiS should say/do)' style='width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--fg);padding:6px 8px;font-family:var(--font);font-size:12px;outline:none;margin-bottom:8px'>"
-        "<button class=btn onclick=addSched()>Add</button>"
-        "</div>"
+        "<input id=sp class=sched-inp style='width:100%' placeholder='Prompt (what NeXiS should say/do)'>"
+        "<button class=btn onclick=addSched()>Add Schedule</button>"
+        "</div></div>"
     )
     js = """
 <script>
@@ -5481,7 +5573,8 @@ function runSched(id){
 }
 </script>"""
     return _shell(
-        f"<div class=page><div class=ph>Scheduled Tasks</div>{rows_html}{add_form}</div>{js}",
+        f"<div class=page-head>Scheduled Tasks</div>"
+        f"<div class=page><div class=card><div class=card-body>{rows_html}</div></div>{add_form}</div>{js}",
         'schedules')
 
 
@@ -5517,15 +5610,22 @@ def _page_status(db):
     rows = ''.join(f"<div class=st><span class=sk>{k}</span><span class=sv>{_esc(str(v))}</span></div>" for k, v in stats)
     # Password change form
     pw_form = (
-        "<div style='margin-top:20px;padding-top:12px;border-top:1px solid var(--border)'>"
-        "<div class=ph>Change password</div>"
-        "<form method=POST action=/api/passwd style='display:flex;gap:8px;flex-wrap:wrap'>"
-        "<input type=password name=password placeholder='New password' style='background:var(--bg2);border:1px solid var(--border);color:var(--fg);padding:6px 8px;font-family:var(--font);font-size:12px;outline:none'>"
-        "<input type=password name=confirm placeholder='Confirm' style='background:var(--bg2);border:1px solid var(--border);color:var(--fg);padding:6px 8px;font-family:var(--font);font-size:12px;outline:none'>"
-        "<button type=submit class=btn>Update</button>"
-        "</form></div>"
+        "<div class=card>"
+        "<div class=card-head>Change Password</div>"
+        "<div class=card-body>"
+        "<style>.pw-inp{background:var(--bg3);border:1px solid var(--border);border-radius:2px;"
+        "color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;"
+        "margin-bottom:8px;width:100%;display:block;transition:border-color .2s}.pw-inp:focus{border-color:var(--or2)}</style>"
+        "<form method=POST action=/api/passwd>"
+        "<input type=password name=password class=pw-inp placeholder='New password'>"
+        "<input type=password name=confirm class=pw-inp placeholder='Confirm'>"
+        "<button type=submit class=btn>Update Password</button>"
+        "</form></div></div>"
     )
-    return _shell(f"<div class=page><div class=ph>Status</div>{rows}{pw_form}</div>", 'status')
+    return _shell(
+        f"<div class=page-head>System Status</div>"
+        f"<div class=page><div class=card><div class=card-body>{rows}</div></div>{pw_form}</div>",
+        'status')
 
 
 def _page_history(db):
@@ -5558,8 +5658,11 @@ def _page_history(db):
             items += f"<div style='margin:6px 0'><span style='color:var(--{cls});font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em'>{role}</span>{content}</div>"
         items += '</div></div>'
     if not items:
-        items = "<div style='color:var(--fg2);padding:12px'>No chat history yet.</div>"
-    return _shell(f"<div class=page><div class=ph>History</div>{items}</div>", 'history')
+        items = "<div style='color:var(--fg2);padding:12px 0'>No chat history yet.</div>"
+    return _shell(
+        f"<div class=page-head>Chat History</div>"
+        f"<div class=page><div class=card><div class=card-body>{items}</div></div></div>",
+        'history')
 
 
 def _web_cmd(cmd) -> str:
