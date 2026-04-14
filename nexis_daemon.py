@@ -5550,6 +5550,9 @@ def _start_web():
 
     class TS(ThreadingMixIn, HTTPServer):
         daemon_threads = True; allow_reuse_address = True
+        def handle_error(self, request, client_address):
+            import traceback as _tb
+            _log(f'[WEB] handler error from {client_address}: {_tb.format_exc()}', 'ERROR')
 
     _CORS = {
         'Access-Control-Allow-Origin':  '*',
@@ -5730,7 +5733,6 @@ def _start_web():
                 elif path == '/api/probe':
                     self._send(200, json.dumps({'probe': _system_probe()}), 'application/json')
                 elif path.startswith('/api/commands/pending'):
-                    from urllib.parse import urlparse, parse_qs
                     qs       = parse_qs(urlparse(self.path).query)
                     dev_id   = qs.get('device_id', [''])[0].strip()
                     cdb      = _db()
