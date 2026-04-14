@@ -4135,6 +4135,27 @@ class Session:
             else:
                 self._tx(f'{_DIM}  //workspace [show|clear|run <code>]{_RST}\n')
 
+        elif c == 'devices':
+            devs = _devices_list(self.db)
+            if not devs:
+                self._tx(f'{_DIM}  no devices registered yet{_RST}\n')
+            else:
+                self._tx(f'{_OR}  {len(devs)} registered device(s):{_RST}\n')
+                for d in devs:
+                    status  = f'\x1b[38;5;70mONLINE{_RST}' if d['online'] else f'{_DIM}offline{_RST}'
+                    role_s  = f' {_OR}[{d["role"]}]{_RST}' if d['role'] else ''
+                    batt    = ''
+                    if d['battery_pct'] is not None:
+                        batt = f'  battery: {d["battery_pct"]}%' + ('+' if d['charging'] else '')
+                    self._tx(
+                        f'  {_OR}{d["hostname"]}{_RST}  {_DIM}({d["device_type"]}, {d["os"]}, {d["arch"]}){_RST}'
+                        f'  {status}{role_s}{batt}\n'
+                    )
+                    self._tx(
+                        f'    {_DIM}ip: {d["ip"] or "—"}  last: {str(d["last_seen"] or "")[:16]}'
+                        f'  id: {d["device_id"][:8]}…{_RST}\n'
+                    )
+
         elif c == 'passwd':
             self._tx(f'{_DIM}  new password:{_RST} ')
             pw1 = self._rx()
@@ -4158,6 +4179,7 @@ class Session:
                 '  //stop             interrupt current response  (also Ctrl+C)\n'
                 '  //status           session info\n'
                 '  //probe            system information\n'
+                '  //devices          registered device inventory\n'
                 '  //search <query>   web search\n'
                 '  //sources          research sources from last query\n'
                 '  //model [name]     select model (fast/deep/code)\n'
@@ -4808,7 +4830,7 @@ def _shell(content, active='chat'):
     nav = ''.join(
         f"<a href='/{s}' class='{'on' if active==s else ''}'>{l}</a>"
         for s, l in [('chat','Chat'),('history','History'),('memory','Memory'),
-                     ('schedules','Schedules'),('status','Status')]
+                     ('schedules','Schedules'),('devices','Devices'),('status','Status')]
     )
     nav += "<a href='/logout' style='margin-left:auto;opacity:.6'>Logout</a>"
     return (
@@ -4826,6 +4848,78 @@ def _shell(content, active='chat'):
         f'<div class=nav>{nav}</div>'
         f'</div>{content}</body></html>'
     )
+
+
+def _page_devices(db):
+    devices = _devices_list(db)
+    rows_html = ''
+    for d in devices:
+        online   = d['online']
+        dot_col  = '#4CAF50' if online else 'var(--fg2)'
+        dot      = '●' if online else '○'
+        status   = 'online' if online else 'offline'
+        role_b   = f'<span class="badge ok">{_esc(d["role"])}</span>' if d["role"] else ''
+        batt_str = ''
+        if d['battery_pct'] is not None:
+            chg = '+' if d['charging'] else ''
+            batt_str = f'<span class=sched-meta>battery: {d["battery_pct"]}%{chg}</span>'
+        caps = ', '.join(d['capabilities']) if d['capabilities'] else '—'
+        last = str(d['last_seen'] or '')[:16]
+        dev_id = _esc(d['device_id'])
+        probe_btn = ''
+        if d['device_type'] == 'desktop':
+            probe_btn = (
+                f"<button class='btn sec' onclick=\"probeDevice('{dev_id}')\">Probe</button>"
+            )
+        role_btns = ''
+        if d['device_type'] == 'desktop' and d['role'] != 'primary_pc':
+            role_btns += f"<button class='btn sec' onclick=\"setRole('{dev_id}','primary_pc')\">Set primary PC</button> "
+        if d['device_type'] == 'mobile' and d['role'] != 'primary_mobile':
+            role_btns += f"<button class='btn sec' onclick=\"setRole('{dev_id}','primary_mobile')\">Set primary mobile</button>"
+        rows_html += (
+            f"<div class=sched-row>"
+            f"<div>"
+            f"<div class=sched-name><span style='color:{dot_col}'>{dot}</span> &nbsp;{_esc(d['hostname'])}"
+            f"&nbsp;<span class=ts style='font-size:9px'>{_esc(d['device_type'])}</span>&nbsp;{role_b}</div>"
+            f"<div class=sched-meta>{_esc(d['os'])} · {_esc(d['arch'])}</div>"
+            f"<div class=sched-meta>ip: {_esc(d['ip'] or '—')} &nbsp;·&nbsp; last seen: {_esc(last)} &nbsp;·&nbsp; {status}</div>"
+            f"<div class=sched-meta>caps: {_esc(caps)}</div>"
+            f"{batt_str}"
+            f"<div class=sched-meta style='font-size:9px;opacity:.5'>id: {dev_id[:16]}…</div>"
+            f"</div>"
+            f"<div style='display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap'>"
+            f"{probe_btn}{role_btns}</div>"
+            f"</div>"
+        )
+    if not rows_html:
+        rows_html = "<div style='color:var(--fg2);padding:12px'>No devices registered yet. Connect the Android app or restart the daemon.</div>"
+
+    js = """
+<script>
+var _probeOut = document.getElementById('probe-out');
+function probeDevice(devId) {
+  var el = document.getElementById('probe-out');
+  el.textContent = 'Probing…';
+  fetch('/api/probe', {headers: {'Authorization': 'Bearer ' + (document.cookie.match(/nx_tok=([^;]+)/)||['',''])[1]}})
+    .then(function(r){return r.json();})
+    .then(function(d){ el.innerHTML = '<pre style="white-space:pre-wrap;font-size:11px">' + d.probe + '</pre>'; })
+    .catch(function(e){ el.textContent = 'probe failed: ' + e; });
+}
+function setRole(devId, role) {
+  fetch('/api/device/role', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json',
+              'Authorization': 'Bearer ' + (document.cookie.match(/nx_tok=([^;]+)/)||['',''])[1]},
+    body: JSON.stringify({device_id: devId, role: role})
+  }).then(function(){location.reload();});
+}
+</script>"""
+
+    probe_out = "<div id='probe-out' style='margin-top:12px;color:var(--fg2);font-size:11px'></div>"
+    return _shell(
+        f"<div class=page><div class=ph>Device Inventory &mdash; {len(devices)} device{'s' if len(devices)!=1 else ''}</div>"
+        f"{rows_html}{probe_out}</div>{js}",
+        'devices')
 
 
 def _page_login(error=''):
@@ -5066,6 +5160,7 @@ def _web_cmd(cmd) -> str:
             '`search <query>` — web search',
             '`model [fast|deep|code]` — view or switch model',
             '`history` — recent chat sessions',
+            '`devices` — registered device inventory',
         ]
 
     elif c == 'memory':
@@ -5215,6 +5310,26 @@ def _web_cmd(cmd) -> str:
         ]
         result = _stream_chat(summary_msgs, MODEL_FAST, 0.7, 2048)
         lines = [result] if result else ['Brief unavailable — network or model error.']
+
+    elif c == 'devices':
+        db = _db()
+        devs = _devices_list(db)
+        db.close()
+        if not devs:
+            lines = ['No devices registered yet.']
+        else:
+            lines = [f'**{len(devs)} registered device(s)**', '']
+            for d in devs:
+                status = 'ONLINE' if d['online'] else 'offline'
+                role_str = f' [{d["role"]}]' if d['role'] else ''
+                batt = ''
+                if d['battery_pct'] is not None:
+                    batt = f', battery {d["battery_pct"]}%' + ('+' if d['charging'] else '')
+                lines.append(
+                    f'**{d["hostname"]}** ({d["device_type"]}, {d["os"]}, {d["arch"]}) '
+                    f'— {status}{role_str}{batt}'
+                )
+                lines.append(f'  ip: {d["ip"] or "—"} · last seen: {str(d["last_seen"] or "")[:16]} · id: {d["device_id"][:8]}…')
 
     elif c in ('exit', 'quit', 'bye', 'disconnect'):
         lines = ['Use the app navigation to disconnect.']
@@ -5518,6 +5633,7 @@ def _start_web():
                 elif path == '/schedules':           self._send(200, _page_schedules())
                 elif path == '/status':              self._send(200, _page_status(db))
                 elif path == '/history':             self._send(200, _page_history(db))
+                elif path == '/devices':             self._send(200, _page_devices(db))
                 elif path.startswith('/api/audio/'):
                     try:
                         chunk_id = int(path.split('/')[-1])
