@@ -3659,6 +3659,16 @@ class Session:
                     else:
                         word_buf[0] += ch
 
+            # Quick Ollama health check before blocking
+            try:
+                urllib.request.urlopen(f'{OLLAMA}/api/tags', timeout=3)
+            except Exception:
+                self._tx(f'\n{_OR2}  [Ollama not responding — run: sudo systemctl restart ollama]{RST}\n')
+                with _shared_lock:
+                    if _shared_hist and _shared_hist[-1]['role'] == 'user':
+                        _shared_hist.pop()
+                continue
+
             self._stream_abort.clear()
             stream_done  = threading.Event()
             resp_holder  = [None, None]
@@ -5894,6 +5904,15 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         yield result
         return
 
+    # Quick Ollama health check before blocking on inference
+    try:
+        urllib.request.urlopen(f'{OLLAMA}/api/tags', timeout=3)
+    except Exception:
+        yield '(Ollama is not responding — run: `sudo systemctl restart ollama`)'
+        _is_typing = False
+        _sync_broadcast({'typing': False})
+        return
+
     _is_typing = True
     _sync_broadcast({'typing': True})
     with _shared_lock: hist = list(_shared_hist)
@@ -5981,6 +6000,7 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                 sent = tts_sa.feed(tok)
                 if sent: _speak(sent)
 
+        _ka_last = [time.monotonic()]
         while True:
             try:
                 tok = q.get(timeout=0.05)
@@ -5998,12 +6018,17 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                             _feed_tts(tok)
                     except _queue.Empty: pass
                     break
+                now = time.monotonic()
+                if now - _ka_last[0] >= 5.0:
+                    _ka_last[0] = now
+                    yield '\x00KA\x00'   # keep-alive: web handler sends SSE comment
         if tts_sa and voice_on and not in_cb[0]:
             tail = tts_sa.flush()
             if tail: _speak(tail)
         if err[0]: yield f'(error: {err[0]})'
         yield ('__result__', result[0], result[1], ''.join(collected))
 
+    yield '\x00KA\x00'  # immediate keep-alive so browser knows we're alive before inference starts
     resp = None; model_used = None; streamed = ''
     for tok in _live_stream(msgs, images, tts_sa=_SentenceAccum() if voice_on else None):
         if isinstance(tok, tuple) and tok[0] == '__result__':
@@ -6141,6 +6166,10 @@ def _start_web():
                 self.send_header('Content-Length', len(b))
                 self.send_header('Cache-Control', 'max-age=86400')
                 self.end_headers(); self.wfile.write(b); return
+
+            # Unauthenticated ping — for external connectivity testing
+            if path == '/api/ping':
+                self._send(200, '{"ok":true}', 'application/json'); return
 
             # Login page — no auth required
             if path == '/login':
@@ -6432,7 +6461,10 @@ def _start_web():
                     self.end_headers()
                     try:
                         for chunk in _web_chat_stream(msg, fd, ft, fn):
-                            if chunk:
+                            if chunk == '\x00KA\x00':
+                                self.wfile.write(b': \n\n')  # SSE comment keeps connection alive
+                                self.wfile.flush()
+                            elif chunk:
                                 safe = chunk.replace('\n', '\x00')
                                 self.wfile.write(f'data: {safe}\n\n'.encode('utf-8'))
                                 self.wfile.flush()
