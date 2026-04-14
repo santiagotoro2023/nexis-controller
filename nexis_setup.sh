@@ -118,7 +118,15 @@ _step 1 "System dependencies"
 apt-get update -qq 2>/dev/null || true
 apt-get install -y curl python3-pip python3-venv socat \
   xclip xdg-utils libnotify-bin wmctrl sox alsa-utils espeak-ng \
-  portaudio19-dev 2>/dev/null || _warn "Some packages unavailable"
+  portaudio19-dev playerctl xdotool ffmpeg scrot imagemagick \
+  2>/dev/null || _warn "Some packages unavailable"
+# Sudoers rule so daemon (runs as user via systemd) can suspend without root prompt
+SUDOERS_LINE="${REAL_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl suspend, /usr/bin/systemctl hibernate"
+if ! grep -qF "$SUDOERS_LINE" /etc/sudoers.d/nexis-suspend 2>/dev/null; then
+  echo "$SUDOERS_LINE" > /etc/sudoers.d/nexis-suspend
+  chmod 440 /etc/sudoers.d/nexis-suspend
+  _ok "sudoers rule added for suspend"
+fi
 # Install GitHub CLI if not present
 if ! command -v gh &>/dev/null; then
   echo "  installing gh CLI..."

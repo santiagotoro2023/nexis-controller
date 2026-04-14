@@ -2897,19 +2897,29 @@ def _desktop(action, arg):
             return '(lock failed — no working lock command found)'
         elif act == 'sleep':
             cmds = [
-                # dbus to logind — most reliable without root on desktop sessions
-                ['dbus-send', '--system', '--print-reply',
+                # sudo -n works if nexis-suspend sudoers rule is installed by setup script
+                ['/usr/bin/sudo', '-n', '/usr/bin/systemctl', 'suspend'],
+                ['/usr/bin/sudo', '-n', 'systemctl', 'suspend'],
+                # dbus to logind (needs polkit seat-power rule)
+                ['dbus-send', '--system', '--no-reply',
                  '--dest=org.freedesktop.login1', '/org/freedesktop/login1',
                  'org.freedesktop.login1.Manager.Suspend', 'boolean:true'],
+                ['/usr/bin/systemctl', 'suspend'],
                 ['systemctl', 'suspend'],
                 ['loginctl', 'suspend'],
+                ['pm-suspend'],
             ]
             for cmd in cmds:
-                if shutil.which(cmd[0]):
+                exe = cmd[0]
+                if not (shutil.which(exe) or os.path.isfile(exe)):
+                    continue
+                try:
                     r = subprocess.run(cmd, env=env, capture_output=True, timeout=10)
                     if r.returncode == 0:
                         return 'suspending'
-            return '(suspend unavailable)'
+                except Exception:
+                    continue
+            return '(suspend failed — run setup script to add sudoers rule, or run: sudo systemctl suspend)'
         elif act == 'wake':
             # Wake display from DPMS sleep
             if env.get('DISPLAY'):
@@ -2947,9 +2957,22 @@ def _desktop(action, arg):
                 'next': 'XF86AudioNext', 'previous': 'XF86AudioPrev',
                 'prev': 'XF86AudioPrev', 'stop': 'XF86AudioStop',
             }
+            # Seek actions (playerctl only — no XF86 equivalent)
+            if sub in ('seek_forward', 'seek_fwd', 'forward', '+10'):
+                if shutil.which('playerctl'):
+                    subprocess.run(['playerctl', '--all-players', 'position', '10+'],
+                                   capture_output=True, env=env, timeout=5)
+                    return 'seek +10s'
+                return '(seek requires playerctl)'
+            if sub in ('seek_backward', 'seek_bwd', 'backward', 'rewind', '-10'):
+                if shutil.which('playerctl'):
+                    subprocess.run(['playerctl', '--all-players', 'position', '10-'],
+                                   capture_output=True, env=env, timeout=5)
+                    return 'seek -10s'
+                return '(seek requires playerctl)'
             pcmd = media_map.get(sub, 'play-pause')
             xkey = xf86_map.get(sub, 'XF86AudioPlay')
-            # Try playerctl --all-players (Spotify, VLC, etc.)
+            # Try playerctl --all-players first (Spotify, VLC, etc.)
             if shutil.which('playerctl'):
                 r = subprocess.run(['playerctl', '--all-players', pcmd],
                                    capture_output=True, text=True, env=env, timeout=5)
@@ -2967,38 +2990,57 @@ def _desktop(action, arg):
             tmp = _tf.NamedTemporaryFile(suffix='.png', delete=False, prefix='/tmp/nx_screen_')
             tmp.close()
             captured = False
-            # Try ffmpeg x11grab first (most reliable on Debian without scrot)
-            if shutil.which('ffmpeg') and env.get('DISPLAY'):
-                # Get screen dimensions
+            disp = env.get('DISPLAY', ':0')
+            # 1. ffmpeg x11grab (Debian preferred — no scrot needed)
+            if not captured and shutil.which('ffmpeg') and disp:
                 try:
                     xi = subprocess.run(['xdpyinfo'], capture_output=True, text=True, env=env, timeout=5)
                     dim = '1920x1080'
-                    for l in xi.stdout.splitlines():
-                        if 'dimensions:' in l:
-                            dim = l.split()[1]; break
-                except Exception: dim = '1920x1080'
+                    for _l in xi.stdout.splitlines():
+                        if 'dimensions:' in _l:
+                            dim = _l.split()[1]; break
+                except Exception:
+                    dim = '1920x1080'
                 r = subprocess.run(
                     ['ffmpeg', '-f', 'x11grab', '-video_size', dim,
-                     '-i', env['DISPLAY'], '-vframes', '1', tmp.name, '-y'],
+                     '-i', disp, '-vframes', '1', tmp.name, '-y'],
                     capture_output=True, env=env, timeout=15)
                 if r.returncode == 0: captured = True
-            # Fallbacks
-            if not captured:
-                for scmd in (['scrot', tmp.name], ['gnome-screenshot', '-f', tmp.name]):
-                    if shutil.which(scmd[0]):
-                        r = subprocess.run(scmd, capture_output=True, env=env, timeout=10)
-                        if r.returncode == 0: captured = True; break
+            # 2. scrot
+            if not captured and shutil.which('scrot') and disp:
+                r = subprocess.run(['scrot', tmp.name], capture_output=True, env=env, timeout=10)
+                if r.returncode == 0: captured = True
+            # 3. ImageMagick import (common on Debian)
+            if not captured and shutil.which('import') and disp:
+                r = subprocess.run(['import', '-window', 'root', tmp.name],
+                                   capture_output=True, env=env, timeout=10)
+                if r.returncode == 0: captured = True
+            # 4. gnome-screenshot
+            if not captured and shutil.which('gnome-screenshot') and disp:
+                r = subprocess.run(['gnome-screenshot', '-f', tmp.name],
+                                   capture_output=True, env=env, timeout=10)
+                if r.returncode == 0: captured = True
             if captured:
                 try:
-                    with open(tmp.name, 'rb') as f: raw = f.read()
+                    # Resize to ≤1024px wide so vision inference is fast
+                    img_path = tmp.name
+                    if shutil.which('convert'):
+                        small = tmp.name.replace('.png', '_sm.png')
+                        subprocess.run(['convert', img_path, '-resize', '1024x1024>',
+                                        '-quality', '85', small],
+                                       capture_output=True, timeout=10)
+                        if os.path.exists(small) and os.path.getsize(small) > 0:
+                            os.unlink(img_path); img_path = small
+                    with open(img_path, 'rb') as f: raw = f.read()
                     b64 = _b64.b64encode(raw).decode()
-                    msgs_v = [{'role': 'user', 'content': 'Describe what is on this screenshot in exactly one sentence. Name the application and key content visible.'}]
-                    result, _ = _smart_chat(msgs_v, images=[b64], temperature=0.3)
-                    import os as _os; _os.unlink(tmp.name)
+                    msgs_v = [{'role': 'user', 'content': 'Describe this screenshot in one sentence. Name the application and the key content visible.'}]
+                    result, _ = _smart_chat(msgs_v, images=[b64], temperature=0.2)
+                    try: os.unlink(img_path)
+                    except Exception: pass
                     return f'Screenshot: {result.strip()}'
                 except Exception as e:
                     return f'(screenshot captured but vision failed: {e})'
-            return '(screenshot failed — no working capture tool found)'
+            return '(screenshot failed — ffmpeg/scrot/imagemagick not found or DISPLAY not set)'
     except Exception as e:
         return f'({act} failed: {e})'
     return f'(unknown: {act})'
@@ -5800,6 +5842,33 @@ def _start_web():
                     ddb.close()
                 elif path == '/api/probe':
                     self._send(200, json.dumps({'probe': _system_probe()}), 'application/json')
+                elif path.startswith('/api/probe/device'):
+                    # Return last-known info for a specific device from devices table
+                    qs     = parse_qs(urlparse(self.path).query)
+                    dev_id = qs.get('device_id', [''])[0].strip()
+                    if not dev_id:
+                        self._send(400, json.dumps({'error': 'device_id required'}), 'application/json')
+                    else:
+                        pdb  = _db()
+                        devs = _devices_list(pdb); pdb.close()
+                        dev  = next((d for d in devs if d['device_id'] == dev_id), None)
+                        if dev:
+                            lines = [
+                                f"hostname:    {dev['hostname']}",
+                                f"type:        {dev['device_type']}",
+                                f"os:          {dev['os']}",
+                                f"arch:        {dev['arch']}",
+                                f"ip:          {dev['ip']}",
+                                f"online:      {'yes' if dev['online'] else 'no'}",
+                                f"last seen:   {dev['last_seen']}",
+                                f"role:        {dev['role'] or 'none'}",
+                            ]
+                            if dev['battery_pct'] is not None:
+                                chg = ' (charging)' if dev['charging'] else ''
+                                lines.append(f"battery:     {dev['battery_pct']}%{chg}")
+                            self._send(200, json.dumps({'probe': '\n'.join(lines)}), 'application/json')
+                        else:
+                            self._send(404, json.dumps({'error': 'device not found'}), 'application/json')
                 elif path.startswith('/api/commands/pending'):
                     qs       = parse_qs(urlparse(self.path).query)
                     dev_id   = qs.get('device_id', [''])[0].strip()
