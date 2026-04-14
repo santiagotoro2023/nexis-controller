@@ -4944,7 +4944,7 @@ document.addEventListener('keydown',function(e){
 def _shell(content, active='chat'):
     nav = ''.join(
         f"<a href='/{s}' class='{'on' if active==s else ''}'>{l}</a>"
-        for s, l in [('chat','Chat'),('history','History'),('memory','Memory'),
+        for s, l in [('chat','Chat'),('remote','Remote'),('history','History'),('memory','Memory'),
                      ('schedules','Schedules'),('devices','Devices'),('status','Status')]
     )
     nav += "<a href='/logout' style='margin-left:auto;opacity:.6'>Logout</a>"
@@ -4963,6 +4963,313 @@ def _shell(content, active='chat'):
         f'<div class=nav>{nav}</div>'
         f'</div>{content}</body></html>'
     )
+
+
+def _page_remote():
+    return _shell(r"""
+<style>
+.rm-page{padding:16px;overflow-y:auto;flex:1;max-width:800px;width:100%}
+.rm-sec{margin-bottom:20px}
+.rm-sec-lbl{color:var(--or);font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  padding-bottom:6px;border-bottom:1px solid var(--border);margin-bottom:10px}
+.rm-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.rm-input{width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--fg);
+  padding:7px 10px;font-family:var(--font);font-size:12px;outline:none;margin-bottom:8px}
+.rm-input:focus{border-color:var(--or2)}
+.rm-btn{background:transparent;border:1px solid var(--border);color:var(--fg2);
+  padding:0 12px;height:36px;line-height:36px;font-family:var(--font);font-size:10px;
+  text-transform:uppercase;letter-spacing:.07em;cursor:pointer;white-space:nowrap;
+  transition:color .15s,border-color .15s;flex:1;min-width:70px}
+.rm-btn:hover:not(:disabled){color:var(--or);border-color:var(--or2)}
+.rm-btn:disabled{opacity:.35;cursor:not-allowed}
+.rm-btn.wide{flex:2}
+.rm-btn.accent{color:var(--or);border-color:var(--or2)}
+.rm-dev-bar{display:flex;gap:8px;align-items:center;margin-bottom:20px;flex-wrap:wrap}
+.rm-dev-sel{flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--fg);
+  padding:7px 10px;font-family:var(--font);font-size:12px;outline:none;cursor:pointer;min-width:160px}
+.rm-dev-sel:focus{border-color:var(--or2)}
+.rm-vol{width:100%;accent-color:var(--or);cursor:pointer;height:4px;outline:none}
+.rm-vol-row{display:flex;gap:10px;align-items:center;margin-bottom:8px}
+.rm-vol-val{color:var(--fg2);font-size:10px;min-width:34px;text-align:right}
+.rm-result{background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--or2);
+  padding:10px 12px;font-size:11px;color:var(--fg);white-space:pre-wrap;word-break:break-all;
+  margin-top:16px;display:none}
+.rm-loading{display:none;color:var(--fg2);font-size:10px;letter-spacing:.06em;text-transform:uppercase}
+.rm-offline-note{color:var(--fg2);font-size:10px;padding:8px 0;letter-spacing:.04em}
+</style>
+
+<div class=rm-page>
+  <div class=rm-dev-bar>
+    <select id=devsel class=rm-dev-sel onchange=selectDev()>
+      <option value=''>loading devices…</option>
+    </select>
+    <button class=rm-btn onclick=loadDevices() style='flex:0;min-width:70px'>Refresh</button>
+    <button class=rm-btn onclick=probeSelected() style='flex:0;min-width:60px'>Probe</button>
+  </div>
+  <div id=offline-note class=rm-offline-note style=display:none>⚠ device offline — commands queue and deliver when back online</div>
+
+  <!-- Desktop sections -->
+  <div id=sec-desktop style=display:none>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>app control</div>
+      <input id=d-app class=rm-input placeholder='app name or URL (e.g. spotify, https://…)'>
+      <div class=rm-row>
+        <button class=rm-btn onclick=da('open',gv('d-app'))>Open</button>
+        <button class=rm-btn onclick=da('close',gv('d-app'))>Close</button>
+        <button class=rm-btn onclick=da('windows','')>List Windows</button>
+      </div>
+    </div>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>media</div>
+      <div class=rm-row>
+        <button class=rm-btn onclick=da('media','previous')>⏮ Prev</button>
+        <button class='rm-btn wide accent' onclick=da('media','play-pause')>⏯ Play/Pause</button>
+        <button class=rm-btn onclick=da('media','next')>Next ⏭</button>
+      </div>
+      <div class=rm-row>
+        <button class=rm-btn onclick=da('media','seek_backward')>−10s</button>
+        <button class=rm-btn onclick=da('media','seek_forward')>+10s</button>
+        <button class=rm-btn onclick=da('media','stop')>Stop</button>
+      </div>
+    </div>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>volume</div>
+      <div class=rm-vol-row>
+        <span style='color:var(--fg2);font-size:11px'>🔈</span>
+        <input type=range id=d-vol class=rm-vol min=0 max=100 value=50
+          oninput="document.getElementById('d-vol-val').textContent=this.value+'%'"
+          onchange=da('volume',this.value)>
+        <span style='color:var(--fg2);font-size:11px'>🔊</span>
+        <span id=d-vol-val class=rm-vol-val>50%</span>
+      </div>
+      <div class=rm-row>
+        <button class=rm-btn onclick=da('mute','')>Mute</button>
+        <button class=rm-btn onclick=da('unmute','')>Unmute</button>
+      </div>
+    </div>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>clipboard</div>
+      <input id=d-clip class=rm-input placeholder='text to copy to PC clipboard'>
+      <div class=rm-row>
+        <button class=rm-btn onclick=da('clip',gv('d-clip'))>Copy to PC</button>
+        <button class=rm-btn onclick=pasteFromPc()>Paste PC → Browser</button>
+      </div>
+    </div>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>notify</div>
+      <input id=d-notify class=rm-input placeholder='notification text'>
+      <div class=rm-row>
+        <button class='rm-btn wide' onclick=da('notify',gv('d-notify'))>Send Notification</button>
+      </div>
+    </div>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>system</div>
+      <div class=rm-row>
+        <button class=rm-btn onclick=da('lock','')>Lock</button>
+        <button class=rm-btn onclick=da('unlock','')>Unlock</button>
+        <button class=rm-btn onclick=da('sleep','')>Sleep</button>
+        <button class=rm-btn onclick=da('wake','')>Wake Display</button>
+      </div>
+      <div class=rm-row>
+        <button class='rm-btn wide' onclick=da('screenshot','')>Screenshot + Describe</button>
+        <button id=d-wol class=rm-btn onclick=wolDev()>Wake on LAN</button>
+      </div>
+    </div>
+
+  </div><!-- /sec-desktop -->
+
+  <!-- Mobile sections -->
+  <div id=sec-mobile style=display:none>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>media</div>
+      <div class=rm-row>
+        <button class=rm-btn onclick=mc('media','previous')>⏮ Prev</button>
+        <button class='rm-btn wide accent' onclick=mc('media','play-pause')>⏯ Play/Pause</button>
+        <button class=rm-btn onclick=mc('media','next')>Next ⏭</button>
+      </div>
+      <div class=rm-row>
+        <button class=rm-btn onclick=mc('media','seek_backward')>−10s</button>
+        <button class=rm-btn onclick=mc('media','seek_forward')>+10s</button>
+        <button class=rm-btn onclick=mc('media','stop')>Stop</button>
+      </div>
+    </div>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>volume</div>
+      <div class=rm-vol-row>
+        <span style='color:var(--fg2);font-size:11px'>🔈</span>
+        <input type=range id=m-vol class=rm-vol min=0 max=100 value=50
+          oninput="document.getElementById('m-vol-val').textContent=this.value+'%'"
+          onchange=mc('volume',this.value)>
+        <span style='color:var(--fg2);font-size:11px'>🔊</span>
+        <span id=m-vol-val class=rm-vol-val>50%</span>
+      </div>
+      <div class=rm-row>
+        <button class=rm-btn onclick=mc('volume','0')>Mute</button>
+        <button class=rm-btn onclick=mc('volume','100')>Max</button>
+      </div>
+    </div>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>open</div>
+      <input id=m-open class=rm-input placeholder='app name, package name, or URL'>
+      <div class=rm-row>
+        <button class=rm-btn onclick=mc('open_url',gv('m-open'))>Open URL</button>
+        <button class=rm-btn onclick=mc('open_app',gv('m-open'))>Open App</button>
+      </div>
+    </div>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>clipboard</div>
+      <input id=m-clip class=rm-input placeholder='text to copy to phone clipboard'>
+      <div class=rm-row>
+        <button class='rm-btn wide' onclick=mc('clip',gv('m-clip'))>Copy to Phone</button>
+      </div>
+    </div>
+
+    <div class=rm-sec>
+      <div class=rm-sec-lbl>notify</div>
+      <input id=m-notify class=rm-input placeholder='notification text'>
+      <div class=rm-row>
+        <button class='rm-btn wide' onclick=mc('notify',gv('m-notify'))>Send Notification</button>
+      </div>
+    </div>
+
+  </div><!-- /sec-mobile -->
+
+  <div id=rm-loading class=rm-loading>working…</div>
+  <div id=rm-result class=rm-result></div>
+</div>
+
+<script>
+var _devs = [];
+var _selDev = null;
+var _tok = (document.cookie.match(/nx_tok=([^;]+)/)||['',''])[1];
+
+function authHdr(){return {'Content-Type':'application/json','Authorization':'Bearer '+_tok};}
+function gv(id){return document.getElementById(id).value.trim();}
+
+function setResult(text){
+  var el=document.getElementById('rm-result');
+  el.textContent=text; el.style.display=text?'block':'none';
+}
+function setBusy(on){
+  document.getElementById('rm-loading').style.display=on?'block':'none';
+  document.querySelectorAll('.rm-btn').forEach(function(b){b.disabled=on;});
+}
+
+function loadDevices(){
+  fetch('/api/devices',{headers:authHdr()})
+    .then(function(r){return r.json();})
+    .then(function(data){
+      _devs=data.devices||[];
+      var sel=document.getElementById('devsel');
+      sel.innerHTML='';
+      if(_devs.length===0){
+        sel.innerHTML="<option value=''>no devices registered</option>";
+        return;
+      }
+      _devs.forEach(function(d,i){
+        var dot=d.online?'●':'○';
+        var role=d.role?' ['+d.role+']':'';
+        var opt=document.createElement('option');
+        opt.value=i;
+        opt.textContent=dot+' '+d.hostname+' ('+d.device_type+')'+role;
+        sel.appendChild(opt);
+      });
+      selectDev();
+    })
+    .catch(function(e){
+      document.getElementById('devsel').innerHTML="<option value=''>error loading devices</option>";
+    });
+}
+
+function selectDev(){
+  var sel=document.getElementById('devsel');
+  var idx=parseInt(sel.value);
+  _selDev=isNaN(idx)?null:_devs[idx];
+  document.getElementById('sec-desktop').style.display=(_selDev&&_selDev.device_type==='desktop')?'block':'none';
+  document.getElementById('sec-mobile').style.display=(_selDev&&_selDev.device_type==='mobile')?'block':'none';
+  var offline=_selDev&&!_selDev.online;
+  document.getElementById('offline-note').style.display=offline?'block':'none';
+  var wolBtn=document.getElementById('d-wol');
+  if(wolBtn) wolBtn.disabled=!(_selDev&&_selDev.mac);
+  setResult('');
+}
+
+function da(action, arg){
+  if(!_selDev){setResult('No device selected.');return;}
+  setBusy(true); setResult('');
+  fetch('/api/desktop',{method:'POST',headers:authHdr(),
+    body:JSON.stringify({action:action,arg:arg||'',device_id:_selDev.device_id})})
+  .then(function(r){return r.text();})
+  .then(function(t){setBusy(false);setResult(t);})
+  .catch(function(e){setBusy(false);setResult('error: '+e);});
+}
+
+function mc(action, arg){
+  if(!_selDev){setResult('No device selected.');return;}
+  setBusy(true); setResult('');
+  fetch('/api/device/command',{method:'POST',headers:authHdr(),
+    body:JSON.stringify({device_id:_selDev.device_id,action:action,arg:arg||''})})
+  .then(function(r){return r.json();})
+  .then(function(d){setBusy(false);setResult(d.ok?'Command queued.':('error: '+(d.error||'unknown')));})
+  .catch(function(e){setBusy(false);setResult('error: '+e);});
+}
+
+function wolDev(){
+  if(!_selDev||!_selDev.mac){setResult('No MAC address stored for this device.');return;}
+  setBusy(true); setResult('');
+  fetch('/api/wol',{method:'POST',headers:authHdr(),
+    body:JSON.stringify({mac:_selDev.mac})})
+  .then(function(r){return r.json();})
+  .then(function(d){setBusy(false);setResult(d.ok?'WOL sent to '+_selDev.mac:'error: '+(d.error||'unknown'));})
+  .catch(function(e){setBusy(false);setResult('error: '+e);});
+}
+
+function pasteFromPc(){
+  if(!_selDev){setResult('No device selected.');return;}
+  setBusy(true); setResult('');
+  fetch('/api/desktop',{method:'POST',headers:authHdr(),
+    body:JSON.stringify({action:'clip_read',arg:'',device_id:_selDev.device_id})})
+  .then(function(r){return r.text();})
+  .then(function(t){
+    setBusy(false);
+    if(t&&!t.startsWith('(')){
+      navigator.clipboard.writeText(t).catch(function(){});
+      setResult('Clipboard: '+t.substring(0,200)+(t.length>200?'…':''));
+    } else { setResult(t||'(empty)'); }
+  })
+  .catch(function(e){setBusy(false);setResult('error: '+e);});
+}
+
+function probeSelected(){
+  if(!_selDev){setResult('No device selected.');return;}
+  setBusy(true); setResult('');
+  var url=(_selDev.device_type==='desktop'&&_selDev.online)
+    ?'/api/probe'
+    :'/api/probe/device?device_id='+encodeURIComponent(_selDev.device_id);
+  fetch(url,{headers:authHdr()})
+  .then(function(r){return r.json();})
+  .then(function(d){setBusy(false);setResult(d.probe||JSON.stringify(d,null,2));})
+  .catch(function(e){setBusy(false);setResult('error: '+e);});
+}
+
+window.addEventListener('DOMContentLoaded',function(){
+  loadDevices();
+  document.querySelectorAll('.rm-input').forEach(function(inp){
+    inp.addEventListener('keydown',function(e){if(e.key==='Enter')e.target.blur();});
+  });
+});
+</script>
+""", 'remote')
 
 
 def _page_devices(db):
@@ -5747,6 +6054,7 @@ def _start_web():
             db = _db()
             try:
                 if path in ('/', '/chat'):          self._send(200, _page_chat())
+                elif path == '/remote':              self._send(200, _page_remote())
                 elif path == '/memory':              self._send(200, _page_memory(db))
                 elif path == '/schedules':           self._send(200, _page_schedules())
                 elif path == '/status':              self._send(200, _page_status(db))
