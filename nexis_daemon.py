@@ -435,13 +435,13 @@ def _smart_chat(messages, temperature=0.75, num_ctx=None,
         else:
             num_ctx = 16384
 
-    # Vision: use longer timeout and show progress message
+    # Vision: use longer timeout and show progress via status (not inline text)
     if images:
         if _model_ok(MODEL_VISION):
             msgs_v = _enforce_english(list(messages))
             vision_ctx = max(num_ctx or 8192, 8192)
             if on_token:
-                on_token('\n[Loading vision model — first use may take 60–120 seconds…]\n')
+                on_token('[STATUS:Analyzing image...]')
             result = _stream_chat(msgs_v, MODEL_VISION, temperature, vision_ctx,
                                   on_token=on_token, images=images, timeout=600,
                                   abort_event=abort_event)
@@ -4856,11 +4856,13 @@ def _web_cmd(cmd) -> str:
         lines = [
             '**Available commands** (prefix with `//`)',
             '',
+            '`brief` — morning briefing',
+            '`compact` — summarize + compress current conversation',
+            '`reset` — clear current conversation',
+            '`status` — session info',
             '`memory` — what Nexis remembers',
             '`memory search <term>` — search memories',
             '`forget <term>` — delete matching memories',
-            '`reset` — clear current conversation',
-            '`status` — session info',
             '`search <query>` — web search',
             '`model [fast|deep|code]` — view or switch model',
             '`history` — recent chat sessions',
@@ -4902,6 +4904,26 @@ def _web_cmd(cmd) -> str:
         with _shared_lock: hl = len(_shared_hist)
         _sync_broadcast({'typing': False, 'hist_len': hl})
         lines = ['Conversation reset. Nexis still has its memories.']
+
+    elif c == 'compact':
+        with _shared_lock: hist_copy = list(_shared_hist)
+        if len(hist_copy) < 4:
+            lines = ['Nothing to compact yet.']
+        else:
+            summary_msgs = [
+                {'role': 'system', 'content': 'Summarize the following conversation in one concise paragraph. Be factual and brief.'},
+                {'role': 'user',   'content': '\n'.join(f"{m['role'].upper()}: {m['content'][:500]}" for m in hist_copy[-20:])},
+            ]
+            summary = _stream_chat(summary_msgs, MODEL_FAST, 0.4, 4096)
+            if summary:
+                with _shared_lock:
+                    _shared_hist.clear()
+                    _shared_hist.append({'role': 'assistant', 'content': f'[Compacted conversation summary]\n{summary}'})
+                hl = 1
+                _sync_broadcast({'typing': False, 'hist_len': hl})
+                lines = [f'Conversation compacted.\n\n{summary}']
+            else:
+                lines = ['Compaction failed — history unchanged.']
 
     elif c == 'status':
         db = _db()
@@ -5613,6 +5635,21 @@ def _start_web():
                         _is_typing = False
                         _sync_broadcast({'typing': False, 'hist_len': hl})
                         self._send(200, json.dumps({'ok': True, 'loaded': hl}), 'application/json')
+
+                elif path == '/api/history/sessions':
+                    data   = json.loads(body) if body else {}
+                    action = data.get('action', '')
+                    if action == 'delete':
+                        sid = data.get('session_id', '')
+                        if not sid:
+                            self._send(400, json.dumps({'error': 'session_id required'}), 'application/json')
+                        else:
+                            ddb = _db()
+                            ddb.execute('DELETE FROM chat_history WHERE session_id=?', (sid,))
+                            ddb.commit(); ddb.close()
+                            self._send(200, json.dumps({'ok': True}), 'application/json')
+                    else:
+                        self._send(400, json.dumps({'error': 'unknown action'}), 'application/json')
 
                 elif path == '/api/stt':
                     data = json.loads(body) if body else {}
