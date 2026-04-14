@@ -118,8 +118,44 @@ _step 1 "System dependencies"
 apt-get update -qq 2>/dev/null || true
 apt-get install -y curl python3-pip python3-venv socat \
   xclip xdg-utils libnotify-bin wmctrl sox alsa-utils espeak-ng \
-  portaudio19-dev playerctl xdotool ffmpeg scrot imagemagick \
+  portaudio19-dev playerctl xdotool ffmpeg scrot imagemagick ethtool \
   2>/dev/null || _warn "Some packages unavailable"
+
+# ── Wake-on-LAN: enable on all ethernet interfaces ────────────────────────────
+# WOL requires: ethernet cable plugged in + WOL enabled in BIOS + this config.
+# The interface must be connected to the router for WOL packets to reach the NIC.
+WOL_IFACE=""
+for iface in $(ip link show | grep -E "^[0-9]+:" | awk '{print $2}' | tr -d ':'); do
+  [[ "$iface" == lo* ]] && continue
+  [[ "$iface" == wl* ]] && continue  # skip WiFi — WOL over WiFi not supported
+  [[ "$iface" == virbr* ]] && continue  # skip virtual bridges
+  WOL_IFACE="$iface"
+  if command -v ethtool &>/dev/null; then
+    ethtool -s "$iface" wol g 2>/dev/null && _ok "WOL enabled on $iface (magic packet)" \
+      || _warn "WOL not supported by $iface (check BIOS settings)"
+  fi
+done
+# Make WOL persist across reboots via a systemd service
+if [[ -n "$WOL_IFACE" ]]; then
+  cat > /etc/systemd/system/nexis-wol.service <<EOF
+[Unit]
+Description=Enable Wake-on-LAN for NeXiS
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ethtool -s ${WOL_IFACE} wol g
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable nexis-wol.service --quiet
+  systemctl start  nexis-wol.service
+  _ok "WOL systemd service installed for $WOL_IFACE"
+fi
+
 # Sudoers rule so daemon (runs as user via systemd) can suspend without root prompt
 SUDOERS_LINE="${REAL_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl suspend, /usr/bin/systemctl hibernate"
 if ! grep -qF "$SUDOERS_LINE" /etc/sudoers.d/nexis-suspend 2>/dev/null; then
