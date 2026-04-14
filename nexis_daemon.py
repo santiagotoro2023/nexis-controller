@@ -4370,7 +4370,7 @@ _CSS = (
     "white-space:nowrap;gap:10px}"
     ".nav-item:hover{color:var(--fg);background:rgba(255,255,255,.025);border-left-color:var(--dim)}"
     ".nav-item.on{color:var(--or);background:rgba(232,114,12,.07);border-left-color:var(--or)}"
-    ".nav-icon{font-size:13px;opacity:.7;flex-shrink:0}"
+    ".nav-icon{font-size:16px;opacity:.6;flex-shrink:0;line-height:1}"
     ".nav-item.on .nav-icon{opacity:1}"
     ".sb-footer{padding:14px 16px;border-top:1px solid var(--border)}"
     ".sb-logout{display:block;padding:6px 2px;color:var(--fg2);text-decoration:none;"
@@ -4977,17 +4977,17 @@ document.addEventListener('keydown',function(e){
 
 def _shell(content, active='chat'):
     nav_items = [
-        ('chat',      '💬', 'Chat'),
-        ('remote',    '🎮', 'Remote'),
-        ('history',   '📋', 'History'),
-        ('memory',    '🧠', 'Memory'),
-        ('schedules', '⏰', 'Schedules'),
-        ('devices',   '📱', 'Devices'),
-        ('status',    '⚡', 'Status'),
+        ('chat',      'chat',     'Chat'),
+        ('remote',    'tune',     'Remote'),
+        ('history',   'history',  'History'),
+        ('memory',    'memory',   'Memory'),
+        ('schedules', 'schedule', 'Schedules'),
+        ('devices',   'devices',  'Devices'),
+        ('status',    'monitor_heart', 'Status'),
     ]
     nav_html = ''.join(
         f"<a href='/{s}' class='nav-item {'on' if active==s else ''}'>"
-        f"<span class=nav-icon>{icon}</span>{label}</a>"
+        f"<span class='nav-icon material-icons'>{icon}</span>{label}</a>"
         for s, icon, label in nav_items
     )
     return (
@@ -4996,7 +4996,11 @@ def _shell(content, active='chat'):
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         '<title>NeXiS</title>'
         "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
-        "<link href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' rel=stylesheet>"
+        "<link rel=preconnect href='https://fonts.googleapis.com'>"
+        "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
+        "<link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' media=print onload=\"this.media='all'\">"
+        "<link rel=stylesheet href='https://fonts.googleapis.com/icon?family=Material+Icons' media=print onload=\"this.media='all'\">"
+        "<noscript><link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap'><link rel=stylesheet href='https://fonts.googleapis.com/icon?family=Material+Icons'></noscript>"
         f'<style>{_CSS}</style></head><body>'
         '<div class=sidebar>'
         '<div class=sb-brand>'
@@ -5432,7 +5436,10 @@ def _page_login(error=''):
         '<!DOCTYPE html><html lang=en><head>'
         '<meta charset=UTF-8><title>NeXiS — Login</title>'
         "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
-        "<link href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' rel=stylesheet>"
+        "<link rel=preconnect href='https://fonts.googleapis.com'>"
+        "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
+        "<link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' media=print onload=\"this.media='all'\">"
+        "<noscript><link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap'></noscript>"
         f'<style>{_CSS}</style></head><body style="display:block">'
         '<div class=login-wrap>'
         f'{_EYE_SVG}'
