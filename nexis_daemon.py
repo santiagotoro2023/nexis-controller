@@ -4,7 +4,7 @@
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
 import shutil, mimetypes, io, wave, tempfile, time, hashlib, secrets, difflib, ssl
-import math, struct
+import math, struct, uuid, platform
 from datetime import datetime
 from pathlib import Path
 
@@ -1729,6 +1729,29 @@ def _db():
             indexed_at TEXT DEFAULT (datetime('now')),
             UNIQUE(path, chunk_idx)
         );
+        CREATE TABLE IF NOT EXISTS devices (
+            device_id     TEXT PRIMARY KEY,
+            hostname      TEXT NOT NULL,
+            model         TEXT DEFAULT '',
+            os            TEXT NOT NULL,
+            arch          TEXT DEFAULT '',
+            device_type   TEXT NOT NULL,
+            capabilities  TEXT DEFAULT '[]',
+            ip            TEXT DEFAULT '',
+            role          TEXT DEFAULT NULL,
+            battery_pct   INTEGER DEFAULT NULL,
+            charging      INTEGER DEFAULT NULL,
+            registered_at TEXT DEFAULT (datetime('now')),
+            last_seen     TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS device_commands (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id    TEXT NOT NULL,
+            action       TEXT NOT NULL,
+            arg          TEXT DEFAULT '',
+            created_at   TEXT DEFAULT (datetime('now')),
+            delivered_at TEXT DEFAULT NULL
+        );
     """)
     conn.commit()
     # Migrations
@@ -1743,6 +1766,102 @@ def _db():
     except sqlite3.OperationalError:
         pass  # column already exists
     return conn
+
+def _device_self_register():
+    """Auto-register this controller PC in the devices table on startup."""
+    os_name = ''
+    try:
+        for line in open('/etc/os-release'):
+            if line.startswith('PRETTY_NAME'):
+                os_name = line.split('=', 1)[1].strip().strip('"'); break
+    except Exception:
+        os_name = platform.system()
+    ip = ''
+    try: ip = _socket.gethostbyname(_socket.gethostname())
+    except Exception: pass
+    dev_id = str(uuid.UUID(int=uuid.getnode()))
+    conn = _db()
+    try:
+        # Preserve existing role; default to primary_pc
+        row = conn.execute('SELECT role FROM devices WHERE device_id=?', (dev_id,)).fetchone()
+        role = row['role'] if row else 'primary_pc'
+        conn.execute("""
+            INSERT INTO devices
+                (device_id, hostname, model, os, arch, device_type, capabilities, ip, role, last_seen)
+            VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))
+            ON CONFLICT(device_id) DO UPDATE SET
+                hostname=excluded.hostname, os=excluded.os, arch=excluded.arch,
+                ip=excluded.ip, last_seen=datetime('now')
+        """, (dev_id, _socket.gethostname(), platform.machine(), os_name,
+              platform.machine(), 'desktop',
+              '["screenshot","clipboard","media","volume","shell","probe"]', ip, role))
+        conn.commit()
+        _log(f'Controller registered: {_socket.gethostname()} ({dev_id[:8]}…)')
+    except Exception as e:
+        _log(f'Device self-register: {e}', 'WARN')
+    finally:
+        conn.close()
+
+
+def _device_touch(conn, device_id: str):
+    """Update last_seen for a device (heartbeat)."""
+    try:
+        conn.execute("UPDATE devices SET last_seen=datetime('now') WHERE device_id=?", (device_id,))
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _devices_list(conn):
+    """Return all registered devices with computed online status."""
+    try:
+        rows = conn.execute(
+            "SELECT *, (julianday('now') - julianday(last_seen)) * 86400.0 AS secs_ago FROM devices"
+        ).fetchall()
+        result = []
+        for r in rows:
+            result.append({
+                'device_id':    r['device_id'],
+                'hostname':     r['hostname'],
+                'model':        r['model'],
+                'os':           r['os'],
+                'arch':         r['arch'],
+                'device_type':  r['device_type'],
+                'capabilities': json.loads(r['capabilities'] or '[]'),
+                'ip':           r['ip'],
+                'role':         r['role'],
+                'battery_pct':  r['battery_pct'],
+                'charging':     bool(r['charging']) if r['charging'] is not None else None,
+                'last_seen':    r['last_seen'],
+                'online':       (r['secs_ago'] or 9999) < 30,
+            })
+        return result
+    except Exception:
+        return []
+
+
+def _inject_devices(sys_p: str, conn) -> str:
+    """Append live device inventory to the system prompt."""
+    try:
+        devices = _devices_list(conn)
+        if not devices:
+            return sys_p
+        lines = ['\n\n## Registered devices (live inventory)']
+        for d in devices:
+            status = 'ONLINE' if d['online'] else 'offline'
+            role_str = f' [{d["role"]}]' if d['role'] else ''
+            batt = ''
+            if d['battery_pct'] is not None:
+                batt = f', battery {d["battery_pct"]}%' + ('+' if d['charging'] else '')
+            lines.append(
+                f'  - {d["hostname"]} ({d["device_type"]}, {d["os"]}, {d["arch"]}) '
+                f'ID={d["device_id"][:8]}… {status}{role_str}{batt}'
+            )
+        lines.append("Use 'primary_mobile' as shorthand for the primary_mobile device in [ANDROID:] tags.")
+        return sys_p + '\n'.join(lines)
+    except Exception:
+        return sys_p
+
 
 def _embed(text: str):
     """Get embedding from Ollama nomic-embed-text. Returns list[float] or None."""
@@ -2362,6 +2481,14 @@ def _build_system(conn):
         '\n  [DESKTOP: close | spotify]'
         '\n  Closed.'
         '\n'
+        '\n### [ANDROID: device_id | action | arg] — send a command to a registered mobile device'
+        '\n  [ANDROID: primary_mobile | open_url | https://maps.google.com]   open URL on phone'
+        '\n  [ANDROID: primary_mobile | open_app | com.spotify.music]         open app by package'
+        '\n  [ANDROID: primary_mobile | notify  | Reminder: meeting in 5 min] push notification'
+        '\n  [ANDROID: primary_mobile | clip    | some text]                  copy to phone clipboard'
+        '\nUse device ID from the device inventory above, or "primary_mobile" as shorthand.'
+        '\nFOR ANDROID ACTIONS: emit the tag FIRST on its own line, then ONE ultra-short confirmation.'
+        '\n'
         '\n### [INDEX: path] — index a file or directory for RAG retrieval'
         '\n  [INDEX: ~/Documents/notes]          index all text files in a directory'
         '\n  [INDEX: ~/projects/README.md]        index a single file'
@@ -2533,7 +2660,8 @@ def _inject_memories(sys_p: str, conn, query: str) -> str:
         extra += '\n\n## Relevant indexed documents\n'
         for score, path, chunk in doc_chunks:
             extra += f'\n[{Path(path).name}]\n{chunk[:600]}\n'
-    return sys_p + extra if extra else sys_p
+    result = sys_p + extra if extra else sys_p
+    return _inject_devices(result, conn)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2695,6 +2823,15 @@ def _desktop(action, arg):
                     return 'copied to clipboard'
                 except Exception: continue
             return '(clip unavailable)'
+        elif act == 'clip_read':
+            for tool, targs in [(['xclip', '-selection', 'clipboard', '-o'], {}),
+                                 (['xsel', '--clipboard', '--output'], {})]:
+                try:
+                    r = subprocess.run(tool, capture_output=True, env=env, timeout=5)
+                    if r.returncode == 0:
+                        return r.stdout.decode('utf-8', errors='replace')[:4000]
+                except Exception: continue
+            return '(clip_read unavailable)'
         elif act == 'windows':
             r = subprocess.run(['wmctrl','-l'], capture_output=True, text=True, env=env)
             if r.returncode == 0 and r.stdout.strip():
@@ -2787,7 +2924,7 @@ def _desktop(action, arg):
                 try:
                     with open(tmp.name, 'rb') as f: raw = f.read()
                     b64 = _b64.b64encode(raw).decode()
-                    msgs_v = [{'role': 'user', 'content': 'Describe what is visible on this screenshot in 2-3 sentences. Be specific about application names, content, and notable details.'}]
+                    msgs_v = [{'role': 'user', 'content': 'Describe what is on this screenshot in exactly one sentence. Name the application and key content visible.'}]
                     result, _ = _smart_chat(msgs_v, images=[b64], temperature=0.3)
                     import os as _os; _os.unlink(tmp.name)
                     return f'Screenshot: {result.strip()}'
@@ -2950,6 +3087,28 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
             tools[m.group(0)] = _desktop(m.group(1).strip().lower(), m.group(2).strip())
         else:
             tools[m.group(0)] = ''
+
+    # [ANDROID: device_id | action | arg]
+    for m in re.finditer(r'\[ANDROID:\s*([^\|\]]+)\|\s*([^\|\]]+)(?:\|\s*([^\]]*))?\]', text, re.IGNORECASE):
+        dev_ref = m.group(1).strip()
+        action  = m.group(2).strip().lower()
+        arg     = (m.group(3) or '').strip()
+        try:
+            conn_a = _db()
+            if dev_ref.lower() in ('primary_mobile', 'mobile'):
+                row = conn_a.execute("SELECT device_id FROM devices WHERE role='primary_mobile'").fetchone()
+                dev_ref = row['device_id'] if row else None
+            if dev_ref:
+                conn_a.execute(
+                    "INSERT INTO device_commands (device_id, action, arg) VALUES (?,?,?)",
+                    (dev_ref, action, arg))
+                conn_a.commit()
+                tools[m.group(0)] = f'Command queued for device {dev_ref[:8]}…'
+            else:
+                tools[m.group(0)] = '(no primary_mobile device registered)'
+            conn_a.close()
+        except Exception as e:
+            tools[m.group(0)] = f'(android command failed: {e})'
 
     # [WATCH: service]
     for m in re.finditer(r'\[WATCH:\s*([^\]]+)\]', text):
@@ -5448,6 +5607,26 @@ def _start_web():
                         'hist_len':    hl,
                         'uptime':      uptime_s,
                     }), 'application/json')
+                elif path == '/api/devices':
+                    ddb = _db()
+                    self._send(200, json.dumps({'devices': _devices_list(ddb)}), 'application/json')
+                    ddb.close()
+                elif path == '/api/probe':
+                    self._send(200, json.dumps({'probe': _system_probe()}), 'application/json')
+                elif path.startswith('/api/commands/pending'):
+                    from urllib.parse import urlparse, parse_qs
+                    qs       = parse_qs(urlparse(self.path).query)
+                    dev_id   = qs.get('device_id', [''])[0].strip()
+                    cdb      = _db()
+                    if dev_id:
+                        _device_touch(cdb, dev_id)
+                    rows = cdb.execute(
+                        "SELECT id, action, arg FROM device_commands "
+                        "WHERE device_id=? AND delivered_at IS NULL ORDER BY id",
+                        (dev_id,)).fetchall() if dev_id else []
+                    cmds = [{'id': r['id'], 'action': r['action'], 'arg': r['arg']} for r in rows]
+                    cdb.close()
+                    self._send(200, json.dumps({'commands': cmds}), 'application/json')
                 elif path == '/api/schedules':
                     self._send(200, json.dumps({'schedules': _sched_load()}), 'application/json')
                 elif path == '/api/memories':
@@ -5758,14 +5937,73 @@ def _start_web():
                     _web_abort_event.set()
                     self._send(200, json.dumps({'ok': True}), 'application/json')
 
+                elif path == '/api/device/register':
+                    data    = json.loads(body) if body else {}
+                    dev_id  = data.get('device_id', '').strip()
+                    if not dev_id:
+                        self._send(400, json.dumps({'error': 'device_id required'}), 'application/json')
+                    else:
+                        rdb = _db()
+                        row = rdb.execute('SELECT role FROM devices WHERE device_id=?', (dev_id,)).fetchone()
+                        role = row['role'] if row else None
+                        caps = json.dumps(data.get('capabilities', []))
+                        rdb.execute("""
+                            INSERT INTO devices
+                                (device_id,hostname,model,os,arch,device_type,capabilities,ip,role,
+                                 battery_pct,charging,last_seen)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                            ON CONFLICT(device_id) DO UPDATE SET
+                                hostname=excluded.hostname, model=excluded.model,
+                                os=excluded.os, arch=excluded.arch, ip=excluded.ip,
+                                capabilities=excluded.capabilities,
+                                battery_pct=excluded.battery_pct,
+                                charging=excluded.charging,
+                                last_seen=datetime('now')
+                        """, (dev_id,
+                              data.get('hostname','unknown'), data.get('model',''),
+                              data.get('os',''), data.get('arch',''),
+                              data.get('device_type','mobile'), caps,
+                              data.get('ip',''), role,
+                              data.get('battery_pct'), 1 if data.get('charging') else 0))
+                        rdb.commit(); rdb.close()
+                        self._send(200, json.dumps({'ok': True, 'device_id': dev_id}), 'application/json')
+
+                elif path == '/api/device/role':
+                    data    = json.loads(body) if body else {}
+                    dev_id  = data.get('device_id', '').strip()
+                    role    = data.get('role', '').strip()
+                    if not dev_id or role not in ('primary_pc', 'primary_mobile'):
+                        self._send(400, json.dumps({'error': 'device_id and role (primary_pc|primary_mobile) required'}), 'application/json')
+                    else:
+                        rdb = _db()
+                        rdb.execute("UPDATE devices SET role=NULL WHERE role=?", (role,))
+                        rdb.execute("UPDATE devices SET role=? WHERE device_id=?", (role, dev_id))
+                        rdb.commit(); rdb.close()
+                        self._send(200, json.dumps({'ok': True}), 'application/json')
+
+                elif path == '/api/commands/ack':
+                    data = json.loads(body) if body else {}
+                    ids  = data.get('ids', [])
+                    if ids:
+                        adb = _db()
+                        placeholders = ','.join('?' for _ in ids)
+                        adb.execute(
+                            f"UPDATE device_commands SET delivered_at=datetime('now') WHERE id IN ({placeholders})",
+                            ids)
+                        adb.commit(); adb.close()
+                    self._send(200, json.dumps({'ok': True}), 'application/json')
+
                 elif path == '/api/desktop':
                     # Direct desktop action — no AI, no verbosity, just execute and return result
-                    data   = json.loads(body) if body else {}
-                    action = data.get('action', '').strip().lower()
-                    arg    = data.get('arg', '').strip()
+                    data      = json.loads(body) if body else {}
+                    action    = data.get('action', '').strip().lower()
+                    arg       = data.get('arg', '').strip()
+                    device_id = data.get('device_id', '').strip()
                     if not action:
                         self._send(400, json.dumps({'error': 'action required'}), 'application/json')
                     else:
+                        if device_id:
+                            ddb = _db(); _device_touch(ddb, device_id); ddb.close()
                         result = _desktop(action, arg)
                         self._send(200, json.dumps({'result': result}), 'application/json')
 
@@ -5841,6 +6079,7 @@ def main():
     _auth_load()         # ensure credentials file exists
     _ensure_tls_cert()   # generate self-signed TLS cert if not present
     _seed_shared_history()
+    _device_self_register()  # register controller PC in device inventory
     _refresh_models()
     threading.Thread(target=_warmup,          daemon=True).start()
     threading.Thread(target=_warmup_whisper,  daemon=True, name='whisper-warmup').start()
