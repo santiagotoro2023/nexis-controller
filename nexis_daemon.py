@@ -1755,16 +1755,16 @@ def _db():
     """)
     conn.commit()
     # Migrations
-    try:
-        conn.execute('ALTER TABLE memories ADD COLUMN embedding BLOB')
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        conn.execute('ALTER TABLE chat_history ADD COLUMN session_title TEXT')
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    for _col, _ddl in [
+        ('embedding',     'ALTER TABLE memories ADD COLUMN embedding BLOB'),
+        ('session_title', 'ALTER TABLE chat_history ADD COLUMN session_title TEXT'),
+        ('mac',           "ALTER TABLE devices ADD COLUMN mac TEXT DEFAULT ''"),
+    ]:
+        try:
+            conn.execute(_ddl)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     return conn
 
 def _device_self_register():
@@ -1780,6 +1780,7 @@ def _device_self_register():
     try: ip = _socket.gethostbyname(_socket.gethostname())
     except Exception: pass
     dev_id = str(uuid.UUID(int=uuid.getnode()))
+    mac_str = ':'.join(f'{(uuid.getnode() >> (8*i)) & 0xff:02x}' for i in range(5, -1, -1))
     conn = _db()
     try:
         # Preserve existing role; default to primary_pc
@@ -1787,14 +1788,14 @@ def _device_self_register():
         role = row['role'] if row else 'primary_pc'
         conn.execute("""
             INSERT INTO devices
-                (device_id, hostname, model, os, arch, device_type, capabilities, ip, role, last_seen)
-            VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))
+                (device_id, hostname, model, os, arch, device_type, capabilities, ip, mac, role, last_seen)
+            VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))
             ON CONFLICT(device_id) DO UPDATE SET
                 hostname=excluded.hostname, os=excluded.os, arch=excluded.arch,
-                ip=excluded.ip, last_seen=datetime('now')
+                ip=excluded.ip, mac=excluded.mac, last_seen=datetime('now')
         """, (dev_id, _socket.gethostname(), platform.machine(), os_name,
               platform.machine(), 'desktop',
-              '["screenshot","clipboard","media","volume","shell","probe"]', ip, role))
+              '["screenshot","clipboard","media","volume","shell","probe"]', ip, mac_str, role))
         conn.commit()
         _log(f'Controller registered: {_socket.gethostname()} ({dev_id[:8]}…)')
     except Exception as e:
@@ -1829,6 +1830,7 @@ def _devices_list(conn):
                 'device_type':  r['device_type'],
                 'capabilities': json.loads(r['capabilities'] or '[]'),
                 'ip':           r['ip'],
+                'mac':          r['mac'] if 'mac' in r.keys() else '',
                 'role':         r['role'],
                 'battery_pct':  r['battery_pct'],
                 'charging':     bool(r['charging']) if r['charging'] is not None else None,
@@ -1838,6 +1840,23 @@ def _devices_list(conn):
         return result
     except Exception:
         return []
+
+
+def _send_wol(mac_addr: str) -> str:
+    """Send a Wake-on-LAN magic packet to the given MAC address."""
+    import socket
+    mac = mac_addr.replace(':', '').replace('-', '').replace('.', '')
+    if len(mac) != 12:
+        return f'(invalid MAC: {mac_addr})'
+    try:
+        raw    = bytes.fromhex(mac)
+        packet = b'\xff' * 6 + raw * 16
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.sendto(packet, ('<broadcast>', 9))
+        return f'WOL sent to {mac_addr}'
+    except Exception as e:
+        return f'(WOL failed: {e})'
 
 
 def _inject_devices(sys_p: str, conn) -> str:
@@ -2877,11 +2896,44 @@ def _desktop(action, arg):
                         return 'locked'
             return '(lock failed — no working lock command found)'
         elif act == 'sleep':
-            for cmd in (['loginctl','suspend'], ['systemctl','suspend']):
+            cmds = [
+                # dbus to logind — most reliable without root on desktop sessions
+                ['dbus-send', '--system', '--print-reply',
+                 '--dest=org.freedesktop.login1', '/org/freedesktop/login1',
+                 'org.freedesktop.login1.Manager.Suspend', 'boolean:true'],
+                ['systemctl', 'suspend'],
+                ['loginctl', 'suspend'],
+            ]
+            for cmd in cmds:
                 if shutil.which(cmd[0]):
-                    subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    return 'suspending'
-            return '(suspend failed)'
+                    r = subprocess.run(cmd, env=env, capture_output=True, timeout=10)
+                    if r.returncode == 0:
+                        return 'suspending'
+            return '(suspend unavailable)'
+        elif act == 'wake':
+            # Wake display from DPMS sleep
+            if env.get('DISPLAY'):
+                if shutil.which('xset'):
+                    subprocess.run(['xset', 'dpms', 'force', 'on'], capture_output=True, env=env)
+                if shutil.which('xdotool'):
+                    import time as _t; _t.sleep(0.3)
+                    subprocess.run(['xdotool', 'key', 'ctrl'], capture_output=True, env=env)
+            return 'wake signal sent'
+        elif act == 'unlock':
+            # Signal lock screen to show unlock prompt
+            if shutil.which('loginctl'):
+                subprocess.run(['loginctl', 'unlock-sessions'], capture_output=True, env=env, timeout=5)
+            if shutil.which('xdotool') and env.get('DISPLAY'):
+                import time as _t; _t.sleep(0.3)
+                subprocess.run(['xdotool', 'key', 'ctrl'], capture_output=True, env=env)
+            # If password provided, type it after the unlock screen appears
+            if arg and shutil.which('xdotool') and env.get('DISPLAY'):
+                import time as _t; _t.sleep(1.0)
+                subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '30', arg],
+                               capture_output=True, env=env, timeout=15)
+                _t.sleep(0.2)
+                subprocess.run(['xdotool', 'key', 'Return'], capture_output=True, env=env)
+            return 'unlock signal sent'
         elif act == 'media':
             sub = arg.strip().lower() if arg.strip() else 'play-pause'
             media_map = {
@@ -2889,11 +2941,27 @@ def _desktop(action, arg):
                 'toggle': 'play-pause', 'next': 'next', 'previous': 'previous',
                 'prev': 'previous', 'stop': 'stop',
             }
+            xf86_map = {
+                'play': 'XF86AudioPlay', 'pause': 'XF86AudioPause',
+                'play-pause': 'XF86AudioPlay', 'toggle': 'XF86AudioPlay',
+                'next': 'XF86AudioNext', 'previous': 'XF86AudioPrev',
+                'prev': 'XF86AudioPrev', 'stop': 'XF86AudioStop',
+            }
             pcmd = media_map.get(sub, 'play-pause')
+            xkey = xf86_map.get(sub, 'XF86AudioPlay')
+            # Try playerctl --all-players (Spotify, VLC, etc.)
             if shutil.which('playerctl'):
-                r = subprocess.run(['playerctl', pcmd], capture_output=True, text=True, env=env)
-                return f'media: {pcmd}' + (f' ({r.stdout.strip()})' if r.stdout.strip() else '')
-            return '(playerctl unavailable)'
+                r = subprocess.run(['playerctl', '--all-players', pcmd],
+                                   capture_output=True, text=True, env=env, timeout=5)
+                if r.returncode == 0:
+                    return f'media: {pcmd}'
+            # Fallback: XF86 media key (works for browser players like YouTube)
+            if shutil.which('xdotool') and env.get('DISPLAY'):
+                r = subprocess.run(['xdotool', 'key', '--clearmodifiers', xkey],
+                                   capture_output=True, env=env, timeout=5)
+                if r.returncode == 0:
+                    return f'media: {sub} (XF86 key)'
+            return '(media control unavailable — install playerctl or xdotool)'
         elif act == 'screenshot':
             import base64 as _b64, tempfile as _tf
             tmp = _tf.NamedTemporaryFile(suffix='.png', delete=False, prefix='/tmp/nx_screen_')
@@ -6067,9 +6135,9 @@ def _start_web():
                         caps = json.dumps(data.get('capabilities', []))
                         rdb.execute("""
                             INSERT INTO devices
-                                (device_id,hostname,model,os,arch,device_type,capabilities,ip,role,
+                                (device_id,hostname,model,os,arch,device_type,capabilities,ip,mac,role,
                                  battery_pct,charging,last_seen)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
                             ON CONFLICT(device_id) DO UPDATE SET
                                 hostname=excluded.hostname, model=excluded.model,
                                 os=excluded.os, arch=excluded.arch, ip=excluded.ip,
@@ -6081,7 +6149,7 @@ def _start_web():
                               data.get('hostname','unknown'), data.get('model',''),
                               data.get('os',''), data.get('arch',''),
                               data.get('device_type','mobile'), caps,
-                              data.get('ip',''), role,
+                              data.get('ip',''), data.get('mac',''), role,
                               data.get('battery_pct'), 1 if data.get('charging') else 0))
                         rdb.commit(); rdb.close()
                         self._send(200, json.dumps({'ok': True, 'device_id': dev_id}), 'application/json')
@@ -6110,6 +6178,30 @@ def _start_web():
                             ids)
                         adb.commit(); adb.close()
                     self._send(200, json.dumps({'ok': True}), 'application/json')
+
+                elif path == '/api/device/command':
+                    # Queue a command for a specific device (used by remote control for mobile)
+                    data      = json.loads(body) if body else {}
+                    dev_id    = data.get('device_id', '').strip()
+                    action    = data.get('action', '').strip()
+                    cmd_arg   = data.get('arg', '').strip()
+                    if not dev_id or not action:
+                        self._send(400, json.dumps({'error': 'device_id and action required'}), 'application/json')
+                    else:
+                        cdb = _db()
+                        cdb.execute("INSERT INTO device_commands (device_id, action, arg) VALUES (?,?,?)",
+                                    (dev_id, action, cmd_arg))
+                        cdb.commit(); cdb.close()
+                        self._send(200, json.dumps({'ok': True, 'queued': action}), 'application/json')
+
+                elif path == '/api/wol':
+                    data   = json.loads(body) if body else {}
+                    mac    = data.get('mac', '').strip()
+                    if not mac:
+                        self._send(400, json.dumps({'error': 'mac required'}), 'application/json')
+                    else:
+                        result = _send_wol(mac)
+                        self._send(200, json.dumps({'result': result}), 'application/json')
 
                 elif path == '/api/desktop':
                     # Direct desktop action — no AI, no verbosity, just execute and return result
