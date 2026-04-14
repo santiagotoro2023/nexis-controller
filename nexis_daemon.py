@@ -5758,6 +5758,17 @@ def _start_web():
                     _web_abort_event.set()
                     self._send(200, json.dumps({'ok': True}), 'application/json')
 
+                elif path == '/api/desktop':
+                    # Direct desktop action — no AI, no verbosity, just execute and return result
+                    data   = json.loads(body) if body else {}
+                    action = data.get('action', '').strip().lower()
+                    arg    = data.get('arg', '').strip()
+                    if not action:
+                        self._send(400, json.dumps({'error': 'action required'}), 'application/json')
+                    else:
+                        result = _desktop(action, arg)
+                        self._send(200, json.dumps({'result': result}), 'application/json')
+
                 elif path == '/api/clear':
                     with _shared_lock: _shared_hist.clear()
                     with _shared_lock: hl = len(_shared_hist)
