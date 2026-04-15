@@ -1756,6 +1756,15 @@ def _db():
             created_at   TEXT DEFAULT (datetime('now')),
             delivered_at TEXT DEFAULT NULL
         );
+        CREATE TABLE IF NOT EXISTS alarms (
+            nexis_id    TEXT PRIMARY KEY,
+            device_id   TEXT NOT NULL,
+            time_str    TEXT NOT NULL,
+            label       TEXT DEFAULT 'NeXiS Alarm',
+            post_delay  INTEGER DEFAULT 0,
+            post_action TEXT DEFAULT '',
+            created_at  TEXT DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
     # Migrations
@@ -2516,9 +2525,24 @@ def _build_system(conn):
         '\n  [ANDROID: primary_mobile | clip    | some text]                  copy to phone clipboard'
         '\n  [ANDROID: primary_mobile | media   | play]                       media control (play/pause/next/previous/stop)'
         '\n  [ANDROID: primary_mobile | volume  | 70]                         set phone volume 0-100'
+        '\n'
+        '\n  Alarms and timers (plays NeXiS-style generated tone, works on lock screen):'
+        '\n  [ANDROID: primary_mobile | set_alarm | nexis_{ts} | 07:00 | Morning | 30 | //brief]'
+        '\n    → arg fields: {nexis_id}|{HH:MM 24h}|{label}|{post_delay_secs}|{post_action_prompt}'
+        '\n    post_action: prompt sent to NeXiS after post_delay seconds (leave empty for none)'
+        '\n    Examples:'
+        '\n      Set alarm 7am, no post-action:   nexis_{ts}|07:00|Wake up||'
+        '\n      Set alarm 7am, brief after 30s:  nexis_{ts}|07:00|Morning|30|//brief'
+        '\n      Set alarm 6:30am, speak weather: nexis_{ts}|06:30|Early|60|What is the weather today?'
+        '\n  [ANDROID: primary_mobile | set_timer | nexis_{ts} | 25m | Focus session done | 0 |]'
+        '\n    → duration formats: "25m" "90s" "1h30m"'
+        '\n  [ANDROID: primary_mobile | cancel_alarm | nexis_{ts}]'
+        '\n    → cancel a previously set alarm by its nexis_id'
+        '\n  ALWAYS generate nexis_id as "nexis_" + current unix timestamp (integer, no decimals).'
         '\nUse device ID from the device inventory above, or "primary_mobile" as shorthand.'
         '\nUSE THESE TOOLS when Creator says things like: "open X on my phone", "send me a notification",'
-        '\n"play music on my phone", "set phone volume to N", "open [app] on my [phone/mobile]".'
+        '\n"play music on my phone", "set phone volume to N", "open [app] on my [phone/mobile]",'
+        '\n"set an alarm for X", "wake me at X", "set a timer for X minutes".'
         '\nFOR ANDROID ACTIONS: emit the tag FIRST on its own line, then ONE ultra-short confirmation.'
         '\n'
         '\n### [INDEX: path] — index a file or directory for RAG retrieval'
@@ -3450,6 +3474,22 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
                     "INSERT INTO device_commands (device_id, action, arg) VALUES (?,?,?)",
                     (dev_ref, action, arg))
                 conn_a.commit()
+                # Mirror alarm records in DB for cross-device listing
+                if action == 'set_alarm':
+                    parts = arg.split('|')
+                    nexis_id    = (parts[0] if len(parts) > 0 else '').strip() or f'nexis_{int(time.time())}'
+                    time_str    = (parts[1] if len(parts) > 1 else '').strip()
+                    label       = (parts[2] if len(parts) > 2 else 'NeXiS Alarm').strip()
+                    post_delay  = int((parts[3] if len(parts) > 3 else '0').strip() or 0)
+                    post_action = (parts[4] if len(parts) > 4 else '').strip()
+                    conn_a.execute(
+                        "INSERT OR REPLACE INTO alarms (nexis_id, device_id, time_str, label, post_delay, post_action) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (nexis_id, dev_ref, time_str, label, post_delay, post_action))
+                    conn_a.commit()
+                elif action == 'cancel_alarm':
+                    conn_a.execute("DELETE FROM alarms WHERE nexis_id=?", (arg.strip(),))
+                    conn_a.commit()
                 tools[m.group(0)] = f'Command queued for device {dev_ref[:8]}…'
             else:
                 tools[m.group(0)] = '(no primary_mobile device registered)'
@@ -6530,6 +6570,18 @@ def _start_web():
                     ddb = _db()
                     self._send(200, json.dumps({'devices': _devices_list(ddb)}), 'application/json')
                     ddb.close()
+                elif path == '/api/alarms':
+                    adb = _db()
+                    rows = adb.execute(
+                        "SELECT nexis_id, device_id, time_str, label, post_delay, post_action, created_at "
+                        "FROM alarms ORDER BY created_at DESC"
+                    ).fetchall()
+                    adb.close()
+                    self._send(200, json.dumps({'alarms': [
+                        {'nexis_id': r[0], 'device_id': r[1], 'time_str': r[2],
+                         'label': r[3], 'post_delay': r[4], 'post_action': r[5], 'created_at': r[6]}
+                        for r in rows
+                    ]}), 'application/json')
                 elif path == '/api/monitor':
                     try:
                         import psutil as _ps
@@ -6951,6 +7003,34 @@ def _start_web():
                         ddb.execute("DELETE FROM device_commands WHERE device_id=?", (dev_id,))
                         ddb.commit(); ddb.close()
                         self._send(200, json.dumps({'ok': True}), 'application/json')
+
+                elif path == '/api/alarms':
+                    # Create or cancel an alarm record (tracking only — actual alarm runs on device)
+                    data   = json.loads(body) if body else {}
+                    action = data.get('action', 'add').strip()
+                    if action == 'add':
+                        nexis_id    = data.get('nexis_id', f'nexis_{int(time.time())}').strip()
+                        device_id   = data.get('device_id', '').strip()
+                        time_str    = data.get('time_str', '').strip()
+                        label       = data.get('label', 'NeXiS Alarm').strip()
+                        post_delay  = int(data.get('post_delay', 0))
+                        post_action = data.get('post_action', '').strip()
+                        adb = _db()
+                        adb.execute(
+                            "INSERT OR REPLACE INTO alarms (nexis_id, device_id, time_str, label, post_delay, post_action, created_at) "
+                            "VALUES (?,?,?,?,?,?,datetime('now'))",
+                            (nexis_id, device_id, time_str, label, post_delay, post_action)
+                        )
+                        adb.commit(); adb.close()
+                        self._send(200, json.dumps({'ok': True, 'nexis_id': nexis_id}), 'application/json')
+                    elif action == 'cancel':
+                        nexis_id = data.get('nexis_id', '').strip()
+                        adb = _db()
+                        adb.execute("DELETE FROM alarms WHERE nexis_id=?", (nexis_id,))
+                        adb.commit(); adb.close()
+                        self._send(200, json.dumps({'ok': True}), 'application/json')
+                    else:
+                        self._send(400, json.dumps({'error': 'unknown action'}), 'application/json')
 
                 elif path == '/api/commands/ack':
                     data = json.loads(body) if body else {}
