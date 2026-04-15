@@ -6347,6 +6347,9 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
             ) or 'Done.'
             yield brief
             if voice_on: _speak(brief)
+            # Show tool details below the confirmation (not spoken — TTS already sent)
+            tool_detail = '\n' + '\n'.join(f'↳ {k}' for k in tools)
+            yield tool_detail
             clean = brief
         else:
             fmsgs = msgs + [{'role': 'user', 'content': (
