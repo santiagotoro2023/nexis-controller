@@ -313,7 +313,8 @@ def _tls_fingerprint() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _stream_chat(messages, model, temperature=0.75, num_ctx=4096,
-                 on_token=None, images=None, timeout=300, abort_event=None):
+                 on_token=None, images=None, timeout=300, abort_event=None,
+                 num_predict=None):
     msgs = list(messages)
     if images:
         for i in range(len(msgs)-1, -1, -1):
@@ -321,10 +322,13 @@ def _stream_chat(messages, model, temperature=0.75, num_ctx=4096,
                 msgs[i] = dict(msgs[i])
                 msgs[i]['images'] = images
                 break
+    options = {'num_ctx': num_ctx, 'temperature': temperature, 'top_p': 0.9}
+    if num_predict is not None:
+        options['num_predict'] = num_predict
     payload = json.dumps({
         'model': model, 'messages': msgs,
         'stream': True, 'keep_alive': '24h',
-        'options': {'num_ctx': num_ctx, 'temperature': temperature, 'top_p': 0.9}
+        'options': options
     }).encode()
     req = urllib.request.Request(f'{OLLAMA}/api/chat', data=payload,
         headers={'Content-Type': 'application/json'})
@@ -440,12 +444,11 @@ def _smart_chat(messages, temperature=0.75, num_ctx=None,
     if images:
         if _model_ok(MODEL_VISION):
             msgs_v = _enforce_english(list(messages))
-            vision_ctx = max(num_ctx or 8192, 8192)
             if on_token:
                 on_token('[STATUS:Analyzing image...]')
-            result = _stream_chat(msgs_v, MODEL_VISION, temperature, vision_ctx,
-                                  on_token=on_token, images=images, timeout=600,
-                                  abort_event=abort_event)
+            result = _stream_chat(msgs_v, MODEL_VISION, temperature, 2048,
+                                  on_token=on_token, images=images, timeout=300,
+                                  abort_event=abort_event, num_predict=300)
             if result and result.strip():
                 # Strip the loading message from result if it echoed
                 return result, MODEL_VISION
@@ -3036,8 +3039,8 @@ def _desktop(action, arg):
                     img_path = tmp.name
                     if shutil.which('convert'):
                         small = tmp.name.replace('.png', '_sm.png')
-                        subprocess.run(['convert', img_path, '-resize', '1024x1024>',
-                                        '-quality', '85', small],
+                        subprocess.run(['convert', img_path, '-resize', '640x640>',
+                                        '-quality', '80', small],
                                        capture_output=True, timeout=10)
                         if os.path.exists(small) and os.path.getsize(small) > 0:
                             os.unlink(img_path); img_path = small
@@ -3051,6 +3054,113 @@ def _desktop(action, arg):
                 except Exception as e:
                     return f'(screenshot captured but vision failed: {e})'
             return '(screenshot failed — ffmpeg/scrot/imagemagick not found or DISPLAY not set)'
+        elif act in ('mouse_move', 'mousemove', 'move_mouse'):
+            parts = arg.replace(',', ' ').split()
+            if len(parts) >= 2 and shutil.which('xdotool'):
+                subprocess.run(['xdotool', 'mousemove', '--sync', parts[0], parts[1]],
+                               env=env, capture_output=True, timeout=5)
+                return f'mouse moved to {parts[0]},{parts[1]}'
+            return '(mouse_move requires xdotool and x,y args)'
+        elif act in ('mouse_click', 'click'):
+            # arg: "left|right|middle" or "x,y" or "x y button"
+            parts = arg.replace(',', ' ').split()
+            b_map = {'left': '1', 'middle': '2', 'right': '3'}
+            if not shutil.which('xdotool'):
+                return '(click requires xdotool)'
+            if len(parts) >= 2 and parts[0].lstrip('-').isdigit():
+                x, y = parts[0], parts[1]
+                button = b_map.get(parts[2].lower(), parts[2]) if len(parts) >= 3 else '1'
+                subprocess.run(['xdotool', 'mousemove', '--sync', x, y], env=env, capture_output=True, timeout=5)
+                subprocess.run(['xdotool', 'click', button], env=env, capture_output=True, timeout=5)
+                return f'clicked ({x},{y}) button={button}'
+            else:
+                button = b_map.get(arg.strip().lower(), '1')
+                subprocess.run(['xdotool', 'click', button], env=env, capture_output=True, timeout=5)
+                return f'clicked {arg or "left"}'
+        elif act in ('double_click', 'dblclick'):
+            parts = arg.replace(',', ' ').split()
+            if not shutil.which('xdotool'):
+                return '(double_click requires xdotool)'
+            if len(parts) >= 2 and parts[0].lstrip('-').isdigit():
+                subprocess.run(['xdotool', 'mousemove', '--sync', parts[0], parts[1]], env=env, capture_output=True, timeout=5)
+            subprocess.run(['xdotool', 'click', '--repeat', '2', '--delay', '100', '1'], env=env, capture_output=True, timeout=5)
+            return f'double-clicked{" at " + parts[0] + "," + parts[1] if len(parts) >= 2 else ""}'
+        elif act in ('type_text', 'type', 'keyboard_type'):
+            if not arg:
+                return '(type_text requires text arg)'
+            if not shutil.which('xdotool'):
+                return '(type_text requires xdotool)'
+            subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '15', arg],
+                           env=env, capture_output=True, timeout=60)
+            return f'typed: {arg[:60]}{"..." if len(arg) > 60 else ""}'
+        elif act in ('key_press', 'key', 'hotkey', 'press_key'):
+            if not arg:
+                return '(key_press requires key name, e.g. "Return", "ctrl+c", "super")'
+            if not shutil.which('xdotool'):
+                return '(key_press requires xdotool)'
+            subprocess.run(['xdotool', 'key', '--clearmodifiers', arg], env=env, capture_output=True, timeout=5)
+            return f'key pressed: {arg}'
+        elif act in ('scroll', 'mouse_scroll'):
+            # arg: "up [n]" | "down [n]" | "left [n]" | "right [n]"
+            parts = arg.lower().split()
+            direction = parts[0] if parts else 'down'
+            clicks = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 3
+            btn_map = {'up': '4', 'down': '5', 'left': '6', 'right': '7'}
+            btn = btn_map.get(direction, '5')
+            if shutil.which('xdotool'):
+                subprocess.run(['xdotool', 'click', '--repeat', str(clicks), btn], env=env, capture_output=True, timeout=5)
+                return f'scrolled {direction} {clicks}x'
+            return '(scroll requires xdotool)'
+        elif act in ('region', 'screenshot_region'):
+            # arg: "x,y,w,h [prompt]" — capture region, optionally analyse with vision
+            import base64 as _b64
+            parts = arg.replace(',', ' ').split(None, 4)
+            if len(parts) < 4:
+                return '(region requires x,y,w,h)'
+            x, y, w, h = parts[0], parts[1], parts[2], parts[3]
+            prompt_str = parts[4].strip() if len(parts) > 4 else ''
+            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False, prefix='/tmp/nx_region_')
+            tmp.close()
+            captured = False
+            disp = env.get('DISPLAY', ':0')
+            if shutil.which('ffmpeg') and disp:
+                r = subprocess.run(
+                    ['ffmpeg', '-f', 'x11grab', '-video_size', f'{w}x{h}',
+                     '-grab_x', x, '-grab_y', y, '-i', disp, '-vframes', '1', tmp.name, '-y'],
+                    capture_output=True, env=env, timeout=15)
+                if r.returncode == 0: captured = True
+            if not captured and shutil.which('import') and disp:
+                r = subprocess.run(['import', '-window', 'root', '-crop', f'{w}x{h}+{x}+{y}', tmp.name],
+                                   capture_output=True, env=env, timeout=10)
+                if r.returncode == 0: captured = True
+            if captured:
+                with open(tmp.name, 'rb') as f: raw = f.read()
+                b64 = _b64.b64encode(raw).decode()
+                os.unlink(tmp.name)
+                if prompt_str:
+                    msgs_v = [{'role': 'user', 'content': prompt_str}]
+                    result, _ = _smart_chat(msgs_v, images=[b64], temperature=0.1)
+                    return result.strip()
+                return f'data:image/png;base64,{b64}'
+            try: os.unlink(tmp.name)
+            except Exception: pass
+            return '(region screenshot failed — ffmpeg/imagemagick not found or DISPLAY not set)'
+        elif act in ('get_mouse_pos', 'mouse_pos'):
+            if shutil.which('xdotool'):
+                r = subprocess.run(['xdotool', 'getmouselocation', '--shell'],
+                                   capture_output=True, text=True, env=env, timeout=5)
+                pos = {}
+                for line in r.stdout.splitlines():
+                    k, _, v = line.partition('=')
+                    pos[k.strip().lower()] = v.strip()
+                return f"x={pos.get('x','?')} y={pos.get('y','?')} screen={pos.get('screen','?')}"
+            return '(get_mouse_pos requires xdotool)'
+        elif act in ('find_window', 'get_active_window'):
+            if shutil.which('xdotool'):
+                r = subprocess.run(['xdotool', 'getactivewindow', 'getwindowname'],
+                                   capture_output=True, text=True, env=env, timeout=5)
+                return r.stdout.strip() or '(no active window)'
+            return '(get_active_window requires xdotool)'
     except Exception as e:
         return f'({act} failed: {e})'
     return f'(unknown: {act})'
@@ -3131,6 +3241,131 @@ def _ha_action(action: str, entity: str, value: str = '') -> str:
             return f'(unknown HA action: {action})'
     except Exception as e:
         return f'(HA error: {e})'
+
+
+# ── Code interpreter ────────────────────────────────────────────────────────────
+_EXEC_ALLOWED_LANGS = {
+    'python': ('python3', '.py'),
+    'python3': ('python3', '.py'),
+    'sh': ('bash', '.sh'),
+    'bash': ('bash', '.sh'),
+    'shell': ('bash', '.sh'),
+    'javascript': ('node', '.js'),
+    'js': ('node', '.js'),
+    'node': ('node', '.js'),
+}
+
+def _exec_code(lang: str, code: str, timeout: int = 30) -> dict:
+    """Run code in a sandboxed subprocess; return stdout/stderr/exit_code/runtime_ms."""
+    lang = lang.lower().strip()
+    entry = _EXEC_ALLOWED_LANGS.get(lang)
+    if entry is None:
+        return {'stdout': '', 'stderr': f'Unsupported language: {lang}', 'exit_code': 1, 'runtime_ms': 0}
+    runtime, suffix = entry
+    if not shutil.which(runtime):
+        return {'stdout': '', 'stderr': f'Runtime not found: {runtime}', 'exit_code': 1, 'runtime_ms': 0}
+
+    import resource as _res
+    def _limit():
+        # 512 MB virtual address space, cpu limited to timeout
+        try:
+            _res.setrlimit(_res.RLIMIT_AS,  (512 * 1024 * 1024, 512 * 1024 * 1024))
+            _res.setrlimit(_res.RLIMIT_CPU, (timeout, timeout))
+        except Exception:
+            pass
+
+    fpath = None
+    t0 = time.monotonic()
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False, prefix='/tmp/nx_exec_') as f:
+            f.write(code)
+            fpath = f.name
+        proc = subprocess.run(
+            [runtime, fpath], capture_output=True, text=True,
+            timeout=timeout + 2, preexec_fn=_limit,
+        )
+        runtime_ms = int((time.monotonic() - t0) * 1000)
+        return {
+            'stdout':     proc.stdout[:8000],
+            'stderr':     proc.stderr[:2000],
+            'exit_code':  proc.returncode,
+            'runtime_ms': runtime_ms,
+        }
+    except subprocess.TimeoutExpired:
+        return {'stdout': '', 'stderr': f'Execution timed out after {timeout}s', 'exit_code': -1, 'runtime_ms': timeout * 1000}
+    except Exception as e:
+        return {'stdout': '', 'stderr': str(e), 'exit_code': -1, 'runtime_ms': 0}
+    finally:
+        if fpath:
+            try: os.unlink(fpath)
+            except Exception: pass
+
+
+# ── System monitor ─────────────────────────────────────────────────────────────
+_MONITOR_THRESHOLDS = {'cpu': 90, 'mem': 90, 'disk': 90}  # percent
+_monitor_alerted: dict = {}   # metric → last alert timestamp
+
+def _monitor_worker():
+    """Background system health monitor. Pushes alerts via /api/sync + ntfy."""
+    try:
+        import psutil as _ps
+    except ImportError:
+        _log('Monitor: psutil not installed — pip install psutil', 'WARN')
+        return
+
+    _log('Monitor: started')
+    interval    = 60    # check every 60 s (battery-friendly)
+    cpu_grace   = 300   # at most one CPU alert per 5 min
+    mem_grace   = 300
+    disk_grace  = 3600  # disk changes slowly
+
+    while True:
+        try:
+            time.sleep(interval)
+            now      = time.time()
+            cpu_pct  = _ps.cpu_percent(interval=2)
+            mem      = _ps.virtual_memory()
+            disk     = _ps.disk_usage('/')
+            alerts   = []
+
+            if cpu_pct >= _MONITOR_THRESHOLDS['cpu']:
+                if now - _monitor_alerted.get('cpu', 0) > cpu_grace:
+                    _monitor_alerted['cpu'] = now
+                    top_proc = sorted(_ps.process_iter(['name', 'cpu_percent']),
+                                      key=lambda p: p.info['cpu_percent'], reverse=True)[:3]
+                    top_str  = ', '.join(f"{p.info['name']}({p.info['cpu_percent']:.0f}%)" for p in top_proc if p.info['cpu_percent'] > 0)
+                    alerts.append({'type': 'cpu', 'val': cpu_pct,
+                                   'msg': f'CPU at {cpu_pct:.0f}%' + (f' — top: {top_str}' if top_str else '')})
+
+            if mem.percent >= _MONITOR_THRESHOLDS['mem']:
+                if now - _monitor_alerted.get('mem', 0) > mem_grace:
+                    _monitor_alerted['mem'] = now
+                    alerts.append({'type': 'mem', 'val': mem.percent,
+                                   'msg': f'Memory {mem.percent:.0f}% used ({mem.used/1e9:.1f}/{mem.total/1e9:.1f} GB)'})
+
+            if disk.percent >= _MONITOR_THRESHOLDS['disk']:
+                if now - _monitor_alerted.get('disk', 0) > disk_grace:
+                    _monitor_alerted['disk'] = now
+                    alerts.append({'type': 'disk', 'val': disk.percent,
+                                   'msg': f'Disk {disk.percent:.0f}% full ({disk.free/1e9:.1f} GB free)'})
+
+            for alert in alerts:
+                _log(f'Monitor: {alert["msg"]}')
+                _sync_broadcast({'alert': alert})
+                ntfy = _INTEG.get('ntfy_topic')
+                if ntfy:
+                    try:
+                        req = urllib.request.Request(
+                            f'https://ntfy.sh/{ntfy}',
+                            data=alert['msg'].encode(),
+                            headers={'Title': 'NeXiS Monitor', 'Priority': 'high', 'Tags': 'warning,computer'},
+                            method='POST')
+                        urllib.request.urlopen(req, timeout=5)
+                    except Exception:
+                        pass
+        except Exception as e:
+            _log(f'Monitor error: {e}', 'WARN')
+            time.sleep(interval)
 
 
 # Tool processor
@@ -6047,19 +6282,21 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         ctx = '\n\n'.join(f'[{k}]:\n{v}' for k, v in tools.items())
         is_desktop_only = all('[DESKTOP:' in k for k in tools)
         if is_desktop_only:
-            instruction = (
-                'DESKTOP ACTION COMPLETE. Reply in ONE sentence, maximum 8 words. '
-                'Just confirm it happened. No personality. No elaboration. No "Creator". '
-                'Examples: "Done." / "Opened." / "Volume set to 50%." / "Screen locked."'
-            )
+            # Strip full personality prompt — it fights brevity. Use a bare system prompt.
+            fmsgs = [
+                {'role': 'system', 'content':
+                    'You are NeXiS. Confirm the action in ONE short sentence, max 8 words. '
+                    'Examples: "Done." / "Opened." / "Locked." / "Volume set to 60%." '
+                    'No preamble. No personality. No "Creator". Just the confirmation.'},
+                {'role': 'user', 'content':
+                    f'Action result: {ctx}\nOriginal request: {msg}'},
+            ]
         else:
-            instruction = (
+            fmsgs = msgs + [{'role': 'user', 'content': (
+                f'[Tool results]:\n{ctx}\n\nOriginal question: {msg}\n\n'
                 'Answer the original question fully and accurately using the tool results. '
                 'Stay in character as NeXiS. Do not mention that you ran tools.'
-            )
-        fmsgs = msgs + [{'role': 'user', 'content': (
-            f'[Tool results]:\n{ctx}\n\nOriginal question: {msg}\n\n{instruction}'
-        )}]
+            )}]
         collected2 = []
         for tok in _live_stream(fmsgs, tts_sa=_SentenceAccum() if voice_on else None):
             if isinstance(tok, tuple) and tok[0] == '__result__':
@@ -6293,6 +6530,17 @@ def _start_web():
                     ddb = _db()
                     self._send(200, json.dumps({'devices': _devices_list(ddb)}), 'application/json')
                     ddb.close()
+                elif path == '/api/monitor':
+                    try:
+                        import psutil as _ps
+                        self._send(200, json.dumps({
+                            'cpu':        _ps.cpu_percent(interval=1),
+                            'mem':        _ps.virtual_memory().percent,
+                            'disk':       _ps.disk_usage('/').percent,
+                            'thresholds': _MONITOR_THRESHOLDS,
+                        }), 'application/json')
+                    except ImportError:
+                        self._send(200, json.dumps({'error': 'psutil not installed'}), 'application/json')
                 elif path == '/api/probe':
                     self._send(200, json.dumps({'probe': _system_probe()}), 'application/json')
                 elif path.startswith('/api/probe/device'):
@@ -6692,6 +6940,18 @@ def _start_web():
                         rdb.commit(); rdb.close()
                         self._send(200, json.dumps({'ok': True}), 'application/json')
 
+                elif path == '/api/device/delete':
+                    data   = json.loads(body) if body else {}
+                    dev_id = data.get('device_id', '').strip()
+                    if not dev_id:
+                        self._send(400, json.dumps({'error': 'device_id required'}), 'application/json')
+                    else:
+                        ddb = _db()
+                        ddb.execute("DELETE FROM devices WHERE device_id=?", (dev_id,))
+                        ddb.execute("DELETE FROM device_commands WHERE device_id=?", (dev_id,))
+                        ddb.commit(); ddb.close()
+                        self._send(200, json.dumps({'ok': True}), 'application/json')
+
                 elif path == '/api/commands/ack':
                     data = json.loads(body) if body else {}
                     ids  = data.get('ids', [])
@@ -6741,6 +7001,51 @@ def _start_web():
                             ddb = _db(); _device_touch(ddb, device_id); ddb.close()
                         result = _desktop(action, arg)
                         self._send(200, json.dumps({'result': result}), 'application/json')
+
+                elif path == '/api/exec':
+                    # Code interpreter — run code in a sandboxed subprocess
+                    data    = json.loads(body) if body else {}
+                    lang    = data.get('lang', 'python').strip()
+                    code    = data.get('code', '').strip()
+                    timeout = min(int(data.get('timeout', 30)), 120)
+                    if not code:
+                        self._send(400, json.dumps({'error': 'code required'}), 'application/json')
+                    else:
+                        result = _exec_code(lang, code, timeout)
+                        self._send(200, json.dumps(result), 'application/json')
+
+                elif path == '/api/stt/transcribe':
+                    # Receive audio bytes (WAV) from a remote client and return transcription
+                    audio_bytes = body
+                    if not audio_bytes:
+                        self._send(400, json.dumps({'error': 'no audio data'}), 'application/json')
+                    else:
+                        try:
+                            wm = _whisper_model[0]
+                            if wm is None:
+                                from faster_whisper import WhisperModel
+                                wm = WhisperModel('small', device='cpu', compute_type='int8')
+                            tmpf = tempfile.NamedTemporaryFile(suffix='.wav', delete=False, prefix='/tmp/nx_stt_')
+                            tmpf.write(audio_bytes); tmpf.close()
+                            segments, _ = wm.transcribe(
+                                tmpf.name, language='en',
+                                vad_filter=True,
+                                vad_parameters={'min_silence_duration_ms': 300})
+                            text = ' '.join(s.text for s in segments).strip()
+                            try: os.unlink(tmpf.name)
+                            except Exception: pass
+                            self._send(200, json.dumps({'text': text}), 'application/json')
+                        except Exception as e:
+                            self._send(500, json.dumps({'error': str(e)}), 'application/json')
+
+                elif path == '/api/monitor/thresholds':
+                    # Update monitoring thresholds: {"cpu": 85, "mem": 90, "disk": 80}
+                    data = json.loads(body) if body else {}
+                    for key in ('cpu', 'mem', 'disk'):
+                        if key in data:
+                            try: _MONITOR_THRESHOLDS[key] = max(1, min(100, int(data[key])))
+                            except Exception: pass
+                    self._send(200, json.dumps({'ok': True, 'thresholds': _MONITOR_THRESHOLDS}), 'application/json')
 
                 elif path == '/api/clear':
                     with _shared_lock: _shared_hist.clear()
@@ -6822,6 +7127,7 @@ def main():
     threading.Thread(target=_start_web,       daemon=True, name='web').start()
     threading.Thread(target=_scheduler_thread, daemon=True, name='scheduler').start()
     threading.Thread(target=_stt_worker,      daemon=True, name='stt').start()
+    threading.Thread(target=_monitor_worker,  daemon=True, name='monitor').start()
 
     SOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     if SOCK_PATH.exists():
