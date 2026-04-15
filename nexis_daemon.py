@@ -117,7 +117,7 @@ _web_sessions    = {}       # token -> expires_at (float)
 _web_sessions_lk = threading.Lock()
 
 # ── Voice / TTS globals ───────────────────────────────────────────────────────
-_VOICE_ENABLED      = False
+_VOICE_ENABLED      = True
 _voice_lk           = threading.Lock()
 _VOICE_MODEL        = 'default'
 _voice_model_lk     = threading.Lock()
@@ -6119,10 +6119,11 @@ def _web_cmd(cmd) -> str:
         if recent_text:
             prompt_parts.append(f'Recent conversation context:\n{recent_text}')
         prompt_parts.append(
-            'Give Creator a tight morning briefing in 3-8 sentences. '
-            'Cover: the date/time, weather, 2-3 notable news items, '
-            'and one line about what we were working on recently. '
-            'Stay in character as NeXiS.'
+            'Give Creator a tight morning briefing in 3-6 sentences. '
+            'Cover: date/time, weather, 2-3 notable news items, '
+            'and optionally one line about recent work (skip if recent work is just timer/alarm setup). '
+            'Stay in character as NeXiS — sardonic, precise, with personality. '
+            'Do NOT mention timers, alarms, or scheduling operations as "recent work".'
         )
         summary_msgs = [
             {'role': 'system', 'content': 'You are NeXiS. Be sardonic, precise, and brief.'},
@@ -6325,28 +6326,34 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         is_desktop_only = all('[DESKTOP:' in k for k in tools)
         is_android_only = all('[ANDROID:' in k for k in tools)
         if is_desktop_only or is_android_only:
-            # Strip full personality prompt — it fights brevity. Use a bare system prompt.
-            fmsgs = [
-                {'role': 'system', 'content':
-                    'You are NeXiS. Confirm the action in ONE short sentence, max 10 words. '
-                    'Examples: "Done." / "Opened Steam." / "Alarm set for 7:00 AM." / "Timer set for 25 minutes." '
-                    'No preamble. No personality. No "Creator". Just the confirmation.'},
-                {'role': 'user', 'content':
-                    f'Action result: {ctx}\nOriginal request: {msg}'},
-            ]
+            # Bypass LLM for action-only responses — model ignores brevity constraints.
+            # Use MODEL_FAST at temperature 0 with a 25-token hard cap.
+            brief_sys = (
+                'Output ONLY the result in one sentence under 10 words. '
+                'No names. No personality. No fluff. '
+                'Examples: "Done." "Timer set for 5 seconds." "Opened Steam." "Alarm set for 7 AM."'
+            )
+            brief = _stream_chat(
+                [{'role': 'system', 'content': brief_sys},
+                 {'role': 'user',   'content': ctx[:400]}],
+                MODEL_FAST, 0.0, 25
+            ) or 'Done.'
+            # Yield as a single token so client renders it immediately
+            yield brief
+            clean = brief
         else:
             fmsgs = msgs + [{'role': 'user', 'content': (
                 f'[Tool results]:\n{ctx}\n\nOriginal question: {msg}\n\n'
                 'Answer the original question fully and accurately using the tool results. '
                 'Stay in character as NeXiS. Do not mention that you ran tools.'
             )}]
-        collected2 = []
-        for tok in _live_stream(fmsgs, tts_sa=_SentenceAccum() if voice_on else None):
-            if isinstance(tok, tuple) and tok[0] == '__result__':
-                _, clean, _mu, _s = tok
-                collected2_str = ''.join(collected2); clean = clean or collected2_str
-            else:
-                collected2.append(tok); yield tok
+            collected2 = []
+            for tok in _live_stream(fmsgs, tts_sa=_SentenceAccum() if voice_on else None):
+                if isinstance(tok, tuple) and tok[0] == '__result__':
+                    _, clean, _mu, _s = tok
+                    collected2_str = ''.join(collected2); clean = clean or collected2_str
+                else:
+                    collected2.append(tok); yield tok
 
     if voice_on:
         tts_in_q.put(None)
@@ -6960,6 +6967,14 @@ def _start_web():
                         rdb = _db()
                         row = rdb.execute('SELECT role FROM devices WHERE device_id=?', (dev_id,)).fetchone()
                         role = row['role'] if row else None
+                        dev_type = data.get('device_type', 'mobile')
+                        # Auto-assign primary_mobile to the first mobile that registers
+                        if role is None and dev_type == 'mobile':
+                            existing_primary = rdb.execute(
+                                "SELECT device_id FROM devices WHERE role='primary_mobile'"
+                            ).fetchone()
+                            if existing_primary is None:
+                                role = 'primary_mobile'
                         caps = json.dumps(data.get('capabilities', []))
                         rdb.execute("""
                             INSERT INTO devices
@@ -6976,7 +6991,7 @@ def _start_web():
                         """, (dev_id,
                               data.get('hostname','unknown'), data.get('model',''),
                               data.get('os',''), data.get('arch',''),
-                              data.get('device_type','mobile'), caps,
+                              dev_type, caps,
                               data.get('ip',''), data.get('mac',''), role,
                               data.get('battery_pct'), 1 if data.get('charging') else 0))
                         rdb.commit(); rdb.close()
