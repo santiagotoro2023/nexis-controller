@@ -2529,11 +2529,13 @@ def _build_system(conn):
         '\n  Alarms and timers (plays NeXiS-style generated tone, works on lock screen):'
         '\n  [ANDROID: primary_mobile | set_alarm | nexis_{ts} | 07:00 | Morning | 30 | //brief]'
         '\n    → arg fields: {nexis_id}|{HH:MM 24h}|{label}|{post_delay_secs}|{post_action_prompt}'
-        '\n    post_action: prompt sent to NeXiS after post_delay seconds (leave empty for none)'
+        '\n    post_action: command or question sent to NeXiS after post_delay seconds (empty = none)'
+        '\n    IMPORTANT: "brief me", "give me a briefing", "morning briefing" → use //brief as post_action'
         '\n    Examples:'
-        '\n      Set alarm 7am, no post-action:   nexis_{ts}|07:00|Wake up||'
-        '\n      Set alarm 7am, brief after 30s:  nexis_{ts}|07:00|Morning|30|//brief'
-        '\n      Set alarm 6:30am, speak weather: nexis_{ts}|06:30|Early|60|What is the weather today?'
+        '\n      Set alarm 7am, no post-action:     nexis_{ts}|07:00|Wake up||'
+        '\n      Set alarm 7am, morning brief 30s:  nexis_{ts}|07:00|Morning|30|//brief'
+        '\n      Set alarm 6:30am, speak weather:   nexis_{ts}|06:30|Early|60|What is the weather today?'
+        '\n      Set alarm, brief me after:         nexis_{ts}|07:00|Morning|30|//brief'
         '\n  [ANDROID: primary_mobile | set_timer | nexis_{ts} | 25m | Focus session done | 0 |]'
         '\n    → duration formats: "25m" "90s" "1h30m"'
         '\n  [ANDROID: primary_mobile | cancel_alarm | nexis_{ts}]'
@@ -6321,12 +6323,13 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         yield '[CLEAR]'
         ctx = '\n\n'.join(f'[{k}]:\n{v}' for k, v in tools.items())
         is_desktop_only = all('[DESKTOP:' in k for k in tools)
-        if is_desktop_only:
+        is_android_only = all('[ANDROID:' in k for k in tools)
+        if is_desktop_only or is_android_only:
             # Strip full personality prompt — it fights brevity. Use a bare system prompt.
             fmsgs = [
                 {'role': 'system', 'content':
-                    'You are NeXiS. Confirm the action in ONE short sentence, max 8 words. '
-                    'Examples: "Done." / "Opened." / "Locked." / "Volume set to 60%." '
+                    'You are NeXiS. Confirm the action in ONE short sentence, max 10 words. '
+                    'Examples: "Done." / "Opened Steam." / "Alarm set for 7:00 AM." / "Timer set for 25 minutes." '
                     'No preamble. No personality. No "Creator". Just the confirmation.'},
                 {'role': 'user', 'content':
                     f'Action result: {ctx}\nOriginal request: {msg}'},
