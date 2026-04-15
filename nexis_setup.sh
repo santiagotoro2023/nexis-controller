@@ -218,6 +218,21 @@ _step 5 "Ollama inference engine"
 if ! command -v ollama &>/dev/null; then
   curl -fsSL https://ollama.com/install.sh | sh
 fi
+
+# Make Ollama's bundled CUDA libraries discoverable so inference uses the GPU.
+# The Ollama installer drops cuBLAS etc. under /usr/local/lib/ollama but does
+# not register them with ldconfig, causing the runner to fall back to CPU.
+OLLAMA_LIB="/usr/local/lib/ollama"
+if [ -d "$OLLAMA_LIB" ]; then
+  if ! grep -qF "$OLLAMA_LIB" /etc/ld.so.conf.d/ollama.conf 2>/dev/null; then
+    echo "$OLLAMA_LIB" > /etc/ld.so.conf.d/ollama.conf
+    ldconfig
+    _ok "Ollama CUDA libraries registered (GPU inference enabled)"
+  else
+    _ok "Ollama CUDA libraries already registered"
+  fi
+fi
+
 systemctl enable ollama --now 2>/dev/null || true
 sleep 2
 curl -sf http://localhost:11434/api/tags &>/dev/null || _err "Ollama not responding"
