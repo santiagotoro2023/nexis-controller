@@ -2518,13 +2518,20 @@ def _build_system(conn):
         '\n  [DESKTOP: lock]'
         '\n  Locked.'
         '\n'
-        '\n### [ANDROID: device_id | action | arg] — send a command to a registered mobile device'
+        '\n### [ANDROID: device_id | action | arg] — send a command to any registered device (mobile OR desktop app)'
+        '\n  Shorthands: "primary_mobile" → primary phone, "primary_pc" → primary desktop, hostname → that device'
         '\n  [ANDROID: primary_mobile | open_url | https://maps.google.com]   open URL on phone'
-        '\n  [ANDROID: primary_mobile | open_app | com.spotify.music]         open app by package name'
+        '\n  [ANDROID: primary_mobile | open_app | com.spotify.music]         open app by package name (mobile)'
         '\n  [ANDROID: primary_mobile | notify  | Reminder: meeting in 5 min] push notification'
-        '\n  [ANDROID: primary_mobile | clip    | some text]                  copy to phone clipboard'
+        '\n  [ANDROID: primary_mobile | clip    | some text]                  copy to clipboard'
         '\n  [ANDROID: primary_mobile | media   | play]                       media control (play/pause/next/previous/stop)'
-        '\n  [ANDROID: primary_mobile | volume  | 70]                         set phone volume 0-100'
+        '\n  [ANDROID: primary_mobile | volume  | 70]                         set volume 0-100'
+        '\n'
+        '\n  Desktop app devices support the same actions (open_url/open_app=xdg-open, notify, clip, media, volume):'
+        '\n  [ANDROID: primary_pc | open_url | https://github.com]            open URL on PC desktop app'
+        '\n  [ANDROID: primary_pc | notify   | Build finished]                desktop notification on that PC'
+        '\n  [ANDROID: primary_pc | media    | next]                          next track on that PC'
+        '\n  [ANDROID: hostname   | clip     | some text]                     clipboard on named device'
         '\n'
         '\n  Alarms and timers (plays NeXiS-style generated tone, works on lock screen):'
         '\n  [ANDROID: primary_mobile | set_alarm | nexis_{ts} | 07:00 | Morning | 30 | //brief]'
@@ -2541,11 +2548,7 @@ def _build_system(conn):
         '\n  [ANDROID: primary_mobile | cancel_alarm | nexis_{ts}]'
         '\n    → cancel a previously set alarm by its nexis_id'
         '\n  ALWAYS generate nexis_id as "nexis_" + current unix timestamp (integer, no decimals).'
-        '\nUse device ID from the device inventory above, or "primary_mobile" as shorthand.'
-        '\nUSE THESE TOOLS when Creator says things like: "open X on my phone", "send me a notification",'
-        '\n"play music on my phone", "set phone volume to N", "open [app] on my [phone/mobile]",'
-        '\n"set an alarm for X", "wake me at X", "set a timer for X minutes".'
-        '\nFOR ANDROID ACTIONS: emit the tag FIRST on its own line, then ONE ultra-short confirmation.'
+        '\nFOR ANDROID/DEVICE ACTIONS: emit the tag FIRST on its own line, then ONE ultra-short confirmation.'
         '\n'
         '\n### [INDEX: path] — index a file or directory for RAG retrieval'
         '\n  [INDEX: ~/Documents/notes]          index all text files in a directory'
@@ -3461,16 +3464,25 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
     for m in re.finditer(r'\[DESKTOP:\s*(\w+)(?:\s*\|\s*([^\]]*))?\]', text, re.IGNORECASE):
         tools[m.group(0)] = _desktop(m.group(1).strip().lower(), (m.group(2) or '').strip())
 
-    # [ANDROID: device_id | action | arg]
+    # [ANDROID: device_id | action | arg]  (works for mobile AND desktop app devices)
     for m in re.finditer(r'\[ANDROID:\s*([^\|\]]+)\|\s*([^\|\]]+)(?:\|\s*([^\]]*))?\]', text, re.IGNORECASE):
         dev_ref = m.group(1).strip()
         action  = m.group(2).strip().lower()
         arg     = (m.group(3) or '').strip()
         try:
             conn_a = _db()
-            if dev_ref.lower() in ('primary_mobile', 'mobile'):
+            dr_low = dev_ref.lower()
+            if dr_low in ('primary_mobile', 'mobile'):
                 row = conn_a.execute("SELECT device_id FROM devices WHERE role='primary_mobile'").fetchone()
                 dev_ref = row['device_id'] if row else None
+            elif dr_low in ('primary_pc', 'pc'):
+                row = conn_a.execute("SELECT device_id FROM devices WHERE role='primary_pc'").fetchone()
+                dev_ref = row['device_id'] if row else None
+            else:
+                # Resolve by hostname if not a UUID-looking string
+                if len(dev_ref) < 30:
+                    row = conn_a.execute("SELECT device_id FROM devices WHERE hostname=?", (dev_ref,)).fetchone()
+                    if row: dev_ref = row['device_id']
             if dev_ref:
                 conn_a.execute(
                     "INSERT INTO device_commands (device_id, action, arg) VALUES (?,?,?)",
@@ -6180,6 +6192,26 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         _is_typing = False
         _sync_broadcast({'typing': False, 'hist_len': hl})
         yield result
+        # Speak slash command results (e.g. //brief read aloud on locked screen)
+        if _voice_enabled() and _tts_available():
+            sa = _SentenceAccum()
+            def _slash_speak(text):
+                sid = _next_audio_seq()
+                wav = _tts_synth(text)
+                if wav:
+                    with _audio_store_lk:
+                        _audio_store[sid] = (wav, time.time())
+                    return f'[AUDIOREADY:{sid}]'
+                return None
+            for _ch in result:
+                _sent = sa.feed(_ch)
+                if _sent:
+                    _ar = _slash_speak(_sent)
+                    if _ar: yield _ar
+            _tail = sa.flush()
+            if _tail:
+                _ar = _slash_speak(_tail)
+                if _ar: yield _ar
         return
 
     # Quick Ollama health check before blocking on inference
