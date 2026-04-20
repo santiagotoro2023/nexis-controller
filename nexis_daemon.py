@@ -2574,11 +2574,16 @@ def _build_system(conn):
         '\nUse for any request to control smart home devices, lights, switches, thermostats, sensors.'
         '\n'
         '\n### [HOMELAB: action] — safe power-sequencing for the home lab via Home Assistant'
-        '\n  [HOMELAB: start]   boot sequence: main switch ON, 30s delay, computer switch ON'
-        '\n  [HOMELAB: stop]    shutdown sequence: computer switch OFF, 10s delay, main switch OFF'
+        '\n  [HOMELAB: start]        boot sequence: main switch ON, 30s delay, computer switch ON'
+        '\n  [HOMELAB: stop]         shutdown sequence: computer switch OFF, 10s delay, main switch OFF'
+        '\n  [HOMELAB: abort]        cancel a running sequence safely'
         '\n  [HOMELAB: main_on] / [HOMELAB: main_off]         manual main switch only'
         '\n  [HOMELAB: computer_on] / [HOMELAB: computer_off] manual computer switch only'
-        '\nUse when Creator says: "start/boot/power on my homelab", "shut down/stop/power off my homelab".'
+        '\nEMIT [HOMELAB: start] when Creator says ANY of: "start my home lab", "start the homelab",'
+        '\n  "boot the homelab", "power on the homelab", "turn on the homelab", "spin up the homelab".'
+        '\nEMIT [HOMELAB: stop] when Creator says ANY of: "stop my home lab", "shut down the homelab",'
+        '\n  "stop the homelab", "power off the homelab", "turn off the homelab", "kill the homelab".'
+        '\nNEVER use [DESKTOP: open] for homelab — homelab is NOT an application to open.'
         '\n'
         '\n### [WATCH: service] — monitor a service/process'
         '\nEmit when Creator asks to monitor something, or when it would be useful (e.g. "keep an eye on nginx", "let me know if X crashes").'
@@ -4374,6 +4379,38 @@ class Session:
 
             if tools:
                 ctx = '\n\n'.join(f'[{k}]:\n{v}' for k, v in tools.items())
+                _is_brief = (
+                    all('[DESKTOP:' in k for k in tools) or
+                    all('[ANDROID:' in k for k in tools) or
+                    all('[HOMELAB:' in k for k in tools) or
+                    all('[HA:' in k for k in tools)
+                )
+                if _is_brief:
+                    brief_sys = (
+                        'Output ONLY the result in one sentence under 10 words. '
+                        'No names. No personality. No fluff. '
+                        'Examples: "Done." "Timer set for 5 seconds." "Opened Steam." '
+                        '"Homelab startup sequence initiated."'
+                    )
+                    brief = _stream_chat(
+                        [{'role': 'system', 'content': brief_sys},
+                         {'role': 'user',   'content': ctx[:400]}],
+                        MODEL_FAST, 0.0, num_predict=25
+                    ) or 'Done.'
+                    self._tx(f'\n{" " * INDENT}{OR}{brief}{RST}\n')
+                    _cli_tts_speak(brief)
+                    clean = brief
+                    with _shared_lock:
+                        _shared_hist.append({'role': 'assistant', 'content': clean})
+                    _maybe_summarize_history()
+                    try:
+                        self.db.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
+                            (self._session_id, 'user', user_msg))
+                        self.db.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
+                            (self._session_id, 'assistant', clean))
+                        self.db.commit()
+                    except Exception: pass
+                    continue
                 fmsgs = msgs + [{'role': 'user', 'content': (
                     f'[Tool results]:\n{ctx}\n\nOriginal question: {inp}\n\n'
                     'Answer the original question fully and accurately using the tool results. '
@@ -6726,12 +6763,15 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         ctx = '\n\n'.join(f'[{k}]:\n{v}' for k, v in tools.items())
         is_desktop_only = all('[DESKTOP:' in k for k in tools)
         is_android_only = all('[ANDROID:' in k for k in tools)
-        if is_desktop_only or is_android_only:
+        is_homelab_only = all('[HOMELAB:' in k for k in tools)
+        is_ha_only      = all('[HA:' in k for k in tools)
+        if is_desktop_only or is_android_only or is_homelab_only or is_ha_only:
             # Hard-cap: temperature 0, 25-token limit, no LLM personality.
             brief_sys = (
                 'Output ONLY the result in one sentence under 10 words. '
                 'No names. No personality. No fluff. '
-                'Examples: "Done." "Timer set for 5 seconds." "Opened Steam." "Alarm set for 7 AM."'
+                'Examples: "Done." "Timer set for 5 seconds." "Opened Steam." "Alarm set for 7 AM." '
+                '"Homelab startup sequence initiated." "Homelab shutdown sequence initiated."'
             )
             brief = _stream_chat(
                 [{'role': 'system', 'content': brief_sys},
