@@ -5342,7 +5342,7 @@ function send(){
             if(!p.startsWith('data: '))continue;
             var data=p.substring(6);
             if(data==='[DONE]'){finalize(nc,buf);return;}
-            if(data==='[CLEAR]'){buf='';_audioQueue=[];nc.innerHTML='<span class=cursor>&#x25ae;</span>';}
+            if(data==='[CLEAR]'){buf='';_audioQueue=[];_audioPlaying=false;if(_audioCtx&&_audioCtx.state!=='closed'){try{_audioCtx.suspend();}catch(e){}setTimeout(function(){try{if(_audioCtx)_audioCtx.resume();}catch(e){}},50);}nc.innerHTML='<span class=cursor>&#x25ae;</span>';}
             else if(data.startsWith('[AUDIOREADY:')){
               var am=data.match(/\[AUDIOREADY:(\d+)\]/);
               if(am)_queueAudio(parseInt(am[1]));
@@ -6873,17 +6873,19 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
 
     yield '\x00KA\x00'  # immediate keep-alive so browser knows we're alive before inference starts
     resp = None; model_used = None
-    # Buffer tokens — do NOT stream or speak yet.  We need to see the full response
-    # before deciding whether tools were invoked.  Keep-alives are passed through so
-    # the SSE connection stays alive during long CPU inference.
+
+    # Stream tokens live and feed TTS sentence-by-sentence as they arrive.
+    tts_sa = _SentenceAccum() if voice_on else None
     _buf_toks = []
-    for tok in _live_stream(msgs, images, tts_sa=None):
+    for tok in _live_stream(msgs, images, tts_sa=tts_sa):
         if isinstance(tok, tuple) and tok[0] == '__result__':
             _, resp, model_used, _ = tok
         elif tok == '\x00KA\x00':
-            yield tok   # keep connection alive
+            yield tok
         else:
-            _buf_toks.append(tok)
+            if not tok.startswith('[AUDIOREADY:'):
+                _buf_toks.append(tok)
+            yield tok   # stream live to client (text tokens + audio-ready markers)
 
     if resp is None:
         if voice_on: tts_in_q.put(None)
@@ -6895,9 +6897,10 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                                        session_id=_web_session_id)
     finally:
         _pt_db.close()
+
     if tools:
-        # Action response — discard the buffered verbose text entirely.
-        # Yield [CLEAR] then a single brief confirmation line.
+        # Stop the streaming TTS worker — [CLEAR] tells the client to discard queued audio.
+        if voice_on: tts_in_q.put(None)
         yield '[CLEAR]'
         ctx = '\n\n'.join(f'[{k}]:\n{v}' for k, v in tools.items())
         is_desktop_only = all('[DESKTOP:' in k for k in tools)
@@ -6905,7 +6908,6 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         is_homelab_only = all('[HOMELAB:' in k for k in tools)
         is_ha_only      = all('[HA:' in k for k in tools)
         if is_desktop_only or is_android_only or is_homelab_only or is_ha_only:
-            # Hard-cap: temperature 0, 25-token limit, no LLM personality.
             brief_sys = (
                 'Output ONLY the result in one sentence under 10 words. '
                 'No names. No personality. No fluff. '
@@ -6918,8 +6920,15 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                 MODEL_FAST, 0.0, num_predict=25
             ) or 'Done.'
             yield brief
-            if voice_on: _speak(brief)
-            # Show tool details below the confirmation (not spoken — TTS already sent)
+            if voice_on:
+                wav = _tts_synth(brief)
+                if wav:
+                    sid = _next_audio_seq()
+                    with _audio_store_lk:
+                        _audio_store[sid] = (wav, time.time())
+                        old = [k for k, (_, ts) in _audio_store.items() if time.time() - ts > 90]
+                        for k in old: del _audio_store[k]
+                    yield f'[AUDIOREADY:{sid}]'
             tool_detail = '\n' + '\n'.join(f'↳ {k}' for k in tools)
             yield tool_detail
             clean = brief
@@ -6930,41 +6939,52 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
                 'Stay in character as NeXiS. Do not mention that you ran tools.'
             )}]
             collected2 = []
-            for tok in _live_stream(fmsgs, tts_sa=_SentenceAccum() if voice_on else None):
+            for tok in _live_stream(fmsgs, tts_sa=None):   # worker stopped; speak after
                 if isinstance(tok, tuple) and tok[0] == '__result__':
                     _, clean, _mu, _s = tok
                     collected2_str = ''.join(collected2); clean = clean or collected2_str
+                elif tok == '\x00KA\x00':
+                    yield tok
                 else:
                     collected2.append(tok); yield tok
+            if voice_on and clean:
+                sa2 = _SentenceAccum()
+                for ch in clean:
+                    sent = sa2.feed(ch)
+                    if sent:
+                        wav = _tts_synth(sent)
+                        if wav:
+                            sid = _next_audio_seq()
+                            with _audio_store_lk:
+                                _audio_store[sid] = (wav, time.time())
+                            yield f'[AUDIOREADY:{sid}]'
+                tail2 = sa2.flush()
+                if tail2:
+                    wav = _tts_synth(tail2)
+                    if wav:
+                        sid = _next_audio_seq()
+                        with _audio_store_lk:
+                            _audio_store[sid] = (wav, time.time())
+                        yield f'[AUDIOREADY:{sid}]'
     else:
-        # No tools — flush the buffered text to client now, then speak it.
-        full_text = ''.join(_buf_toks)
-        if full_text:
-            yield full_text
-        if voice_on and resp:
-            sa = _SentenceAccum()
-            for ch in resp:
-                sent = sa.feed(ch)
-                if sent: _speak(sent)
-            tail = sa.flush()
-            if tail: _speak(tail)
-
-    if voice_on:
-        tts_in_q.put(None)
-        t0 = time.time()
-        while time.time() - t0 < 30:
-            try:
-                item = tts_out_q.get(timeout=0.2)
-                if item is None: break
-                sid, wav = item
-                if wav:
-                    with _audio_store_lk:
-                        _audio_store[sid] = (wav, time.time())
-                        old = [k for k, (_, ts) in _audio_store.items() if time.time() - ts > 90]
-                        for k in old: del _audio_store[k]
-                    yield f'[AUDIOREADY:{sid}]'
-            except _queue.Empty:
-                pass
+        # No tools — already streamed live; drain remaining TTS the worker queued.
+        clean = resp
+        if voice_on:
+            tts_in_q.put(None)
+            t0 = time.time()
+            while time.time() - t0 < 30:
+                try:
+                    item = tts_out_q.get(timeout=0.2)
+                    if item is None: break
+                    sid, wav = item
+                    if wav:
+                        with _audio_store_lk:
+                            _audio_store[sid] = (wav, time.time())
+                            old = [k for k, (_, ts) in _audio_store.items() if time.time() - ts > 90]
+                            for k in old: del _audio_store[k]
+                        yield f'[AUDIOREADY:{sid}]'
+                except _queue.Empty:
+                    pass
 
     final_text = clean or resp
     _web_chat_stream._last = (user_content, final_text)
