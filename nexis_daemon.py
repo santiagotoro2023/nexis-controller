@@ -3317,10 +3317,11 @@ def _ha_login(ha_url: str, username: str, password: str) -> tuple:
     if not flow_id:
         return '', f'No flow_id in response: {flow}'
 
-    # Step 2 — submit credentials
+    # Step 2 — submit credentials (client_id is required here too)
     result, err2 = _post_json(f'{ha_url}/auth/login_flow/{flow_id}', {
-        'username': username,
-        'password': password,
+        'client_id': client_id,
+        'username':  username,
+        'password':  password,
     })
     if err2:
         return '', f'Credential submission failed: {err2}'
