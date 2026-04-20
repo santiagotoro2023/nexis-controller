@@ -14,8 +14,9 @@ DATA      = HOME / '.local/share/nexis'
 DB_PATH   = DATA / 'memory' / 'nexis.db'
 SOCK_PATH = Path('/run/nexis/nexis.sock')
 LOG_PATH  = DATA / 'logs' / 'daemon.log'
-AUTH_FILE  = CONF / 'auth.json'
-SCHED_FILE = CONF / 'schedules.json'
+AUTH_FILE         = CONF / 'auth.json'
+SCHED_FILE        = CONF / 'schedules.json'
+DEV_PASSWORDS_FILE = CONF / 'device_passwords.json'
 TLS_KEY    = CONF / 'server.key'
 TLS_CERT   = CONF / 'server.crt'
 
@@ -217,6 +218,19 @@ def _auth_set_password(new_password: str):
     creds = _auth_load()
     creds['hash'] = hashlib.sha256(new_password.encode()).hexdigest()
     AUTH_FILE.write_text(json.dumps(creds, indent=2))
+
+# ── Device unlock passwords (server-side, synced to all clients) ──────────────
+
+def _dev_passwords_load() -> dict:
+    try:
+        if DEV_PASSWORDS_FILE.exists():
+            return json.loads(DEV_PASSWORDS_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _dev_passwords_save(passwords: dict):
+    DEV_PASSWORDS_FILE.write_text(json.dumps(passwords, indent=2))
 
 def _session_create() -> str:
     token = secrets.token_hex(32)
@@ -1228,10 +1242,6 @@ def _sched_execute(sched: dict):
                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
-        # ntfy push notification (configure ntfy_topic in integrations.json)
-        short_ntfy = re.sub(r'\*\*|`|#', '', result)[:300]
-        threading.Thread(target=_ntfy_push, args=(f'NeXiS — {name}', short_ntfy),
-                         daemon=True).start()
     except Exception as e:
         _log(f'Scheduler execute "{name}": {e}', 'WARN')
 
@@ -2012,18 +2022,6 @@ def _generate_session_title(session_id: str, first_user_msg: str):
         _log(f'Session title: {title}')
     except Exception as e:
         _log(f'Title gen: {e}', 'WARN')
-
-def _ntfy_push(title: str, body: str):
-    """Send a push notification via ntfy.sh (configure ntfy_topic in integrations.json)."""
-    topic = _INTEG.get('ntfy_topic', '')
-    if not topic: return
-    url = topic if topic.startswith('http') else f'https://ntfy.sh/{topic}'
-    try:
-        req = urllib.request.Request(url, data=body.encode(), method='POST',
-            headers={'Title': title, 'Priority': 'default', 'Content-Type': 'text/plain'})
-        urllib.request.urlopen(req, timeout=6)
-    except Exception as e:
-        _log(f'ntfy: {e}', 'WARN')
 
 
 def _get_memories(conn, limit=20):
@@ -3694,17 +3692,6 @@ def _monitor_worker():
             for alert in alerts:
                 _log(f'Monitor: {alert["msg"]}')
                 _sync_broadcast({'alert': alert})
-                ntfy = _INTEG.get('ntfy_topic')
-                if ntfy:
-                    try:
-                        req = urllib.request.Request(
-                            f'https://ntfy.sh/{ntfy}',
-                            data=alert['msg'].encode(),
-                            headers={'Title': 'NeXiS Monitor', 'Priority': 'high', 'Tags': 'warning,computer'},
-                            method='POST')
-                        urllib.request.urlopen(req, timeout=5)
-                    except Exception:
-                        pass
         except Exception as e:
             _log(f'Monitor error: {e}', 'WARN')
             time.sleep(interval)
@@ -7035,6 +7022,8 @@ def _start_web():
                     ddb = _db()
                     self._send(200, json.dumps({'devices': _devices_list(ddb)}), 'application/json')
                     ddb.close()
+                elif path == '/api/device/passwords':
+                    self._send(200, json.dumps(_dev_passwords_load()), 'application/json')
                 elif path == '/api/alarms':
                     adb = _db()
                     rows = adb.execute(
@@ -7558,6 +7547,18 @@ def _start_web():
                                     (dev_id, action, cmd_arg))
                         cdb.commit(); cdb.close()
                         self._send(200, json.dumps({'ok': True, 'queued': action}), 'application/json')
+
+                elif path == '/api/device/password':
+                    data   = json.loads(body) if body else {}
+                    dev_id = data.get('device_id', '').strip()
+                    pw     = data.get('password', '')
+                    if not dev_id:
+                        self._send(400, json.dumps({'error': 'device_id required'}), 'application/json')
+                    else:
+                        passwords = _dev_passwords_load()
+                        passwords[dev_id] = pw
+                        _dev_passwords_save(passwords)
+                        self._send(200, json.dumps({'ok': True}), 'application/json')
 
                 elif path == '/api/wol':
                     data   = json.loads(body) if body else {}
