@@ -3288,7 +3288,7 @@ _ha_bearer_cache      = {'token': None, 'expires': 0.0}
 _ha_bearer_cache_lock = threading.Lock()
 
 def _ha_get_bearer() -> str:
-    """Return a valid HA bearer token, fetching/refreshing via password grant as needed."""
+    """Return a valid HA bearer token via the modern login-flow + code-exchange auth."""
     cfg      = _INTEG.get('home_assistant', {})
     ha_url   = cfg.get('url', '').rstrip('/')
     username = cfg.get('username', '')
@@ -3301,19 +3301,51 @@ def _ha_get_bearer() -> str:
             return _ha_bearer_cache['token']
         try:
             import urllib.parse as _up
-            data = _up.urlencode({
-                'grant_type': 'password',
-                'username':   username,
-                'password':   password,
-                'client_id':  'http://localhost/',
+            client_id = 'http://localhost/'
+
+            # Step 1 — init login flow
+            body1 = json.dumps({
+                'client_id':    client_id,
+                'handler':      ['homeassistant', None],
+                'redirect_uri': client_id,
             }).encode()
-            req = urllib.request.Request(
-                f'{ha_url}/auth/token', data=data,
+            req1 = urllib.request.Request(
+                f'{ha_url}/auth/login_flow', data=body1,
+                headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req1, timeout=8) as r:
+                flow = json.loads(r.read())
+            flow_id = flow['flow_id']
+
+            # Step 2 — submit username + password
+            body2 = json.dumps({
+                'client_id': client_id,
+                'username':  username,
+                'password':  password,
+            }).encode()
+            req2 = urllib.request.Request(
+                f'{ha_url}/auth/login_flow/{flow_id}', data=body2,
+                headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req2, timeout=8) as r:
+                result = json.loads(r.read())
+            if result.get('type') != 'create_entry':
+                return ''
+            code = result.get('result', '')
+            if not code:
+                return ''
+
+            # Step 3 — exchange code for access token
+            body3 = _up.urlencode({
+                'grant_type': 'authorization_code',
+                'code':       code,
+                'client_id':  client_id,
+            }).encode()
+            req3 = urllib.request.Request(
+                f'{ha_url}/auth/token', data=body3,
                 headers={'Content-Type': 'application/x-www-form-urlencoded'})
-            with urllib.request.urlopen(req, timeout=8) as r:
-                resp = json.loads(r.read())
-            token      = resp.get('access_token', '')
-            expires_in = resp.get('expires_in', 1800)
+            with urllib.request.urlopen(req3, timeout=8) as r:
+                tokens = json.loads(r.read())
+            token      = tokens.get('access_token', '')
+            expires_in = tokens.get('expires_in', 1800)
             _ha_bearer_cache['token']   = token
             _ha_bearer_cache['expires'] = now + expires_in
             return token
@@ -3363,12 +3395,15 @@ def _ha_switch_set(entity_id: str, on: bool) -> bool:
     except Exception:
         return False
 
+_HOMELAB_START_DELAY = 30   # seconds between main ON → computer ON
+_HOMELAB_STOP_DELAY  = 10   # seconds between computer OFF → main OFF
+
 def _homelab_start_sequence():
     global _homelab_busy, _homelab_seq
     cfg      = _INTEG.get('home_assistant', {})
     main_sw  = cfg.get('main_switch',     'switch.homelab_main_switch')
     comp_sw  = cfg.get('computer_switch', 'switch.homelab_computer_switch')
-    delay    = int(cfg.get('start_delay', 30))
+    delay    = _HOMELAB_START_DELAY
     with _homelab_lock:
         _homelab_busy = True; _homelab_seq = 'starting'
     try:
@@ -3399,7 +3434,7 @@ def _homelab_stop_sequence():
     cfg     = _INTEG.get('home_assistant', {})
     main_sw = cfg.get('main_switch',     'switch.homelab_main_switch')
     comp_sw = cfg.get('computer_switch', 'switch.homelab_computer_switch')
-    delay   = int(cfg.get('stop_delay', 10))
+    delay   = _HOMELAB_STOP_DELAY
     with _homelab_lock:
         _homelab_busy = True; _homelab_seq = 'stopping'
     try:
@@ -6994,8 +7029,6 @@ def _start_web():
                         'password':        cfg.get('password', ''),
                         'main_switch':     cfg.get('main_switch',     'switch.homelab_main_switch'),
                         'computer_switch': cfg.get('computer_switch', 'switch.homelab_computer_switch'),
-                        'start_delay':     cfg.get('start_delay',     30),
-                        'stop_delay':      cfg.get('stop_delay',      10),
                     }), 'application/json')
                 elif path == '/api/ha/status':
                     cfg     = _INTEG.get('home_assistant', {})
@@ -7465,10 +7498,6 @@ def _start_web():
                     ha    = dict(integ.get('home_assistant', {}))
                     for k in ('url', 'username', 'password', 'main_switch', 'computer_switch'):
                         if k in data: ha[k] = str(data[k]).strip()
-                    for k in ('start_delay', 'stop_delay'):
-                        if k in data:
-                            try: ha[k] = max(0, int(data[k]))
-                            except Exception: pass
                     integ['home_assistant'] = ha
                     _save_integ(integ)
                     # Invalidate token cache so next call re-authenticates with new creds
