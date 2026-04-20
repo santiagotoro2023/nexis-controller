@@ -259,24 +259,38 @@ def _session_from_request(headers) -> str:
     return ''
 
 
-# ── Bearer token (persistent API token for Android / API clients) ─────────────
-_API_TOKEN_KEY = 'api_token'
-
-def _api_token_get() -> str | None:
-    return _auth_load().get(_API_TOKEN_KEY)
+# ── Bearer tokens (persistent API tokens for Android / desktop / API clients) ──
+# Multiple tokens are kept so simultaneous device logins don't invalidate each other.
+_API_TOKENS_KEY = 'api_tokens'   # list of {"token": str, "exp": float}
+_API_TOKEN_TTL  = 86400 * 90     # 90 days per token
 
 def _api_token_create() -> str:
     token = secrets.token_hex(32)
     creds = _auth_load()
-    creds[_API_TOKEN_KEY] = token
+    now   = time.time()
+    # Migrate legacy single-token format
+    if 'api_token' in creds:
+        old = creds.pop('api_token')
+        creds.setdefault(_API_TOKENS_KEY, []).append({'token': old, 'exp': now + _API_TOKEN_TTL})
+    tokens = creds.get(_API_TOKENS_KEY, [])
+    tokens = [t for t in tokens if t.get('exp', 0) > now]   # prune expired
+    tokens.append({'token': token, 'exp': now + _API_TOKEN_TTL})
+    creds[_API_TOKENS_KEY] = tokens
     AUTH_FILE.write_text(json.dumps(creds, indent=2))
     return token
 
 def _api_token_valid(token: str) -> bool:
     if not token:
         return False
-    stored = _api_token_get()
-    return stored is not None and secrets.compare_digest(stored, token)
+    creds = _auth_load()
+    now   = time.time()
+    # Support legacy single-token format during migration window
+    if 'api_token' in creds and secrets.compare_digest(creds['api_token'], token):
+        return True
+    for entry in creds.get(_API_TOKENS_KEY, []):
+        if entry.get('exp', 0) > now and secrets.compare_digest(entry['token'], token):
+            return True
+    return False
 
 
 # ── TLS certificate (self-signed, generated once on first run) ────────────────
