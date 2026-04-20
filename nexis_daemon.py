@@ -3287,8 +3287,75 @@ def _ha_action(action: str, entity: str, value: str = '') -> str:
 _ha_bearer_cache      = {'token': None, 'expires': 0.0}
 _ha_bearer_cache_lock = threading.Lock()
 
+def _ha_login(ha_url: str, username: str, password: str) -> tuple:
+    """Attempt HA login. Returns (access_token, error_msg). On success error_msg is ''."""
+    import urllib.parse as _up
+    import urllib.error as _ue
+    client_id = 'http://localhost/'
+
+    def _post_json(url, payload):
+        data = json.dumps(payload).encode()
+        req  = urllib.request.Request(url, data=data,
+                                      headers={'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                return json.loads(r.read()), None
+        except _ue.HTTPError as e:
+            try:   body = json.loads(e.read())
+            except Exception: body = {}
+            return body, f'HTTP {e.code}'
+
+    # Step 1 — init login flow
+    flow, err = _post_json(f'{ha_url}/auth/login_flow', {
+        'client_id':    client_id,
+        'handler':      ['homeassistant', None],
+        'redirect_uri': client_id,
+    })
+    if err:
+        return '', f'Could not start login flow: {err} — is the HA URL correct?'
+    flow_id = flow.get('flow_id', '')
+    if not flow_id:
+        return '', f'No flow_id in response: {flow}'
+
+    # Step 2 — submit credentials
+    result, err2 = _post_json(f'{ha_url}/auth/login_flow/{flow_id}', {
+        'username': username,
+        'password': password,
+    })
+    if err2:
+        return '', f'Credential submission failed: {err2}'
+    if result.get('type') != 'create_entry':
+        errors = result.get('errors', {})
+        err_code = errors.get('base', '') if isinstance(errors, dict) else str(errors)
+        return '', f'Login rejected by HA (type={result.get("type")}, error={err_code or "unknown"})'
+    code = result.get('result', '')
+    if not code:
+        return '', f'No auth code in HA response: {result}'
+
+    # Step 3 — exchange code for access token
+    try:
+        body3 = _up.urlencode({
+            'grant_type': 'authorization_code',
+            'code':       code,
+            'client_id':  client_id,
+        }).encode()
+        req3 = urllib.request.Request(
+            f'{ha_url}/auth/token', data=body3,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        with urllib.request.urlopen(req3, timeout=8) as r:
+            tokens = json.loads(r.read())
+    except Exception as e:
+        return '', f'Token exchange failed: {e}'
+
+    token      = tokens.get('access_token', '')
+    expires_in = tokens.get('expires_in', 1800)
+    if not token:
+        return '', f'No access_token in token response: {tokens}'
+    return token, ''
+
+
 def _ha_get_bearer() -> str:
-    """Return a valid HA bearer token via the modern login-flow + code-exchange auth."""
+    """Return a valid HA bearer token (cached). Silent on failure."""
     cfg      = _INTEG.get('home_assistant', {})
     ha_url   = cfg.get('url', '').rstrip('/')
     username = cfg.get('username', '')
@@ -3299,58 +3366,11 @@ def _ha_get_bearer() -> str:
         now = time.monotonic()
         if _ha_bearer_cache['token'] and _ha_bearer_cache['expires'] > now + 60:
             return _ha_bearer_cache['token']
-        try:
-            import urllib.parse as _up
-            client_id = 'http://localhost/'
-
-            # Step 1 — init login flow
-            body1 = json.dumps({
-                'client_id':    client_id,
-                'handler':      ['homeassistant', None],
-                'redirect_uri': client_id,
-            }).encode()
-            req1 = urllib.request.Request(
-                f'{ha_url}/auth/login_flow', data=body1,
-                headers={'Content-Type': 'application/json'})
-            with urllib.request.urlopen(req1, timeout=8) as r:
-                flow = json.loads(r.read())
-            flow_id = flow['flow_id']
-
-            # Step 2 — submit username + password
-            body2 = json.dumps({
-                'client_id': client_id,
-                'username':  username,
-                'password':  password,
-            }).encode()
-            req2 = urllib.request.Request(
-                f'{ha_url}/auth/login_flow/{flow_id}', data=body2,
-                headers={'Content-Type': 'application/json'})
-            with urllib.request.urlopen(req2, timeout=8) as r:
-                result = json.loads(r.read())
-            if result.get('type') != 'create_entry':
-                return ''
-            code = result.get('result', '')
-            if not code:
-                return ''
-
-            # Step 3 — exchange code for access token
-            body3 = _up.urlencode({
-                'grant_type': 'authorization_code',
-                'code':       code,
-                'client_id':  client_id,
-            }).encode()
-            req3 = urllib.request.Request(
-                f'{ha_url}/auth/token', data=body3,
-                headers={'Content-Type': 'application/x-www-form-urlencoded'})
-            with urllib.request.urlopen(req3, timeout=8) as r:
-                tokens = json.loads(r.read())
-            token      = tokens.get('access_token', '')
-            expires_in = tokens.get('expires_in', 1800)
+        token, _ = _ha_login(ha_url, username, password)
+        if token:
             _ha_bearer_cache['token']   = token
-            _ha_bearer_cache['expires'] = now + expires_in
-            return token
-        except Exception:
-            return ''
+            _ha_bearer_cache['expires'] = now + 1800
+        return token
 
 # ── HomeLab power-sequencing (via Home Assistant REST API) ────────────────────
 _homelab_log  = []            # list of {'ts': float, 'msg': str} — capped at 200
@@ -7513,17 +7533,22 @@ def _start_web():
                     self._send(200, json.dumps({'ok': True, 'result': result}), 'application/json')
 
                 elif path == '/api/ha/test':
-                    cfg    = _INTEG.get('home_assistant', {})
-                    ha_url = cfg.get('url', '').rstrip('/')
-                    if not ha_url or not cfg.get('username') or not cfg.get('password'):
+                    cfg      = _INTEG.get('home_assistant', {})
+                    ha_url   = cfg.get('url', '').rstrip('/')
+                    username = cfg.get('username', '')
+                    password = cfg.get('password', '')
+                    if not ha_url or not username or not password:
                         self._send(200, json.dumps({'ok': False,
                             'message': 'URL, username and password must be set'}), 'application/json')
                     else:
-                        ha_tok = _ha_get_bearer()
+                        ha_tok, err = _ha_login(ha_url, username, password)
                         if not ha_tok:
-                            self._send(200, json.dumps({'ok': False,
-                                'message': 'Login failed — check username and password'}), 'application/json')
+                            self._send(200, json.dumps({'ok': False, 'message': err}), 'application/json')
                         else:
+                            # Invalidate cache so next real call uses fresh token
+                            with _ha_bearer_cache_lock:
+                                _ha_bearer_cache['token']   = ha_tok
+                                _ha_bearer_cache['expires'] = time.monotonic() + 1800
                             try:
                                 headers = {'Authorization': f'Bearer {ha_tok}'}
                                 req = urllib.request.Request(f'{ha_url}/api/', headers=headers)
