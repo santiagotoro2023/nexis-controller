@@ -3881,9 +3881,24 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
             else:
                 tools[m.group(0)] = 'No schedules configured.'
 
+    # Fallback: if no [HOMELAB:] tag was emitted but user clearly asked for homelab action,
+    # execute it directly so the model can't accidentally route it to desktop.
+    _HOMELAB_PAT = re.compile(r'\bhome\s*lab\b|\bhomelab\b', re.IGNORECASE)
+    if user_text and not any('[HOMELAB:' in k for k in tools) and _HOMELAB_PAT.search(user_text):
+        if re.search(r'\b(?:stop|shut\s*down|power\s*off|turn\s*off)\b', user_text, re.IGNORECASE):
+            _hl_action = 'stop'
+        elif re.search(r'\b(?:start|power\s*on|turn\s*on|boot|spin\s*up)\b', user_text, re.IGNORECASE):
+            _hl_action = 'start'
+        else:
+            _hl_action = None
+        if _hl_action:
+            result = _homelab_action(_hl_action)
+            if result: tools[f'[HOMELAB: {_hl_action}]'] = result
+
     # Fallback: if no [DESKTOP:] tag was emitted but the user clearly asked to open something,
     # execute it directly rather than waiting for a second model pass.
-    if user_text and not any('[DESKTOP:' in k for k in tools):
+    # Skip if homelab tags are already present — homelab intent must not bleed into desktop.
+    if user_text and not any('[DESKTOP:' in k for k in tools) and not any('[HOMELAB:' in k for k in tools):
         tab_req = re.search(r'\b(?:open|new)\b.{0,15}\b(?:tab|new tab)\b', user_text, re.IGNORECASE)
         if tab_req:
             result = _desktop('tab', '')
@@ -3894,8 +3909,10 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
                 user_text, re.IGNORECASE)
             if open_m:
                 target = open_m.group(1).strip().rstrip('?!.')
-                result = _desktop('open', target)
-                if result: tools[f'[DESKTOP: open | {target}]'] = result
+                # Never let "home lab" or similar bleed into desktop open
+                if not _HOMELAB_PAT.search(target):
+                    result = _desktop('open', target)
+                    if result: tools[f'[DESKTOP: open | {target}]'] = result
 
     for m in re.finditer(r'\[INDEX:\s*([^\]]+)\]', text, re.IGNORECASE):
         path_arg = m.group(1).strip()
