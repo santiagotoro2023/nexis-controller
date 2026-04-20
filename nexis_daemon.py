@@ -4742,6 +4742,30 @@ class Session:
             else:
                 self._tx(f'\x1b[38;5;160m  passwords do not match{_RST}\n')
 
+        elif c == 'homelab':
+            sub = parts[1].lower() if len(parts) > 1 else ''
+            if sub in ('start', 'stop', 'main_on', 'main_off', 'computer_on', 'computer_off'):
+                self._tx(f'{_DIM}  homelab {sub}...{_RST}\n')
+                def _do_homelab(action=sub):
+                    result = _homelab_action(action)
+                    self._tx(_md_to_terminal(result) + '\n')
+                threading.Thread(target=_do_homelab, daemon=True).start()
+            elif sub == 'status':
+                with _homelab_lock:
+                    log = list(_homelab_log[-10:])
+                    busy = _homelab_busy
+                    seq  = _homelab_seq
+                cfg = _load_integ()
+                main_id = cfg.get('ha_main_switch', '')
+                comp_id = cfg.get('ha_computer_switch', '')
+                main_st = _ha_switch_state(main_id) if main_id else 'unconfigured'
+                comp_st = _ha_switch_state(comp_id) if comp_id else 'unconfigured'
+                self._tx(f'{_DIM}  main: {main_st}  computer: {comp_st}  busy: {busy}  seq: {seq or "—"}{_RST}\n')
+                for e in log:
+                    self._tx(f'{_DIM}    {e["msg"]}{_RST}\n')
+            else:
+                self._tx(f'{_DIM}  //homelab <start|stop|status|main_on|main_off|computer_on|computer_off>{_RST}\n')
+
         elif c == 'help':
             self._tx(
                 f'{_DIM}'
@@ -4771,6 +4795,7 @@ class Session:
                 '  //sh <command>     run shell command\n'
                 '  //gh <command>     run gh CLI command\n'
                 '  //repo <r> [path]  read GitHub repo files\n'
+                '  //homelab <start|stop|status>  HomeLab power control\n'
                 '  //history          recent chat sessions\n'
                 '  //passwd           change password\n'
                 '  //exit             disconnect\n'
@@ -6153,6 +6178,7 @@ def _web_cmd(cmd) -> str:
             '`model [fast|deep|code]` — view or switch model',
             '`history` — recent chat sessions',
             '`devices` — registered device inventory',
+            '`homelab <start|stop|status>` — HomeLab power control',
         ]
 
     elif c == 'memory':
@@ -6323,6 +6349,28 @@ def _web_cmd(cmd) -> str:
                     f'— {status}{role_str}{batt}'
                 )
                 lines.append(f'  ip: {d["ip"] or "—"} · last seen: {str(d["last_seen"] or "")[:16]} · id: {d["device_id"][:8]}…')
+
+    elif c == 'homelab':
+        sub = parts[1].lower() if len(parts) > 1 else ''
+        if sub in ('start', 'stop', 'main_on', 'main_off', 'computer_on', 'computer_off'):
+            result = _homelab_action(sub)
+            lines = [result]
+        elif sub == 'status':
+            cfg = _load_integ()
+            main_id = cfg.get('ha_main_switch', '')
+            comp_id = cfg.get('ha_computer_switch', '')
+            main_st = _ha_switch_state(main_id) if main_id else 'unconfigured'
+            comp_st = _ha_switch_state(comp_id) if comp_id else 'unconfigured'
+            with _homelab_lock:
+                log  = list(_homelab_log[-10:])
+                busy = _homelab_busy
+                seq  = _homelab_seq
+            lines = [f'**HomeLab** — main: `{main_st}`  computer: `{comp_st}`  busy: {busy}  seq: {seq or "—"}']
+            if log:
+                lines.append('')
+                lines += [f'- {e["msg"]}' for e in log]
+        else:
+            lines = ['Usage: `//homelab <start|stop|status|main_on|main_off|computer_on|computer_off>`']
 
     elif c in ('exit', 'quit', 'bye', 'disconnect'):
         lines = ['Use the app navigation to disconnect.']
