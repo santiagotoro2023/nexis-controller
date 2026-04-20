@@ -3416,80 +3416,145 @@ def _ha_switch_set(entity_id: str, on: bool) -> bool:
     except Exception:
         return False
 
-_HOMELAB_START_DELAY = 30   # seconds between main ON → computer ON
-_HOMELAB_STOP_DELAY  = 10   # seconds between computer OFF → main OFF
+_HOMELAB_START_DELAY = 30   # seconds: main ON → computer ON
+_HOMELAB_STOP_DELAY  = 10   # seconds: computer OFF → main OFF
+_homelab_abort       = threading.Event()
+
+
+def _homelab_emergency_stop(main_sw: str, comp_sw: str):
+    """Cut both switches immediately — called when startup fails mid-way."""
+    _homelab_log_add('⚡ Emergency shutdown: cutting computer switch…')
+    _ha_switch_set(comp_sw, False)
+    time.sleep(2)
+    _homelab_log_add('⚡ Emergency shutdown: cutting main switch…')
+    if _ha_switch_set(main_sw, False):
+        _homelab_log_add('Emergency shutdown complete.')
+    else:
+        _homelab_log_add('⚠ CRITICAL: could not cut main switch — MANUAL INTERVENTION REQUIRED')
+
 
 def _homelab_start_sequence():
     global _homelab_busy, _homelab_seq
-    cfg      = _INTEG.get('home_assistant', {})
-    main_sw  = cfg.get('main_switch',     'switch.homelab_main_switch')
-    comp_sw  = cfg.get('computer_switch', 'switch.homelab_computer_switch')
-    delay    = _HOMELAB_START_DELAY
+    cfg     = _INTEG.get('home_assistant', {})
+    main_sw = cfg.get('main_switch',     'switch.homelab_main_switch')
+    comp_sw = cfg.get('computer_switch', 'switch.homelab_computer_switch')
+    _homelab_abort.clear()
     with _homelab_lock:
         _homelab_busy = True; _homelab_seq = 'starting'
+    main_on = False
     try:
         _homelab_log_add('Starting HomeLab sequence…')
-        _homelab_log_add('Enabling main switch…')
-        if _ha_switch_set(main_sw, True):
-            _homelab_log_add('Main switch ON ✓')
-        else:
-            _homelab_log_add('Main switch error — check HA configuration'); return
-        _homelab_log_add(f'Waiting {delay}s before enabling computer switch…')
-        elapsed = 0
-        while elapsed < delay:
-            step     = min(5, delay - elapsed)
-            time.sleep(step); elapsed += step
-            remaining = delay - elapsed
-            if remaining > 0: _homelab_log_add(f'{remaining}s remaining…')
-        _homelab_log_add('Enabling computer switch…')
-        if _ha_switch_set(comp_sw, True):
-            _homelab_log_add('Computer switch ON ✓')
-            _homelab_log_add('HomeLab started.')
-        else:
-            _homelab_log_add('Computer switch error — check HA configuration')
+
+        # Safety: computer switch MUST be off before main turns on (breaker risk)
+        comp_pre = _ha_switch_state(comp_sw)
+        if comp_pre == 'on':
+            _homelab_log_add('⚠ ABORT: computer switch is already ON — refusing to start (breaker risk)')
+            return
+        if _homelab_abort.is_set():
+            _homelab_log_add('Aborted before start.'); return
+
+        # Turn main ON
+        _homelab_log_add('Turning main switch ON…')
+        if not _ha_switch_set(main_sw, True):
+            _homelab_log_add('ERROR: failed to turn main switch ON — aborting'); return
+        main_on = True
+        _homelab_log_add('Main switch ON ✓')
+
+        # Wait 30 s — check abort every second
+        _homelab_log_add(f'Waiting {_HOMELAB_START_DELAY}s before turning computer ON…')
+        for i in range(_HOMELAB_START_DELAY):
+            if _homelab_abort.is_set():
+                _homelab_log_add('Abort received — running emergency shutdown…')
+                raise RuntimeError('aborted')
+            time.sleep(1)
+            remaining = _HOMELAB_START_DELAY - i - 1
+            if remaining > 0 and remaining % 5 == 0:
+                _homelab_log_add(f'{remaining}s remaining…')
+
+        if _homelab_abort.is_set():
+            _homelab_log_add('Abort received — running emergency shutdown…')
+            raise RuntimeError('aborted')
+
+        # Turn computer ON
+        _homelab_log_add('Turning computer switch ON…')
+        if not _ha_switch_set(comp_sw, True):
+            _homelab_log_add('ERROR: failed to turn computer switch ON — running emergency shutdown…')
+            raise RuntimeError('computer_on_failed')
+        _homelab_log_add('Computer switch ON ✓')
+        _homelab_log_add('HomeLab started.')
+
+    except Exception:
+        if main_on:
+            with _homelab_lock: _homelab_seq = 'stopping'
+            _homelab_emergency_stop(main_sw, comp_sw)
     finally:
         with _homelab_lock: _homelab_busy = False; _homelab_seq = None
+
 
 def _homelab_stop_sequence():
     global _homelab_busy, _homelab_seq
     cfg     = _INTEG.get('home_assistant', {})
     main_sw = cfg.get('main_switch',     'switch.homelab_main_switch')
     comp_sw = cfg.get('computer_switch', 'switch.homelab_computer_switch')
-    delay   = _HOMELAB_STOP_DELAY
+    _homelab_abort.clear()
     with _homelab_lock:
         _homelab_busy = True; _homelab_seq = 'stopping'
     try:
         _homelab_log_add('Stopping HomeLab sequence…')
-        _homelab_log_add('Disabling computer switch…')
-        if _ha_switch_set(comp_sw, False):
-            _homelab_log_add('Computer switch OFF ✓')
+
+        # Turn computer OFF (failure is non-fatal — still must turn main off)
+        _homelab_log_add('Turning computer switch OFF…')
+        if not _ha_switch_set(comp_sw, False):
+            _homelab_log_add('Warning: could not turn computer switch OFF — continuing to cut main')
         else:
-            _homelab_log_add('Computer switch error — check HA configuration'); return
-        _homelab_log_add(f'Waiting {delay}s before disabling main switch…')
-        elapsed = 0
-        while elapsed < delay:
-            step      = min(5, delay - elapsed)
-            time.sleep(step); elapsed += step
-            remaining = delay - elapsed
-            if remaining > 0: _homelab_log_add(f'{remaining}s remaining…')
-        _homelab_log_add('Disabling main switch…')
-        if _ha_switch_set(main_sw, False):
+            _homelab_log_add('Computer switch OFF ✓')
+
+        # Wait 10 s — abort skips remaining wait but main ALWAYS turns off
+        _homelab_log_add(f'Waiting {_HOMELAB_STOP_DELAY}s before turning main OFF…')
+        for i in range(_HOMELAB_STOP_DELAY):
+            if _homelab_abort.is_set():
+                _homelab_log_add('Abort: skipping wait, cutting main now…'); break
+            time.sleep(1)
+            remaining = _HOMELAB_STOP_DELAY - i - 1
+            if remaining > 0 and remaining % 5 == 0:
+                _homelab_log_add(f'{remaining}s remaining…')
+
+        # Main OFF — always runs
+        _homelab_log_add('Turning main switch OFF…')
+        if not _ha_switch_set(main_sw, False):
+            _homelab_log_add('⚠ ERROR: could not turn main switch OFF — MANUAL INTERVENTION REQUIRED')
+        else:
             _homelab_log_add('Main switch OFF ✓')
             _homelab_log_add('HomeLab stopped.')
-        else:
-            _homelab_log_add('Main switch error — check HA configuration')
+
+    except Exception as e:
+        _homelab_log_add(f'Stop sequence error ({e}) — attempting emergency main off…')
+        try:
+            _ha_switch_set(main_sw, False)
+            _homelab_log_add('Main switch OFF (emergency)')
+        except Exception:
+            _homelab_log_add('⚠ CRITICAL: could not turn main switch off — MANUAL INTERVENTION REQUIRED')
     finally:
         with _homelab_lock: _homelab_busy = False; _homelab_seq = None
 
+
 def _homelab_action(action: str) -> str:
-    action = action.lower().strip()
+    action  = action.lower().strip()
     cfg     = _INTEG.get('home_assistant', {})
     main_sw = cfg.get('main_switch',     'switch.homelab_main_switch')
     comp_sw = cfg.get('computer_switch', 'switch.homelab_computer_switch')
     with _homelab_lock:
         busy = _homelab_busy
+
+    if action == 'abort':
+        if busy:
+            _homelab_abort.set()
+            return 'Abort signal sent — sequence will stop safely'
+        return '(No sequence running)'
+
     if busy and action in ('start', 'stop'):
-        return '(HomeLab sequence already in progress)'
+        return '(HomeLab sequence already in progress — use abort to cancel)'
+
     if action == 'start':
         threading.Thread(target=_homelab_start_sequence, daemon=True, name='homelab-start').start()
         return 'HomeLab startup sequence initiated…'
