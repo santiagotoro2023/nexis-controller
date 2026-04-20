@@ -3211,14 +3211,11 @@ def _desktop(action, arg):
 
 # ══════════════════════════════════════════════════════════════════════════════
 def _ha_action(action: str, entity: str, value: str = '') -> str:
-    """Call the Home Assistant REST API. Configure in ~/.config/nexis/integrations.json:
-    { "home_assistant": { "url": "http://homeassistant.local:8123", "token": "..." } }
-    """
-    ha_cfg = _INTEG.get('home_assistant', {})
-    ha_url = ha_cfg.get('url', '').rstrip('/')
-    ha_tok = ha_cfg.get('token', '')
+    """Call the Home Assistant REST API. Configure via the app Settings → Home Assistant."""
+    ha_url = _INTEG.get('home_assistant', {}).get('url', '').rstrip('/')
+    ha_tok = _ha_get_bearer()
     if not ha_url or not ha_tok:
-        return '(Home Assistant not configured — add url and token to ~/.config/nexis/integrations.json)'
+        return '(Home Assistant not configured — set URL, username and password in app Settings)'
     headers = {
         'Authorization': f'Bearer {ha_tok}',
         'Content-Type': 'application/json',
@@ -3286,6 +3283,43 @@ def _ha_action(action: str, entity: str, value: str = '') -> str:
         return f'(HA error: {e})'
 
 
+# ── HA bearer token (username/password → OAuth2 password grant) ──────────────
+_ha_bearer_cache      = {'token': None, 'expires': 0.0}
+_ha_bearer_cache_lock = threading.Lock()
+
+def _ha_get_bearer() -> str:
+    """Return a valid HA bearer token, fetching/refreshing via password grant as needed."""
+    cfg      = _INTEG.get('home_assistant', {})
+    ha_url   = cfg.get('url', '').rstrip('/')
+    username = cfg.get('username', '')
+    password = cfg.get('password', '')
+    if not ha_url or not username or not password:
+        return ''
+    with _ha_bearer_cache_lock:
+        now = time.monotonic()
+        if _ha_bearer_cache['token'] and _ha_bearer_cache['expires'] > now + 60:
+            return _ha_bearer_cache['token']
+        try:
+            import urllib.parse as _up
+            data = _up.urlencode({
+                'grant_type': 'password',
+                'username':   username,
+                'password':   password,
+                'client_id':  'http://localhost/',
+            }).encode()
+            req = urllib.request.Request(
+                f'{ha_url}/auth/token', data=data,
+                headers={'Content-Type': 'application/x-www-form-urlencoded'})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                resp = json.loads(r.read())
+            token      = resp.get('access_token', '')
+            expires_in = resp.get('expires_in', 1800)
+            _ha_bearer_cache['token']   = token
+            _ha_bearer_cache['expires'] = now + expires_in
+            return token
+        except Exception:
+            return ''
+
 # ── HomeLab power-sequencing (via Home Assistant REST API) ────────────────────
 _homelab_log  = []            # list of {'ts': float, 'msg': str} — capped at 200
 _homelab_lock = threading.Lock()
@@ -3300,9 +3334,8 @@ def _homelab_log_add(msg: str):
     _log(f'[HomeLab] {msg}')
 
 def _ha_switch_state(entity_id: str) -> str:
-    cfg    = _INTEG.get('home_assistant', {})
-    ha_url = cfg.get('url', '').rstrip('/')
-    ha_tok = cfg.get('token', '')
+    ha_url = _INTEG.get('home_assistant', {}).get('url', '').rstrip('/')
+    ha_tok = _ha_get_bearer()
     if not ha_url or not ha_tok:
         return 'unconfigured'
     try:
@@ -3314,9 +3347,8 @@ def _ha_switch_state(entity_id: str) -> str:
         return 'unknown'
 
 def _ha_switch_set(entity_id: str, on: bool) -> bool:
-    cfg    = _INTEG.get('home_assistant', {})
-    ha_url = cfg.get('url', '').rstrip('/')
-    ha_tok = cfg.get('token', '')
+    ha_url = _INTEG.get('home_assistant', {}).get('url', '').rstrip('/')
+    ha_tok = _ha_get_bearer()
     if not ha_url or not ha_tok:
         return False
     try:
@@ -6958,7 +6990,8 @@ def _start_web():
                     cfg = _INTEG.get('home_assistant', {})
                     self._send(200, json.dumps({
                         'url':             cfg.get('url', ''),
-                        'token':           cfg.get('token', ''),
+                        'username':        cfg.get('username', ''),
+                        'password':        cfg.get('password', ''),
                         'main_switch':     cfg.get('main_switch',     'switch.homelab_main_switch'),
                         'computer_switch': cfg.get('computer_switch', 'switch.homelab_computer_switch'),
                         'start_delay':     cfg.get('start_delay',     30),
@@ -6970,7 +7003,7 @@ def _start_web():
                     comp_sw = cfg.get('computer_switch', 'switch.homelab_computer_switch')
                     with _homelab_lock:
                         busy = _homelab_busy; seq = _homelab_seq
-                    if cfg.get('url') and cfg.get('token'):
+                    if cfg.get('url') and cfg.get('username') and cfg.get('password'):
                         main_state = _ha_switch_state(main_sw)
                         comp_state = _ha_switch_state(comp_sw)
                     else:
@@ -7430,7 +7463,7 @@ def _start_web():
                     data  = json.loads(body) if body else {}
                     integ = dict(_INTEG)
                     ha    = dict(integ.get('home_assistant', {}))
-                    for k in ('url', 'token', 'main_switch', 'computer_switch'):
+                    for k in ('url', 'username', 'password', 'main_switch', 'computer_switch'):
                         if k in data: ha[k] = str(data[k]).strip()
                     for k in ('start_delay', 'stop_delay'):
                         if k in data:
@@ -7438,6 +7471,10 @@ def _start_web():
                             except Exception: pass
                     integ['home_assistant'] = ha
                     _save_integ(integ)
+                    # Invalidate token cache so next call re-authenticates with new creds
+                    with _ha_bearer_cache_lock:
+                        _ha_bearer_cache['token']   = None
+                        _ha_bearer_cache['expires']  = 0.0
                     self._send(200, json.dumps({'ok': True}), 'application/json')
 
                 elif path == '/api/ha/action':
@@ -7449,19 +7486,23 @@ def _start_web():
                 elif path == '/api/ha/test':
                     cfg    = _INTEG.get('home_assistant', {})
                     ha_url = cfg.get('url', '').rstrip('/')
-                    ha_tok = cfg.get('token', '')
-                    if not ha_url or not ha_tok:
+                    if not ha_url or not cfg.get('username') or not cfg.get('password'):
                         self._send(200, json.dumps({'ok': False,
-                            'message': 'URL and token not configured'}), 'application/json')
+                            'message': 'URL, username and password must be set'}), 'application/json')
                     else:
-                        try:
-                            headers = {'Authorization': f'Bearer {ha_tok}'}
-                            req = urllib.request.Request(f'{ha_url}/api/', headers=headers)
-                            with urllib.request.urlopen(req, timeout=8) as r:
-                                msg = json.loads(r.read()).get('message', 'Connected')
-                            self._send(200, json.dumps({'ok': True, 'message': msg}), 'application/json')
-                        except Exception as e:
-                            self._send(200, json.dumps({'ok': False, 'message': str(e)}), 'application/json')
+                        ha_tok = _ha_get_bearer()
+                        if not ha_tok:
+                            self._send(200, json.dumps({'ok': False,
+                                'message': 'Login failed — check username and password'}), 'application/json')
+                        else:
+                            try:
+                                headers = {'Authorization': f'Bearer {ha_tok}'}
+                                req = urllib.request.Request(f'{ha_url}/api/', headers=headers)
+                                with urllib.request.urlopen(req, timeout=8) as r:
+                                    msg = json.loads(r.read()).get('message', 'Connected')
+                                self._send(200, json.dumps({'ok': True, 'message': msg}), 'application/json')
+                            except Exception as e:
+                                self._send(200, json.dumps({'ok': False, 'message': str(e)}), 'application/json')
 
                 elif path == '/api/monitor/thresholds':
                     # Update monitoring thresholds: {"cpu": 85, "mem": 90, "disk": 80}
