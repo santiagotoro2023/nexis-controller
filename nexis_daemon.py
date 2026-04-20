@@ -1157,11 +1157,12 @@ def _stt_worker():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _sched_load():
-    try:
-        if SCHED_FILE.exists():
-            return json.loads(SCHED_FILE.read_text())
-    except Exception:
-        pass
+    with _sched_lock:
+        try:
+            if SCHED_FILE.exists():
+                return json.loads(SCHED_FILE.read_text())
+        except Exception:
+            pass
     return []
 
 def _sched_save(schedules):
@@ -1431,13 +1432,18 @@ def _system_probe():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _web_search(query, max_results=5):
-    # Cache: return cached result if < 10 minutes old
+    # Cache: return cached result if < 10 minutes old; evict stale entries
     cache_key = f'{query}|{max_results}'
+    now = time.time()
     with _search_cache_lk:
         if cache_key in _search_cache:
             result, ts = _search_cache[cache_key]
-            if time.time() - ts < 600:
+            if now - ts < 600:
                 return result
+        # Evict all expired entries while we hold the lock
+        stale = [k for k, (_, ts) in _search_cache.items() if now - ts >= 600]
+        for k in stale:
+            del _search_cache[k]
 
     # Brave Search API (if key configured in ~/.config/nexis/integrations.json)
     brave_key = _INTEG.get('brave_search_api_key', '')
@@ -2708,6 +2714,10 @@ def _search_doc_index(conn, query: str, limit: int = 5) -> list:
     return scored[:limit]
 
 def _maybe_summarize_history():
+    """Non-blocking wrapper — runs the actual summarization on a daemon thread."""
+    threading.Thread(target=_do_summarize_history, daemon=True, name='hist-summarize').start()
+
+def _do_summarize_history():
     """If shared history is too long, compress oldest messages into a summary."""
     with _shared_lock:
         if len(_shared_hist) < 32:
@@ -2722,13 +2732,11 @@ def _maybe_summarize_history():
     )
     prompt = f"Summarize this conversation excerpt in 3-5 sentences, preserving key facts, decisions, and context that would be useful for future turns:\n\n{convo}"
 
-    summary = ''
     try:
         with _model_override_lock: model_key = _model_override
         model_name = MODELS.get(model_key, MODELS['fast'])['name']
         msgs = [{'role': 'user', 'content': prompt}]
-        for tok in _stream_chat(msgs, model_name):
-            summary += tok
+        summary = _stream_chat(msgs, model_name) or ''
     except Exception as e:
         _log(f'History summarize: {e}', 'WARN')
         return
@@ -6881,8 +6889,12 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None):
         if voice_on: tts_in_q.put(None)
         return
 
-    clean, tools = _process_tools(resp, _db(), user_text=msg,
-                                   session_id=_web_session_id)
+    _pt_db = _db()
+    try:
+        clean, tools = _process_tools(resp, _pt_db, user_text=msg,
+                                       session_id=_web_session_id)
+    finally:
+        _pt_db.close()
     if tools:
         # Action response — discard the buffered verbose text entirely.
         # Yield [CLEAR] then a single brief confirmation line.
