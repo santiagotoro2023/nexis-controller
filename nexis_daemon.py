@@ -5891,6 +5891,57 @@ def _page_remote():
 
   </div><!-- /sec-mobile -->
 
+  <!-- HomeLab section -->
+  <div id=sec-homelab style=display:none>
+
+    <div class=card>
+      <div class=card-head>Status</div>
+      <div class=card-body>
+        <div style='display:flex;justify-content:space-between;align-items:flex-start'>
+          <div style='line-height:2'>
+            <div><span style='color:var(--fg2);font-size:10px;min-width:70px;display:inline-block'>main</span> <span id=hl-main style='color:var(--fg)'>—</span></div>
+            <div><span style='color:var(--fg2);font-size:10px;min-width:70px;display:inline-block'>computer</span> <span id=hl-comp style='color:var(--fg)'>—</span></div>
+          </div>
+          <button class=rm-btn onclick=haStatus() style='flex:0;min-width:70px'>Refresh</button>
+        </div>
+        <div id=hl-seq style='display:none;margin-top:8px;font-size:10px;color:var(--or2);letter-spacing:.06em;text-transform:uppercase'></div>
+      </div>
+    </div>
+
+    <div class=card>
+      <div class=card-head>Power</div>
+      <div class=card-body>
+        <div class=rm-row>
+          <button class='rm-btn wide accent' onclick=haAction('start')>Start HomeLab</button>
+          <button class='rm-btn wide' onclick=haAction('stop')>Stop HomeLab</button>
+        </div>
+        <div class=rm-row>
+          <button id=hl-abort class=rm-btn onclick=haAction('abort') style='display:none;border-color:#c07070;color:#c07070'>Abort Sequence</button>
+        </div>
+      </div>
+    </div>
+
+    <div class=card>
+      <div class=card-head>Individual Switches</div>
+      <div class=card-body>
+        <div class=rm-row>
+          <button class=rm-btn onclick=haAction('main_on')>Main On</button>
+          <button class=rm-btn onclick=haAction('main_off')>Main Off</button>
+        </div>
+        <div class=rm-row>
+          <button class=rm-btn onclick=haAction('computer_on')>PC On</button>
+          <button class=rm-btn onclick=haAction('computer_off')>PC Off</button>
+        </div>
+      </div>
+    </div>
+
+    <div id=hl-log-card class=card style=display:none>
+      <div class=card-head>Sequence Log</div>
+      <div class=card-body id=hl-log-body style='font-size:11px;color:var(--fg2);line-height:1.8'></div>
+    </div>
+
+  </div><!-- /sec-homelab -->
+
   <div id=rm-loading class=rm-loading>working…</div>
   <div id=rm-result class=rm-result></div>
 </div>
@@ -5900,6 +5951,7 @@ def _page_remote():
 var _devs = [];
 var _selDev = null;
 var _tok = (document.cookie.match(/nx_tok=([^;]+)/)||['',''])[1];
+var _hlPollTimer = null;
 
 function authHdr(){return {'Content-Type':'application/json','Authorization':'Bearer '+_tok};}
 function gv(id){return document.getElementById(id).value.trim();}
@@ -5910,20 +5962,17 @@ function setResult(text){
 }
 function setBusy(on){
   document.getElementById('rm-loading').style.display=on?'block':'none';
-  document.querySelectorAll('.rm-btn').forEach(function(b){b.disabled=on;});
+  document.querySelectorAll('.rm-btn').forEach(function(b){if(b.id!=='hl-abort')b.disabled=on;});
 }
 
 function loadDevices(){
   fetch('/api/devices',{headers:authHdr()})
     .then(function(r){return r.json();})
     .then(function(data){
-      _devs=data.devices||[];
+      _devs=[{device_id:'__homelab__',hostname:'HomeLab',device_type:'homelab',online:true,role:null}]
+        .concat(data.devices||[]);
       var sel=document.getElementById('devsel');
       sel.innerHTML='';
-      if(_devs.length===0){
-        sel.innerHTML="<option value=''>no devices registered</option>";
-        return;
-      }
       _devs.forEach(function(d,i){
         var dot=d.online?'●':'○';
         var role=d.role?' ['+d.role+']':'';
@@ -5943,13 +5992,68 @@ function selectDev(){
   var sel=document.getElementById('devsel');
   var idx=parseInt(sel.value);
   _selDev=isNaN(idx)?null:_devs[idx];
+  var isHL=_selDev&&_selDev.device_type==='homelab';
   document.getElementById('sec-desktop').style.display=(_selDev&&_selDev.device_type==='desktop')?'block':'none';
   document.getElementById('sec-mobile').style.display=(_selDev&&_selDev.device_type==='mobile')?'block':'none';
-  var offline=_selDev&&!_selDev.online;
+  document.getElementById('sec-homelab').style.display=isHL?'block':'none';
+  var offline=_selDev&&!_selDev.online&&!isHL;
   document.getElementById('offline-note').style.display=offline?'block':'none';
   var wolBtn=document.getElementById('d-wol');
   if(wolBtn) wolBtn.disabled=!(_selDev&&_selDev.mac);
   setResult('');
+  if(isHL){haStatus();_startHlPoll();}else{_stopHlPoll();}
+}
+
+function _startHlPoll(){
+  _stopHlPoll();
+  _hlPollTimer=setInterval(function(){
+    if(_selDev&&_selDev.device_type==='homelab')haStatus();
+  },5000);
+}
+function _stopHlPoll(){if(_hlPollTimer){clearInterval(_hlPollTimer);_hlPollTimer=null;}}
+
+function haStatus(){
+  fetch('/api/ha/status',{headers:authHdr()})
+  .then(function(r){return r.json();})
+  .then(function(d){
+    var mainEl=document.getElementById('hl-main');
+    var compEl=document.getElementById('hl-comp');
+    var seqEl=document.getElementById('hl-seq');
+    var abortBtn=document.getElementById('hl-abort');
+    if(mainEl)mainEl.textContent=d.main||'—';
+    if(compEl)compEl.textContent=d.computer||'—';
+    if(seqEl){
+      if(d.busy&&d.sequence){seqEl.textContent='running: '+d.sequence;seqEl.style.display='block';}
+      else{seqEl.style.display='none';}
+    }
+    if(abortBtn)abortBtn.style.display=d.busy?'block':'none';
+  }).catch(function(){});
+  fetch('/api/ha/log',{headers:authHdr()})
+  .then(function(r){return r.json();})
+  .then(function(d){
+    var entries=d.entries||[];
+    var card=document.getElementById('hl-log-card');
+    var body=document.getElementById('hl-log-body');
+    if(!entries.length){if(card)card.style.display='none';return;}
+    if(card)card.style.display='block';
+    if(body)body.innerHTML=entries.slice(-12).map(function(e){
+      return '<div style="padding:2px 0;border-bottom:1px solid var(--border)">'+
+        '<span style="color:var(--fg2);font-size:9px">'+e.ts.substring(11,16)+'</span>&nbsp;'+
+        e.msg+'</div>';
+    }).join('');
+  }).catch(function(){});
+}
+
+function haAction(action){
+  setResult('');
+  fetch('/api/ha/action',{method:'POST',headers:authHdr(),
+    body:JSON.stringify({action:action})})
+  .then(function(r){return r.json();})
+  .then(function(d){
+    if(d.result)setResult(d.result);
+    setTimeout(haStatus,800);
+  })
+  .catch(function(e){setResult('error: '+e);});
 }
 
 function da(action, arg){
