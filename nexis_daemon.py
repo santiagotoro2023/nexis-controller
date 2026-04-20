@@ -362,7 +362,6 @@ def _stream_chat(messages, model, temperature=0.75, num_ctx=4096,
         'temperature': temperature,
         'top_p':       0.9,
         'top_k':       40,
-        'repeat_penalty': 1.1,
     }
     if num_predict is not None:
         options['num_predict'] = num_predict
