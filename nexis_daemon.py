@@ -79,6 +79,13 @@ def _load_integ():
     return {}
 _INTEG = _load_integ()
 
+def _save_integ(data: dict):
+    """Persist integrations config to disk and refresh the in-memory copy."""
+    global _INTEG
+    _INTEG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _INTEG_FILE.write_text(json.dumps(data, indent=2))
+    _INTEG = data
+
 # ── Embedding model availability cache ───────────────────────────────────────
 _embed_ok = None   # None=unchecked, True=available, False=unavailable
 _embed_lk = threading.Lock()
@@ -2566,6 +2573,13 @@ def _build_system(conn):
         '\nRequires home_assistant.url + home_assistant.token in ~/.config/nexis/integrations.json.'
         '\nUse for any request to control smart home devices, lights, switches, thermostats, sensors.'
         '\n'
+        '\n### [HOMELAB: action] — safe power-sequencing for the home lab via Home Assistant'
+        '\n  [HOMELAB: start]   boot sequence: main switch ON, 30s delay, computer switch ON'
+        '\n  [HOMELAB: stop]    shutdown sequence: computer switch OFF, 10s delay, main switch OFF'
+        '\n  [HOMELAB: main_on] / [HOMELAB: main_off]         manual main switch only'
+        '\n  [HOMELAB: computer_on] / [HOMELAB: computer_off] manual computer switch only'
+        '\nUse when Creator says: "start/boot/power on my homelab", "shut down/stop/power off my homelab".'
+        '\n'
         '\n### [WATCH: service] — monitor a service/process'
         '\nEmit when Creator asks to monitor something, or when it would be useful (e.g. "keep an eye on nginx", "let me know if X crashes").'
         '\nAlso proactively suggest it: if Creator mentions a service and monitoring seems useful, ask "Want me to watch [service] for state changes?"'
@@ -3272,6 +3286,147 @@ def _ha_action(action: str, entity: str, value: str = '') -> str:
         return f'(HA error: {e})'
 
 
+# ── HomeLab power-sequencing (via Home Assistant REST API) ────────────────────
+_homelab_log  = []            # list of {'ts': float, 'msg': str} — capped at 200
+_homelab_lock = threading.Lock()
+_homelab_busy = False
+_homelab_seq  = None          # 'starting' | 'stopping' | None
+
+def _homelab_log_add(msg: str):
+    with _homelab_lock:
+        _homelab_log.append({'ts': time.time(), 'msg': msg})
+        if len(_homelab_log) > 200:
+            del _homelab_log[:-200]
+    _log(f'[HomeLab] {msg}')
+
+def _ha_switch_state(entity_id: str) -> str:
+    cfg    = _INTEG.get('home_assistant', {})
+    ha_url = cfg.get('url', '').rstrip('/')
+    ha_tok = cfg.get('token', '')
+    if not ha_url or not ha_tok:
+        return 'unconfigured'
+    try:
+        headers = {'Authorization': f'Bearer {ha_tok}'}
+        req = urllib.request.Request(f'{ha_url}/api/states/{entity_id}', headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read()).get('state', 'unknown')
+    except Exception:
+        return 'unknown'
+
+def _ha_switch_set(entity_id: str, on: bool) -> bool:
+    cfg    = _INTEG.get('home_assistant', {})
+    ha_url = cfg.get('url', '').rstrip('/')
+    ha_tok = cfg.get('token', '')
+    if not ha_url or not ha_tok:
+        return False
+    try:
+        service = 'turn_on' if on else 'turn_off'
+        headers = {'Authorization': f'Bearer {ha_tok}', 'Content-Type': 'application/json'}
+        body    = json.dumps({'entity_id': entity_id}).encode()
+        req     = urllib.request.Request(
+            f'{ha_url}/api/services/switch/{service}',
+            data=body, headers=headers, method='POST')
+        urllib.request.urlopen(req, timeout=8)
+        return True
+    except Exception:
+        return False
+
+def _homelab_start_sequence():
+    global _homelab_busy, _homelab_seq
+    cfg      = _INTEG.get('home_assistant', {})
+    main_sw  = cfg.get('main_switch',     'switch.homelab_main_switch')
+    comp_sw  = cfg.get('computer_switch', 'switch.homelab_computer_switch')
+    delay    = int(cfg.get('start_delay', 30))
+    with _homelab_lock:
+        _homelab_busy = True; _homelab_seq = 'starting'
+    try:
+        _homelab_log_add('Starting HomeLab sequence…')
+        _homelab_log_add('Enabling main switch…')
+        if _ha_switch_set(main_sw, True):
+            _homelab_log_add('Main switch ON ✓')
+        else:
+            _homelab_log_add('Main switch error — check HA configuration'); return
+        _homelab_log_add(f'Waiting {delay}s before enabling computer switch…')
+        elapsed = 0
+        while elapsed < delay:
+            step     = min(5, delay - elapsed)
+            time.sleep(step); elapsed += step
+            remaining = delay - elapsed
+            if remaining > 0: _homelab_log_add(f'{remaining}s remaining…')
+        _homelab_log_add('Enabling computer switch…')
+        if _ha_switch_set(comp_sw, True):
+            _homelab_log_add('Computer switch ON ✓')
+            _homelab_log_add('HomeLab started.')
+        else:
+            _homelab_log_add('Computer switch error — check HA configuration')
+    finally:
+        with _homelab_lock: _homelab_busy = False; _homelab_seq = None
+
+def _homelab_stop_sequence():
+    global _homelab_busy, _homelab_seq
+    cfg     = _INTEG.get('home_assistant', {})
+    main_sw = cfg.get('main_switch',     'switch.homelab_main_switch')
+    comp_sw = cfg.get('computer_switch', 'switch.homelab_computer_switch')
+    delay   = int(cfg.get('stop_delay', 10))
+    with _homelab_lock:
+        _homelab_busy = True; _homelab_seq = 'stopping'
+    try:
+        _homelab_log_add('Stopping HomeLab sequence…')
+        _homelab_log_add('Disabling computer switch…')
+        if _ha_switch_set(comp_sw, False):
+            _homelab_log_add('Computer switch OFF ✓')
+        else:
+            _homelab_log_add('Computer switch error — check HA configuration'); return
+        _homelab_log_add(f'Waiting {delay}s before disabling main switch…')
+        elapsed = 0
+        while elapsed < delay:
+            step      = min(5, delay - elapsed)
+            time.sleep(step); elapsed += step
+            remaining = delay - elapsed
+            if remaining > 0: _homelab_log_add(f'{remaining}s remaining…')
+        _homelab_log_add('Disabling main switch…')
+        if _ha_switch_set(main_sw, False):
+            _homelab_log_add('Main switch OFF ✓')
+            _homelab_log_add('HomeLab stopped.')
+        else:
+            _homelab_log_add('Main switch error — check HA configuration')
+    finally:
+        with _homelab_lock: _homelab_busy = False; _homelab_seq = None
+
+def _homelab_action(action: str) -> str:
+    action = action.lower().strip()
+    cfg     = _INTEG.get('home_assistant', {})
+    main_sw = cfg.get('main_switch',     'switch.homelab_main_switch')
+    comp_sw = cfg.get('computer_switch', 'switch.homelab_computer_switch')
+    with _homelab_lock:
+        busy = _homelab_busy
+    if busy and action in ('start', 'stop'):
+        return '(HomeLab sequence already in progress)'
+    if action == 'start':
+        threading.Thread(target=_homelab_start_sequence, daemon=True, name='homelab-start').start()
+        return 'HomeLab startup sequence initiated…'
+    elif action == 'stop':
+        threading.Thread(target=_homelab_stop_sequence, daemon=True, name='homelab-stop').start()
+        return 'HomeLab shutdown sequence initiated…'
+    elif action in ('main_on', 'main on'):
+        ok = _ha_switch_set(main_sw, True)
+        msg = 'Main switch ON' if ok else 'Main switch error'
+        _homelab_log_add(msg); return msg
+    elif action in ('main_off', 'main off'):
+        ok = _ha_switch_set(main_sw, False)
+        msg = 'Main switch OFF' if ok else 'Main switch error'
+        _homelab_log_add(msg); return msg
+    elif action in ('computer_on', 'computer on'):
+        ok = _ha_switch_set(comp_sw, True)
+        msg = 'Computer switch ON' if ok else 'Computer switch error'
+        _homelab_log_add(msg); return msg
+    elif action in ('computer_off', 'computer off'):
+        ok = _ha_switch_set(comp_sw, False)
+        msg = 'Computer switch OFF' if ok else 'Computer switch error'
+        _homelab_log_add(msg); return msg
+    return f'(unknown homelab action: {action})'
+
+
 # ── Code interpreter ────────────────────────────────────────────────────────────
 _EXEC_ALLOWED_LANGS = {
     'python': ('python3', '.py'),
@@ -3594,6 +3749,11 @@ def _process_tools(text, conn, on_status=None, user_text='', session_id=''):
         arg2   = parts[2] if len(parts) > 2 else ''
         if on_status: on_status(f'HA: {action} {arg1}')
         tools[m.group(0)] = _ha_action(action, arg1, arg2)
+
+    for m in re.finditer(r'\[HOMELAB:\s*([^\]]+)\]', text, re.IGNORECASE):
+        action = m.group(1).strip()
+        if on_status: on_status(f'HomeLab: {action}')
+        tools[m.group(0)] = _homelab_action(action)
 
     clean = text
     for tag in tools: clean = clean.replace(tag, '')
@@ -6746,6 +6906,34 @@ def _start_web():
                     except _queue.Empty:
                         text = None
                     self._send(200, json.dumps({'text': text}), 'application/json')
+                elif path == '/api/ha/config':
+                    cfg = _INTEG.get('home_assistant', {})
+                    self._send(200, json.dumps({
+                        'url':             cfg.get('url', ''),
+                        'token':           cfg.get('token', ''),
+                        'main_switch':     cfg.get('main_switch',     'switch.homelab_main_switch'),
+                        'computer_switch': cfg.get('computer_switch', 'switch.homelab_computer_switch'),
+                        'start_delay':     cfg.get('start_delay',     30),
+                        'stop_delay':      cfg.get('stop_delay',      10),
+                    }), 'application/json')
+                elif path == '/api/ha/status':
+                    cfg     = _INTEG.get('home_assistant', {})
+                    main_sw = cfg.get('main_switch',     'switch.homelab_main_switch')
+                    comp_sw = cfg.get('computer_switch', 'switch.homelab_computer_switch')
+                    with _homelab_lock:
+                        busy = _homelab_busy; seq = _homelab_seq
+                    if cfg.get('url') and cfg.get('token'):
+                        main_state = _ha_switch_state(main_sw)
+                        comp_state = _ha_switch_state(comp_sw)
+                    else:
+                        main_state = comp_state = 'unconfigured'
+                    self._send(200, json.dumps({
+                        'main': main_state, 'computer': comp_state,
+                        'busy': busy, 'sequence': seq,
+                    }), 'application/json')
+                elif path == '/api/ha/log':
+                    with _homelab_lock: entries = list(_homelab_log)
+                    self._send(200, json.dumps({'entries': entries}), 'application/json')
                 elif path == '/api/stt/stream':
                     # SSE push: blocks until a result arrives (30s timeout)
                     self.send_response(200)
@@ -7189,6 +7377,43 @@ def _start_web():
                             self._send(200, json.dumps({'text': text}), 'application/json')
                         except Exception as e:
                             self._send(500, json.dumps({'error': str(e)}), 'application/json')
+
+                elif path == '/api/ha/config':
+                    data  = json.loads(body) if body else {}
+                    integ = dict(_INTEG)
+                    ha    = dict(integ.get('home_assistant', {}))
+                    for k in ('url', 'token', 'main_switch', 'computer_switch'):
+                        if k in data: ha[k] = str(data[k]).strip()
+                    for k in ('start_delay', 'stop_delay'):
+                        if k in data:
+                            try: ha[k] = max(0, int(data[k]))
+                            except Exception: pass
+                    integ['home_assistant'] = ha
+                    _save_integ(integ)
+                    self._send(200, json.dumps({'ok': True}), 'application/json')
+
+                elif path == '/api/ha/action':
+                    data   = json.loads(body) if body else {}
+                    action = data.get('action', '').strip()
+                    result = _homelab_action(action)
+                    self._send(200, json.dumps({'ok': True, 'result': result}), 'application/json')
+
+                elif path == '/api/ha/test':
+                    cfg    = _INTEG.get('home_assistant', {})
+                    ha_url = cfg.get('url', '').rstrip('/')
+                    ha_tok = cfg.get('token', '')
+                    if not ha_url or not ha_tok:
+                        self._send(200, json.dumps({'ok': False,
+                            'message': 'URL and token not configured'}), 'application/json')
+                    else:
+                        try:
+                            headers = {'Authorization': f'Bearer {ha_tok}'}
+                            req = urllib.request.Request(f'{ha_url}/api/', headers=headers)
+                            with urllib.request.urlopen(req, timeout=8) as r:
+                                msg = json.loads(r.read()).get('message', 'Connected')
+                            self._send(200, json.dumps({'ok': True, 'message': msg}), 'application/json')
+                        except Exception as e:
+                            self._send(200, json.dumps({'ok': False, 'message': str(e)}), 'application/json')
 
                 elif path == '/api/monitor/thresholds':
                     # Update monitoring thresholds: {"cpu": 85, "mem": 90, "disk": 80}
