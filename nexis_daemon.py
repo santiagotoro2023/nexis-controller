@@ -40,7 +40,7 @@ if 'XDG_RUNTIME_DIR' in os.environ:
 OLLAMA       = 'http://localhost:11434'
 EXTERNAL_DOMAIN = 'nexis.toroag.ch'   # external hostname for TLS cert SAN
 MODEL_FAST   = 'qwen2.5:14b'
-MODEL_DEEP   = 'hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M'
+MODEL_DEEP   = 'hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q4_K_M'
 MODEL_CODE   = 'qwen3-coder-next'
 MODEL_VISION = 'qwen2.5vl:7b'
 
@@ -357,7 +357,13 @@ def _stream_chat(messages, model, temperature=0.75, num_ctx=4096,
                 msgs[i] = dict(msgs[i])
                 msgs[i]['images'] = images
                 break
-    options = {'num_ctx': num_ctx, 'temperature': temperature, 'top_p': 0.9}
+    options = {
+        'num_ctx':     num_ctx,
+        'temperature': temperature,
+        'top_p':       0.9,
+        'top_k':       40,
+        'repeat_penalty': 1.1,
+    }
     if num_predict is not None:
         options['num_predict'] = num_predict
     payload = json.dumps({
@@ -393,7 +399,7 @@ def _stream_chat(messages, model, temperature=0.75, num_ctx=4096,
             payload2 = json.dumps({
                 'model': model, 'messages': msgs, 'stream': False,
                 'keep_alive': '24h',
-                'options': {'num_ctx': num_ctx, 'temperature': temperature}
+                'options': options
             }).encode()
             req2 = urllib.request.Request(f'{OLLAMA}/api/chat', data=payload2,
                 headers={'Content-Type': 'application/json'})

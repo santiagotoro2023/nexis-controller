@@ -233,15 +233,40 @@ if [ -d "$OLLAMA_LIB" ]; then
   fi
 fi
 
+# ── Multi-GPU + performance tuning for Ollama ─────────────────────────────────
+OLLAMA_DROP="/etc/systemd/system/ollama.service.d"
+mkdir -p "$OLLAMA_DROP"
+
+# Detect NVIDIA GPU count for multi-GPU config
+GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 0)
+GPU_ENV=""
+if [[ "$GPU_COUNT" -ge 2 ]]; then
+  CUDA_IDS=$(seq -s, 0 $((GPU_COUNT - 1)))
+  GPU_ENV="Environment=\"CUDA_VISIBLE_DEVICES=${CUDA_IDS}\""
+  _ok "Multi-GPU detected ($GPU_COUNT cards) — enabling all for inference"
+fi
+
+cat > "$OLLAMA_DROP/perf.conf" << DROPEOF
+[Service]
+# Flash attention: faster attention kernels (2-4× on supported hardware)
+Environment="OLLAMA_FLASH_ATTENTION=1"
+# Quantize KV cache to int8 — halves KV VRAM, more room for model weights
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
+${GPU_ENV}
+DROPEOF
+systemctl daemon-reload
+_ok "Ollama performance config written ($OLLAMA_DROP/perf.conf)"
+
 systemctl enable ollama --now 2>/dev/null || true
-sleep 2
+systemctl restart ollama 2>/dev/null || true
+sleep 3
 curl -sf http://localhost:11434/api/tags &>/dev/null || _err "Ollama not responding"
 _ok "Ollama online"
 
 _step 6 "Language models"
 echo -e "\n${DIM}    qwen2.5:14b      — fast, always-on"
 echo -e "    qwen2.5vl:7b     — vision (image analysis)"
-echo -e "    Omega-Darker 22B — deep / fallback"
+echo -e "    Omega-Darker 22B — deep / fallback  (Q4_K_M — fits in 13GB+ VRAM)"
 echo -e "    qwen3-coder-next — code (large, optional)${RST}\n"
 read -rp "$(echo -e "${OR}  Pull models? [Y/n]: ")" PULL
 PULL="${PULL:-Y}"
@@ -249,8 +274,8 @@ if [[ "$PULL" =~ ^[Yy]$ ]]; then
   ollama pull qwen2.5:14b && _ok "qwen2.5:14b ready" || _err "Model pull failed"
   ollama pull qwen2.5vl:7b && _ok "qwen2.5vl:7b ready (vision)" || _warn "qwen2.5vl:7b unavailable — image analysis disabled"
   ollama pull qwen3-coder-next && _ok "qwen3-coder-next ready" || _warn "qwen3-coder-next unavailable (can install later: ollama pull qwen3-coder-next)"
-  ollama pull "hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q5_K_M" \
-    && _ok "Omega-Darker ready" || _warn "Omega-Darker unavailable"
+  ollama pull "hf.co/mradermacher/Omega-Darker_The-Final-Directive-22B-GGUF:Q4_K_M" \
+    && _ok "Omega-Darker Q4_K_M ready" || _warn "Omega-Darker unavailable"
 fi
 
 _step 7 "Voice synthesis backend"
