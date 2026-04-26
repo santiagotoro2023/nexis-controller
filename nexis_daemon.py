@@ -5425,7 +5425,9 @@ function send(){
     _currentReader=null;
     buf=buf.replace(/\s*[—–]\s*/g,', ');
     try{nc.innerHTML=renderMd(buf);wireCodeCopy(n);}catch(e){nc.innerHTML=buf;}
-    M.scrollTop=M.scrollHeight;setReady(true);
+    M.scrollTop=M.scrollHeight;
+    _justFinishedSend=true;
+    setReady(true);
   }
 
   fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
@@ -5540,7 +5542,7 @@ function _populateModels(){
 _populateModels();
 
 /* Cross-device sync — shows typing indicator when another device is chatting */
-var _syncEs=null,_syncHistLen=-1,_extTypingEl=null;
+var _syncEs=null,_syncHistLen=-1,_extTypingEl=null,_justFinishedSend=false;
 function _getOrCreateExtTyping(){
   if(_extTypingEl&&_extTypingEl.parentNode)return _extTypingEl;
   var el=document.createElement('div');el.className='msg n';el.id='ext-typing';
@@ -5587,7 +5589,10 @@ function _startSync(){
     if(d.typing&&!_sending){_getOrCreateExtTyping();}
     else if(!d.typing){
       _removeExtTyping();
-      if(!_sending&&hl>_syncHistLen){_fetchAndAppendHistory(_syncHistLen);_syncHistLen=hl;}
+      if(_justFinishedSend){
+        /* We just finished our own stream — absorb server count without re-fetching */
+        _justFinishedSend=false;_syncHistLen=hl;
+      }else if(!_sending&&hl>_syncHistLen){_fetchAndAppendHistory(_syncHistLen);_syncHistLen=hl;}
     }
   };
   _syncEs.onerror=function(){setTimeout(_startSync,5000);};
