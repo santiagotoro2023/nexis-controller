@@ -71,8 +71,8 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   rm -f "$REAL_HOME/.local/bin/nexis"
   rm -rf "$REAL_HOME/.config/nexis"
   rm -rf "$REAL_HOME/.local/share/nexis"
-  rm -f /run/nexis/nexis.sock 2>/dev/null || true
-  rmdir /run/nexis 2>/dev/null || true
+  rm -f /etc/tmpfiles.d/nexis.conf 2>/dev/null || true
+  rm -rf /run/nexis 2>/dev/null || true
   _ok "Files removed"
 
   for RC in "$REAL_HOME/.bashrc" "$REAL_HOME/.bash_profile" \
@@ -394,6 +394,17 @@ chown "$REAL_USER:$(id -gn "$REAL_USER")" "$NEXIS_DATA/nexis-daemon.py"
 _ok "Daemon installed (v3.1)"
 
 _step 11 "systemd service registration"
+
+# Create /run/nexis with correct ownership using tmpfiles.d (survives reboots).
+# This avoids the RuntimeDirectory chown failure when /run/nexis is already
+# owned by root from a previous installation.
+cat > /etc/tmpfiles.d/nexis.conf << TMPEOF
+d /run/nexis 0770 $REAL_USER $REAL_USER -
+TMPEOF
+# Apply immediately — removes stale root-owned dir and recreates it correctly
+rm -rf /run/nexis 2>/dev/null || true
+systemd-tmpfiles --create /etc/tmpfiles.d/nexis.conf
+
 cat > /etc/systemd/system/nexis-daemon.service << SVCEOF
 [Unit]
 Description=NeXiS Local AI Assistant v3.1
@@ -406,8 +417,6 @@ User=$REAL_USER
 Group=$REAL_USER
 WorkingDirectory=$REAL_HOME
 Environment=HOME=$REAL_HOME
-RuntimeDirectory=nexis
-RuntimeDirectoryMode=0770
 ExecStart=$VENV/bin/python3 $NEXIS_DATA/nexis-daemon.py
 Restart=always
 RestartSec=5
