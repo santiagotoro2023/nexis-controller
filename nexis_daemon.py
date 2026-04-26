@@ -6349,13 +6349,17 @@ function setRole(devId, role) {
 
 def _page_users():
     users = _users_load()
-    rows = ''.join(
-        f"<tr><td>{_esc(u['username'])}</td>"
-        f"<td><span class='badge {'ok' if u['role']=='admin' else 'off'}'>{u['role']}</span></td>"
-        f"<td>{_esc(u.get('created_at','')[:10])}</td>"
-        f"<td>{'' if u['username']=='creator' else f'<button class=btn onclick=delUser({json.dumps(u[\"username\"])})>Delete</button>'}</td></tr>"
-        for u in users
-    )
+    def _user_row(u):
+        badge  = 'ok' if u['role'] == 'admin' else 'off'
+        uname  = _esc(u['username'])
+        date   = _esc(u.get('created_at', '')[:10])
+        ujson  = json.dumps(u['username'])
+        btn    = '' if u['username'] == 'creator' else f'<button class=btn onclick=delUser({ujson})>Delete</button>'
+        return (f"<tr><td>{uname}</td>"
+                f"<td><span class='badge {badge}'>{u['role']}</span></td>"
+                f"<td>{date}</td>"
+                f"<td>{btn}</td></tr>")
+    rows = ''.join(_user_row(u) for u in users)
     return _shell(f"""
 <style>
 .um-wrap{{max-width:680px}}
