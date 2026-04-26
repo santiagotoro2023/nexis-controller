@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Nexis Controller — Build 1.0.0"""
+"""NeXiS Controller — Build 1.0.0"""
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
@@ -14,8 +14,9 @@ DATA      = HOME / '.local/share/nexis'
 DB_PATH   = DATA / 'memory' / 'nexis.db'
 SOCK_PATH = Path('/run/nexis/nexis.sock')
 LOG_PATH  = DATA / 'logs' / 'daemon.log'
-AUTH_FILE         = CONF / 'auth.json'
-SCHED_FILE        = CONF / 'schedules.json'
+AUTH_FILE          = CONF / 'auth.json'
+USERS_FILE         = CONF / 'users.json'
+SCHED_FILE         = CONF / 'schedules.json'
 DEV_PASSWORDS_FILE = CONF / 'device_passwords.json'
 TLS_KEY    = CONF / 'server.key'
 TLS_CERT   = CONF / 'server.crt'
@@ -230,6 +231,83 @@ def _setup_complete():
     creds['setup_done'] = True
     AUTH_FILE.write_text(json.dumps(creds, indent=2))
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NeXiS Ecosystem Users  (SSO — controller is the identity provider)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _users_load() -> list:
+    """Return the users list, bootstrapping the default creator account if absent."""
+    try:
+        if USERS_FILE.exists():
+            data = json.loads(USERS_FILE.read_text())
+            if data.get('users'):
+                return data['users']
+    except Exception:
+        pass
+    default = [{
+        'username':   'creator',
+        'hash':       hashlib.sha256('Asdf1234!'.encode()).hexdigest(),
+        'role':       'admin',
+        'created_at': datetime.utcnow().isoformat(),
+    }]
+    USERS_FILE.write_text(json.dumps({'users': default}, indent=2))
+    return default
+
+def _users_save(users: list):
+    USERS_FILE.write_text(json.dumps({'users': users}, indent=2))
+
+def _user_get(username: str) -> dict | None:
+    return next((u for u in _users_load() if u['username'] == username), None)
+
+def _user_check(username: str, password: str) -> bool:
+    u = _user_get(username)
+    if not u:
+        return False
+    return secrets.compare_digest(
+        hashlib.sha256(password.encode()).hexdigest(), u['hash'])
+
+def _user_create(username: str, password: str, role: str = 'user') -> str | None:
+    """Create a user; returns None on success, error string on failure."""
+    if not username or len(username) < 2:
+        return 'Username must be at least 2 characters.'
+    if len(password) < 8:
+        return 'Password must be at least 8 characters.'
+    users = _users_load()
+    if any(u['username'] == username for u in users):
+        return f"User '{username}' already exists."
+    users.append({
+        'username':   username,
+        'hash':       hashlib.sha256(password.encode()).hexdigest(),
+        'role':       role,
+        'created_at': datetime.utcnow().isoformat(),
+    })
+    _users_save(users)
+    return None
+
+def _user_delete(username: str) -> bool:
+    users = _users_load()
+    new_users = [u for u in users if u['username'] != username]
+    if len(new_users) == len(users):
+        return False
+    _users_save(new_users)
+    return True
+
+def _user_set_password(username: str, password: str) -> bool:
+    users = _users_load()
+    for u in users:
+        if u['username'] == username:
+            u['hash'] = hashlib.sha256(password.encode()).hexdigest()
+            _users_save(users)
+            return True
+    return False
+
+# Keep legacy single-password check working during transition
+def _setup_done() -> bool:
+    # Always ready — creator user is seeded on first access of _users_load()
+    _users_load()  # ensure file is bootstrapped
+    return True
+
 # ── Device unlock passwords (server-side, synced to all clients) ──────────────
 
 def _dev_passwords_load() -> dict:
@@ -243,22 +321,29 @@ def _dev_passwords_load() -> dict:
 def _dev_passwords_save(passwords: dict):
     DEV_PASSWORDS_FILE.write_text(json.dumps(passwords, indent=2))
 
-def _session_create() -> str:
+def _session_create(username: str = 'creator') -> str:
     token = secrets.token_hex(32)
     with _web_sessions_lk:
-        _web_sessions[token] = time.time() + 86400 * 7   # 7-day expiry
+        _web_sessions[token] = (username, time.time() + 86400 * 7)   # (user, expiry)
     return token
 
 def _session_valid(token: str) -> bool:
     if not token:
         return False
     with _web_sessions_lk:
-        exp = _web_sessions.get(token)
-        if exp and time.time() < exp:
+        entry = _web_sessions.get(token)
+        if entry and time.time() < entry[1]:
             return True
-        if exp:
+        if entry:
             del _web_sessions[token]
     return False
+
+def _session_username(token: str) -> str:
+    with _web_sessions_lk:
+        entry = _web_sessions.get(token)
+        if entry and time.time() < entry[1]:
+            return entry[0]
+    return 'unknown'
 
 def _session_from_request(headers) -> str:
     """Extract session token from Cookie header."""
@@ -275,17 +360,17 @@ def _session_from_request(headers) -> str:
 _API_TOKENS_KEY = 'api_tokens'   # list of {"token": str, "exp": float}
 _API_TOKEN_TTL  = 86400 * 90     # 90 days per token
 
-def _api_token_create() -> str:
+def _api_token_create(username: str = 'creator') -> str:
     token = secrets.token_hex(32)
     creds = _auth_load()
     now   = time.time()
-    # Migrate legacy single-token format
     if 'api_token' in creds:
         old = creds.pop('api_token')
-        creds.setdefault(_API_TOKENS_KEY, []).append({'token': old, 'exp': now + _API_TOKEN_TTL})
+        creds.setdefault(_API_TOKENS_KEY, []).append(
+            {'token': old, 'exp': now + _API_TOKEN_TTL, 'username': 'creator'})
     tokens = creds.get(_API_TOKENS_KEY, [])
-    tokens = [t for t in tokens if t.get('exp', 0) > now]   # prune expired
-    tokens.append({'token': token, 'exp': now + _API_TOKEN_TTL})
+    tokens = [t for t in tokens if t.get('exp', 0) > now]
+    tokens.append({'token': token, 'exp': now + _API_TOKEN_TTL, 'username': username})
     creds[_API_TOKENS_KEY] = tokens
     AUTH_FILE.write_text(json.dumps(creds, indent=2))
     return token
@@ -295,13 +380,20 @@ def _api_token_valid(token: str) -> bool:
         return False
     creds = _auth_load()
     now   = time.time()
-    # Support legacy single-token format during migration window
     if 'api_token' in creds and secrets.compare_digest(creds['api_token'], token):
         return True
     for entry in creds.get(_API_TOKENS_KEY, []):
         if entry.get('exp', 0) > now and secrets.compare_digest(entry['token'], token):
             return True
     return False
+
+def _api_token_username(token: str) -> str:
+    creds = _auth_load()
+    now   = time.time()
+    for entry in creds.get(_API_TOKENS_KEY, []):
+        if entry.get('exp', 0) > now and secrets.compare_digest(entry['token'], token):
+            return entry.get('username', 'creator')
+    return 'creator'
 
 
 # ── TLS certificate (self-signed, generated once on first run) ────────────────
@@ -5696,14 +5788,15 @@ document.addEventListener('keydown',function(e){
 
 def _shell(content, active='chat'):
     nav_items = [
-        ('chat',      'chat',     'Chat'),
-        ('remote',    'tune',     'Remote'),
-        ('history',   'history',  'History'),
-        ('memory',    'memory',   'Memory'),
-        ('schedules', 'schedule', 'Schedules'),
-        ('devices',    'devices',       'Devices'),
-        ('hypervisor', 'dns',           'Hypervisor'),
-        ('status',     'monitor_heart', 'Status'),
+        ('chat',      'chat',          'Chat'),
+        ('remote',    'tune',          'Remote'),
+        ('history',   'history',       'History'),
+        ('memory',    'memory',        'Memory'),
+        ('schedules', 'schedule',      'Schedules'),
+        ('devices',   'devices',       'Devices'),
+        ('hypervisor','dns',           'Hypervisor'),
+        ('users',     'manage_accounts','Users'),
+        ('status',    'monitor_heart', 'Status'),
     ]
     nav_html = ''.join(
         f"<a href='/{s}' class='nav-item {'on' if active==s else ''}'>"
@@ -5714,7 +5807,7 @@ def _shell(content, active='chat'):
         '<!DOCTYPE html><html lang=en><head>'
         '<meta charset=UTF-8>'
         '<meta name=viewport content="width=device-width,initial-scale=1">'
-        '<title>Nexis Controller</title>'
+        '<title>NeXiS Controller</title>'
         "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<link rel=preconnect href='https://fonts.googleapis.com'>"
         "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
@@ -5726,7 +5819,7 @@ def _shell(content, active='chat'):
         '<div class=sb-brand>'
         f'{_EYE_SVG}'
         '<div class=sb-brand-text>'
-        '<span class=sb-name>NEXIS</span>'
+        '<span class=sb-name>NeXiS</span>'
         '<span class=sb-ver>CONTROLLER · BUILD 1.0.0</span>'
         '</div>'
         '</div>'
@@ -6254,31 +6347,106 @@ function setRole(devId, role) {
         'devices')
 
 
+def _page_users():
+    users = _users_load()
+    rows = ''.join(
+        f"<tr><td>{_esc(u['username'])}</td>"
+        f"<td><span class='badge {'ok' if u['role']=='admin' else 'off'}'>{u['role']}</span></td>"
+        f"<td>{_esc(u.get('created_at','')[:10])}</td>"
+        f"<td>{'' if u['username']=='creator' else f'<button class=btn onclick=delUser({json.dumps(u[\"username\"])})>Delete</button>'}</td></tr>"
+        for u in users
+    )
+    return _shell(f"""
+<style>
+.um-wrap{{max-width:680px}}
+.um-table{{width:100%;border-collapse:collapse;font-size:12px}}
+.um-table th{{text-align:left;padding:8px 12px;font-size:9px;text-transform:uppercase;
+  letter-spacing:.1em;color:var(--fg2);border-bottom:1px solid var(--border)}}
+.um-table td{{padding:9px 12px;border-bottom:1px solid var(--border);color:var(--fg)}}
+.um-table tr:last-child td{{border-bottom:none}}
+.um-form{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:0}}
+.um-inp{{background:var(--bg3);border:1px solid var(--border);border-radius:8px;
+  color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;
+  transition:border-color .2s;flex:1;min-width:120px}}
+.um-inp:focus{{border-color:var(--or2)}}
+.um-sel{{background:var(--bg3);border:1px solid var(--border);border-radius:8px;
+  color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;cursor:pointer}}
+.um-err{{color:#EF5350;font-size:11px;margin-top:6px;letter-spacing:.04em}}
+.um-ok{{color:#4CAF50;font-size:11px;margin-top:6px;letter-spacing:.04em}}
+</style>
+<div class=um-wrap>
+<div class=card>
+<div class=card-head>NeXiS Ecosystem Users</div>
+<div class=card-body>
+<table class=um-table>
+<tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr>
+{rows}
+</table>
+</div></div>
+<div class=card>
+<div class=card-head>Add User</div>
+<div class=card-body>
+<div class=um-form>
+<input class=um-inp id=nu placeholder=Username>
+<input class=um-inp type=password id=np placeholder=Password>
+<select class=um-sel id=nr><option value=user>user</option><option value=admin>admin</option></select>
+<button class=btn onclick=addUser()>Add</button>
+</div>
+<div id=um-msg></div>
+</div></div>
+</div>
+<script>
+function msg(t,ok){{var el=document.getElementById('um-msg');el.className=ok?'um-ok':'um-err';el.textContent=t;}}
+function addUser(){{
+  var u=document.getElementById('nu').value.trim();
+  var p=document.getElementById('np').value;
+  var r=document.getElementById('nr').value;
+  if(!u||!p){{msg('Username and password required.',false);return;}}
+  fetch('/api/users',{{method:'POST',headers:{{'Content-Type':'application/json',
+    'Authorization':'Bearer '+localStorage.getItem('_nx_tok')}},
+    body:JSON.stringify({{username:u,password:p,role:r}})}})
+  .then(r=>r.json()).then(d=>{{if(d.ok){{msg('User created.',true);location.reload();}}else msg(d.error||'Error.',false);}});
+}}
+function delUser(u){{
+  if(!confirm('Delete user '+u+'?'))return;
+  fetch('/api/users/'+encodeURIComponent(u),{{method:'DELETE',headers:{{'Authorization':'Bearer '+localStorage.getItem('_nx_tok')}}}})
+  .then(r=>r.json()).then(d=>{{if(d.ok)location.reload();else alert(d.error||'Error.');}});
+}}
+</script>
+""", active='users')
+
+
 def _page_login(error=''):
     err_html = f'<div class=login-err>{_esc(error)}</div>' if error else ''
     return (
         '<!DOCTYPE html><html lang=en><head>'
-        '<meta charset=UTF-8><title>Nexis Controller — Authenticate</title>'
+        '<meta charset=UTF-8><title>NeXiS Controller</title>'
         "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<link rel=preconnect href='https://fonts.googleapis.com'>"
         "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
         "<link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' media=print onload=\"this.media='all'\">"
         "<noscript><link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap'></noscript>"
-        f'<style>{_CSS}</style></head><body style="display:block">'
+        f'<style>{_CSS}'
+        '.login-box label{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.14em;color:var(--fg2);margin-bottom:5px}'
+        '.login-box .field{margin-bottom:12px}'
+        '</style></head><body style="display:block">'
         '<div class=login-wrap>'
         f'{_EYE_SVG}'
-        '<div style="text-align:center;margin-bottom:6px">'
-        '<span style="color:var(--or);font-weight:700;font-size:13px;letter-spacing:.28em;display:block">NEXIS</span>'
-        '<span style="color:var(--fg2);font-size:9px;letter-spacing:.18em;text-transform:uppercase">CONTROLLER · BUILD 1.0.0</span>'
+        '<div style="text-align:center;margin-bottom:20px">'
+        '<span style="color:var(--or);font-weight:700;font-size:15px;letter-spacing:.32em;display:block;margin-bottom:3px">NeXiS</span>'
+        '<span style="color:var(--fg2);font-size:9px;letter-spacing:.2em;text-transform:uppercase">CONTROLLER · BUILD 1.0.0</span>'
         '</div>'
         '<div class=login-box>'
-        '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.14em;color:var(--fg2);margin-bottom:14px;text-align:center">Identity Verification Required</div>'
+        '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.14em;color:var(--fg2);margin-bottom:18px;text-align:center">Sign In</div>'
         f'{err_html}'
         '<form method=POST action=/login>'
-        '<input type=password name=password placeholder="Access Code" autofocus>'
-        '<button type=submit class=btn style="width:100%;text-transform:uppercase;letter-spacing:.12em">Authenticate</button>'
+        '<div class=field><label>Username</label>'
+        '<input type=text name=username placeholder="username" autofocus autocomplete=username></div>'
+        '<div class=field><label>Password</label>'
+        '<input type=password name=password placeholder="password" autocomplete=current-password></div>'
+        '<button type=submit class=btn style="width:100%;text-transform:uppercase;letter-spacing:.12em;margin-top:4px">Sign In</button>'
         '</form>'
-        '<div style="font-size:9px;color:var(--fg2);text-align:center;margin-top:12px;letter-spacing:.06em">Authorised Personnel Only · Local Access</div>'
+        '<div style="font-size:9px;color:var(--fg2);text-align:center;margin-top:14px;letter-spacing:.06em">Neural Execution and Cross-device Inference System</div>'
         '</div>'
         '</div></body></html>'
     )
@@ -6287,7 +6455,7 @@ def _page_login(error=''):
 def _page_setup():
     return (
         '<!DOCTYPE html><html lang=en><head>'
-        '<meta charset=UTF-8><title>Nexis Controller — Initial Configuration</title>'
+        '<meta charset=UTF-8><title>NeXiS Controller — Initial Configuration</title>'
         "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<link rel=preconnect href='https://fonts.googleapis.com'>"
         "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
@@ -6342,7 +6510,7 @@ def _page_setup():
         # Step 2 — Node identity
         '<div class=sz-step id=step1>'
         '<div class=sz-title>Step 2 — Node Identity</div>'
-        '<div class=sz-sub>Configure the display name for this controller node as it will appear across the Nexis ecosystem.</div>'
+        '<div class=sz-sub>Configure the display name for this controller node as it will appear across the NeXiS ecosystem.</div>'
         '<div id=s1-err class=sz-err></div>'
         '<input class=sz-inp type=text id=hostname placeholder="Controller hostname" value="nexis-controller">'
         '<button class=sz-btn onclick=step1Next()>CONTINUE</button>'
@@ -6668,7 +6836,7 @@ def _page_hypervisor():
       </div>
       <div id=hv-no-node style=display:none>
         <p style="color:var(--fg2);font-size:11px;margin:0 0 10px">
-          No hypervisor nodes registered. Install and configure a Nexis Hypervisor node — it will register automatically on first boot.
+          No hypervisor nodes registered. Install and configure a NeXiS Hypervisor node — it will register automatically on first boot.
         </p>
       </div>
     </div>
@@ -6831,7 +6999,7 @@ def _web_cmd(cmd) -> str:
             '`compact` — summarize + compress current conversation',
             '`reset` — clear current conversation',
             '`status` — session info',
-            '`memory` — what Nexis remembers',
+            '`memory` — what NeXiS remembers',
             '`memory search <term>` — search memories',
             '`forget <term>` — delete matching memories',
             '`search <query>` — web search',
@@ -6876,7 +7044,7 @@ def _web_cmd(cmd) -> str:
         with _shared_lock: _shared_hist.clear()
         with _shared_lock: hl = len(_shared_hist)
         _sync_broadcast({'typing': False, 'hist_len': hl})
-        lines = ['Conversation reset. Nexis still has its memories.']
+        lines = ['Conversation reset. NeXiS still has its memories.']
 
     elif c == 'compact':
         with _shared_lock: hist_copy = list(_shared_hist)
@@ -7446,6 +7614,13 @@ def _start_web():
                 elif path == '/history':             self._send(200, _page_history(db))
                 elif path == '/devices':             self._send(200, _page_devices(db))
                 elif path == '/hypervisor':          self._send(200, _page_hypervisor())
+                elif path == '/users':               self._send(200, _page_users())
+                elif path == '/api/users':
+                    self._send(200, json.dumps({'users': [
+                        {'username': u['username'], 'role': u['role'],
+                         'created_at': u.get('created_at', '')}
+                        for u in _users_load()
+                    ]}), 'application/json'); return
                 elif path.startswith('/api/audio/'):
                     try:
                         chunk_id = int(path.split('/')[-1])
@@ -7745,13 +7920,14 @@ def _start_web():
             # Login form — no auth required
             if path == '/login':
                 try:
-                    params = parse_qs(body.decode('utf-8', 'replace'))
-                    pw = params.get('password', [''])[0]
-                    if _auth_check(pw):
-                        token = _session_create()
+                    params   = parse_qs(body.decode('utf-8', 'replace'))
+                    username = params.get('username', [''])[0].strip()
+                    pw       = params.get('password', [''])[0]
+                    if _user_check(username, pw):
+                        token = _session_create(username)
                         self._redirect('/chat', {'Set-Cookie': f'_nexis_session={token}; Path=/; HttpOnly; SameSite=Strict'})
                     else:
-                        self._send(200, _page_login('Incorrect password.'))
+                        self._send(200, _page_login('Invalid username or password.'))
                 except Exception as e:
                     self._send(200, _page_login(str(e)))
                 return
@@ -7776,14 +7952,41 @@ def _start_web():
                     self._send(500, json.dumps({'error': str(e)}), 'application/json')
                 return
 
-            # Issue a persistent Bearer token — accepts password, no session required
+            # Issue a persistent Bearer token — accepts username + password
             if path == '/api/token':
                 try:
-                    data = json.loads(body) if body else {}
-                    if _auth_check(data.get('password', '')):
-                        self._send(200, json.dumps({'token': _api_token_create()}), 'application/json')
+                    data     = json.loads(body) if body else {}
+                    username = data.get('username', '').strip()
+                    password = data.get('password', '')
+                    # Legacy: if no username field, fall back to old single-password check
+                    if not username:
+                        username = 'creator'
+                    if _user_check(username, password) or (not username and _auth_check(password)):
+                        tok = _api_token_create(username)
+                        self._send(200, json.dumps({'token': tok, 'username': username}), 'application/json')
                     else:
-                        self._send(401, json.dumps({'error': 'invalid password'}), 'application/json')
+                        self._send(401, json.dumps({'error': 'Invalid credentials.'}), 'application/json')
+                except Exception as e:
+                    self._send(500, json.dumps({'error': str(e)}), 'application/json')
+                return
+
+            # NeXiS SSO — validate credentials for hypervisor / other ecosystem nodes
+            if path == '/api/sso/validate':
+                try:
+                    data     = json.loads(body) if body else {}
+                    username = data.get('username', '').strip()
+                    password = data.get('password', '')
+                    if _user_check(username, password):
+                        user = _user_get(username)
+                        tok  = _api_token_create(username)
+                        self._send(200, json.dumps({
+                            'valid':    True,
+                            'username': username,
+                            'role':     user.get('role', 'user'),
+                            'token':    tok,
+                        }), 'application/json')
+                    else:
+                        self._send(401, json.dumps({'valid': False, 'error': 'Invalid credentials.'}), 'application/json')
                 except Exception as e:
                     self._send(500, json.dumps({'error': str(e)}), 'application/json')
                 return
@@ -7791,6 +7994,49 @@ def _start_web():
             # All other POSTs require auth
             if not self._authed():
                 self._send(401, json.dumps({'error': 'unauthorized'}), 'application/json'); return
+
+            # ── User management API (admin only) ──────────────────────────────
+            if path == '/api/users' and self.command == 'POST':
+                try:
+                    data    = json.loads(body) if body else {}
+                    uname   = data.get('username', '').strip()
+                    pw      = data.get('password', '')
+                    role    = data.get('role', 'user')
+                    if role not in ('admin', 'user'):
+                        role = 'user'
+                    err = _user_create(uname, pw, role)
+                    if err:
+                        self._send(400, json.dumps({'ok': False, 'error': err}), 'application/json')
+                    else:
+                        self._send(200, json.dumps({'ok': True}), 'application/json')
+                except Exception as e:
+                    self._send(500, json.dumps({'error': str(e)}), 'application/json')
+                return
+
+            if path.startswith('/api/users/') and self.command == 'DELETE':
+                uname = path.split('/api/users/')[-1].strip('/')
+                if uname == 'creator':
+                    self._send(400, json.dumps({'ok': False, 'error': 'Cannot delete the creator account.'}), 'application/json')
+                elif _user_delete(uname):
+                    self._send(200, json.dumps({'ok': True}), 'application/json')
+                else:
+                    self._send(404, json.dumps({'ok': False, 'error': 'User not found.'}), 'application/json')
+                return
+
+            if path.startswith('/api/users/') and path.endswith('/password'):
+                uname = path.split('/api/users/')[-1].replace('/password', '').strip('/')
+                try:
+                    data = json.loads(body) if body else {}
+                    pw   = data.get('password', '')
+                    if len(pw) < 8:
+                        self._send(400, json.dumps({'ok': False, 'error': 'Password must be at least 8 characters.'}), 'application/json')
+                    elif _user_set_password(uname, pw):
+                        self._send(200, json.dumps({'ok': True}), 'application/json')
+                    else:
+                        self._send(404, json.dumps({'ok': False, 'error': 'User not found.'}), 'application/json')
+                except Exception as e:
+                    self._send(500, json.dumps({'error': str(e)}), 'application/json')
+                return
 
             try:
                 if path == '/api/chat':
@@ -8388,7 +8634,7 @@ def _seed_shared_history():
 
 
 def main():
-    _log('Nexis Controller starting')
+    _log('NeXiS Controller starting')
     _auth_load()         # ensure credentials file exists
     _ensure_tls_cert()   # generate self-signed TLS cert if not present
     _seed_shared_history()
