@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NeXiS Daemon v3.1"""
+"""Nexis Controller — Build 1.0.0"""
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
@@ -217,6 +217,17 @@ def _auth_check(password: str) -> bool:
 def _auth_set_password(new_password: str):
     creds = _auth_load()
     creds['hash'] = hashlib.sha256(new_password.encode()).hexdigest()
+    AUTH_FILE.write_text(json.dumps(creds, indent=2))
+
+def _setup_done() -> bool:
+    try:
+        return bool(json.loads(AUTH_FILE.read_text()).get('setup_done', False))
+    except Exception:
+        return False
+
+def _setup_complete():
+    creds = _auth_load()
+    creds['setup_done'] = True
     AUTH_FILE.write_text(json.dumps(creds, indent=2))
 
 # ── Device unlock passwords (server-side, synced to all clients) ──────────────
@@ -1814,6 +1825,7 @@ def _db():
         ('embedding',     'ALTER TABLE memories ADD COLUMN embedding BLOB'),
         ('session_title', 'ALTER TABLE chat_history ADD COLUMN session_title TEXT'),
         ('mac',           "ALTER TABLE devices ADD COLUMN mac TEXT DEFAULT ''"),
+        ('status_json',   "ALTER TABLE devices ADD COLUMN status_json TEXT DEFAULT NULL"),
     ]:
         try:
             conn.execute(_ddl)
@@ -1891,6 +1903,7 @@ def _devices_list(conn):
                 'charging':     bool(r['charging']) if r['charging'] is not None else None,
                 'last_seen':    r['last_seen'],
                 'online':       (r['secs_ago'] or 9999) < 30,
+                'status_json':  r['status_json'] if 'status_json' in r.keys() else None,
             })
         return result
     except Exception:
@@ -5688,8 +5701,9 @@ def _shell(content, active='chat'):
         ('history',   'history',  'History'),
         ('memory',    'memory',   'Memory'),
         ('schedules', 'schedule', 'Schedules'),
-        ('devices',   'devices',  'Devices'),
-        ('status',    'monitor_heart', 'Status'),
+        ('devices',    'devices',       'Devices'),
+        ('hypervisor', 'dns',           'Hypervisor'),
+        ('status',     'monitor_heart', 'Status'),
     ]
     nav_html = ''.join(
         f"<a href='/{s}' class='nav-item {'on' if active==s else ''}'>"
@@ -5700,7 +5714,7 @@ def _shell(content, active='chat'):
         '<!DOCTYPE html><html lang=en><head>'
         '<meta charset=UTF-8>'
         '<meta name=viewport content="width=device-width,initial-scale=1">'
-        '<title>NeXiS</title>'
+        '<title>Nexis Controller</title>'
         "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<link rel=preconnect href='https://fonts.googleapis.com'>"
         "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
@@ -5712,8 +5726,8 @@ def _shell(content, active='chat'):
         '<div class=sb-brand>'
         f'{_EYE_SVG}'
         '<div class=sb-brand-text>'
-        '<span class=sb-name>N e X i S</span>'
-        '<span class=sb-ver>v3.1</span>'
+        '<span class=sb-name>NEXIS</span>'
+        '<span class=sb-ver>CONTROLLER · BUILD 1.0.0</span>'
         '</div>'
         '</div>'
         f'<nav class=sb-nav>{nav_html}</nav>'
@@ -6244,7 +6258,7 @@ def _page_login(error=''):
     err_html = f'<div class=login-err>{_esc(error)}</div>' if error else ''
     return (
         '<!DOCTYPE html><html lang=en><head>'
-        '<meta charset=UTF-8><title>NeXiS — Login</title>'
+        '<meta charset=UTF-8><title>Nexis Controller — Authenticate</title>'
         "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<link rel=preconnect href='https://fonts.googleapis.com'>"
         "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
@@ -6253,15 +6267,130 @@ def _page_login(error=''):
         f'<style>{_CSS}</style></head><body style="display:block">'
         '<div class=login-wrap>'
         f'{_EYE_SVG}'
-        '<span style="color:var(--or);font-weight:700;font-size:16px;letter-spacing:.22em">N e X i S</span>'
+        '<div style="text-align:center;margin-bottom:6px">'
+        '<span style="color:var(--or);font-weight:700;font-size:13px;letter-spacing:.28em;display:block">NEXIS</span>'
+        '<span style="color:var(--fg2);font-size:9px;letter-spacing:.18em;text-transform:uppercase">CONTROLLER · BUILD 1.0.0</span>'
+        '</div>'
         '<div class=login-box>'
+        '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.14em;color:var(--fg2);margin-bottom:14px;text-align:center">Identity Verification Required</div>'
         f'{err_html}'
         '<form method=POST action=/login>'
-        '<input type=password name=password placeholder="password" autofocus>'
-        '<button type=submit class=btn style="width:100%">Enter</button>'
+        '<input type=password name=password placeholder="Access Code" autofocus>'
+        '<button type=submit class=btn style="width:100%;text-transform:uppercase;letter-spacing:.12em">Authenticate</button>'
         '</form>'
+        '<div style="font-size:9px;color:var(--fg2);text-align:center;margin-top:12px;letter-spacing:.06em">Authorised Personnel Only · Local Access</div>'
         '</div>'
         '</div></body></html>'
+    )
+
+
+def _page_setup():
+    return (
+        '<!DOCTYPE html><html lang=en><head>'
+        '<meta charset=UTF-8><title>Nexis Controller — Initial Configuration</title>'
+        "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
+        "<link rel=preconnect href='https://fonts.googleapis.com'>"
+        "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
+        "<link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' media=print onload=\"this.media='all'\">"
+        "<noscript><link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap'></noscript>"
+        f'<style>{_CSS}'
+        '.sz-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;'
+        'min-height:100vh;padding:20px;box-sizing:border-box}'
+        '.sz-card{background:var(--bg3);border:1px solid var(--border);border-radius:4px;'
+        'padding:32px 36px;max-width:480px;width:100%}'
+        '.sz-step{display:none}.sz-step.active{display:block}'
+        '.sz-title{font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;'
+        'color:var(--or);margin-bottom:4px}'
+        '.sz-sub{font-size:10px;color:var(--fg2);letter-spacing:.06em;margin-bottom:20px}'
+        '.sz-inp{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:2px;'
+        'color:var(--fg);padding:9px 12px;font-family:var(--font);font-size:12px;outline:none;'
+        'box-sizing:border-box;margin-bottom:10px;transition:border-color .2s}'
+        '.sz-inp:focus{border-color:var(--or2)}'
+        '.sz-btn{width:100%;background:var(--or);border:none;border-radius:2px;color:#000;'
+        'padding:10px;font-family:var(--font);font-size:10px;font-weight:700;letter-spacing:.14em;'
+        'text-transform:uppercase;cursor:pointer;transition:opacity .15s;margin-top:4px}'
+        '.sz-btn:hover{opacity:.85}'
+        '.sz-err{color:#EF5350;font-size:10px;margin-bottom:8px;letter-spacing:.04em}'
+        '.sz-ok{color:#4CAF50;font-size:10px;margin-bottom:8px;letter-spacing:.04em}'
+        '.sz-prog{display:flex;gap:6px;margin-bottom:24px}'
+        '.sz-dot{height:3px;flex:1;background:var(--border);border-radius:2px;transition:background .3s}'
+        '.sz-dot.on{background:var(--or)}'
+        '.sz-pw-bar{height:3px;background:var(--border);border-radius:2px;margin-bottom:10px;transition:width .2s}'
+        '</style></head><body style="display:block">'
+        '<div class=sz-wrap>'
+        f'{_EYE_SVG}'
+        '<div style="text-align:center;margin-bottom:20px">'
+        '<span style="color:var(--or);font-weight:700;font-size:13px;letter-spacing:.28em;display:block">NEXIS</span>'
+        '<span style="color:var(--fg2);font-size:9px;letter-spacing:.18em;text-transform:uppercase">CONTROLLER · BUILD 1.0.0 · INITIAL CONFIGURATION</span>'
+        '</div>'
+        '<div class=sz-card>'
+        '<div class=sz-prog>'
+        '<div class="sz-dot on" id=d0></div>'
+        '<div class=sz-dot id=d1></div>'
+        '<div class=sz-dot id=d2></div>'
+        '</div>'
+        # Step 1 — Set password
+        '<div class="sz-step active" id=step0>'
+        '<div class=sz-title>Step 1 — Access Control</div>'
+        '<div class=sz-sub>Establish the administrator access code for this controller node. This credential secures all connected subsystems.</div>'
+        '<div id=s0-err class=sz-err></div>'
+        '<input class=sz-inp type=password id=pw placeholder="New access code" oninput="pwBar(this.value)">'
+        '<div class=sz-pw-bar><div id=pw-fill style="height:3px;background:var(--or);border-radius:2px;width:0;transition:width .2s"></div></div>'
+        '<input class=sz-inp type=password id=pw2 placeholder="Confirm access code">'
+        '<button class=sz-btn onclick=step0Next()>CONTINUE</button>'
+        '</div>'
+        # Step 2 — Node identity
+        '<div class=sz-step id=step1>'
+        '<div class=sz-title>Step 2 — Node Identity</div>'
+        '<div class=sz-sub>Configure the display name for this controller node as it will appear across the Nexis ecosystem.</div>'
+        '<div id=s1-err class=sz-err></div>'
+        '<input class=sz-inp type=text id=hostname placeholder="Controller hostname" value="nexis-controller">'
+        '<button class=sz-btn onclick=step1Next()>CONTINUE</button>'
+        '</div>'
+        # Step 3 — Complete
+        '<div class=sz-step id=step2>'
+        '<div class=sz-title>Step 3 — Initialisation Complete</div>'
+        '<div class=sz-sub>Controller node is configured and ready for operation. You will be directed to the authentication interface.</div>'
+        '<div class=sz-ok>✓ Access control configured<br>✓ Node identity established<br>✓ Systems nominal</div>'
+        '<button class=sz-btn onclick=step2Finish()>ENTER CONTROLLER</button>'
+        '</div>'
+        '</div>'
+        '</div>'
+        '<script>'
+        'var _step=0;'
+        'function showStep(n){'
+        '  document.querySelectorAll(".sz-step").forEach(function(e,i){e.classList.toggle("active",i===n)});'
+        '  document.querySelectorAll(".sz-dot").forEach(function(e,i){e.classList.toggle("on",i<=n)});'
+        '  _step=n;'
+        '}'
+        'function pwBar(v){'
+        '  var s=0;'
+        '  if(v.length>=8)s+=25;if(v.length>=12)s+=25;'
+        '  if(/[A-Z]/.test(v))s+=25;if(/[0-9!@#$%^&*]/.test(v))s+=25;'
+        '  document.getElementById("pw-fill").style.width=s+"%";'
+        '}'
+        'function step0Next(){'
+        '  var pw=document.getElementById("pw").value;'
+        '  var pw2=document.getElementById("pw2").value;'
+        '  var err=document.getElementById("s0-err");'
+        '  if(pw.length<8){err.textContent="Minimum 8 characters required.";return;}'
+        '  if(pw!==pw2){err.textContent="Access codes do not match.";return;}'
+        '  err.textContent="";'
+        '  fetch("/api/setup/password",{method:"POST",headers:{"Content-Type":"application/json"},'
+        '    body:JSON.stringify({password:pw})})'
+        '  .then(function(r){return r.json();})'
+        '  .then(function(d){if(d.ok)showStep(1);else err.textContent=d.error||"Error.";});'
+        '}'
+        'function step1Next(){'
+        '  showStep(2);'
+        '}'
+        'function step2Finish(){'
+        '  fetch("/api/setup/complete",{method:"POST",headers:{"Content-Type":"application/json"},'
+        '    body:"{}"})'
+        '  .then(function(){window.location="/login";});'
+        '}'
+        '</script>'
+        '</body></html>'
     )
 
 
@@ -6480,6 +6609,212 @@ def _page_history(db):
         f"<div class=page-head>Chat History</div>"
         f"<div class=page><div class=card><div class=card-body>{items}</div></div></div>",
         'history')
+
+
+def _page_hypervisor():
+    return _shell(r"""
+<style>
+.hv-wrap{max-width:800px}
+.hv-section{margin-bottom:20px}
+.hv-inp{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:2px;
+  color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;
+  margin-bottom:8px;transition:border-color .2s;box-sizing:border-box}
+.hv-inp:focus{border-color:var(--or2)}
+.hv-btn{background:transparent;border:1px solid var(--border);border-radius:2px;color:var(--fg2);
+  padding:0 18px;height:34px;line-height:34px;font-family:var(--font);font-size:10px;
+  text-transform:uppercase;letter-spacing:.08em;cursor:pointer;white-space:nowrap;
+  transition:color .15s,border-color .15s}
+.hv-btn:hover:not(:disabled){color:var(--or);border-color:var(--or2)}
+.hv-btn.accent{color:var(--or);border-color:var(--or2)}
+.hv-row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.hv-stat{flex:1;min-width:100px;background:var(--bg3);border:1px solid var(--border);
+  border-radius:2px;padding:12px;text-align:center}
+.hv-stat-val{font-size:20px;font-weight:700;color:var(--or);display:block}
+.hv-stat-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--fg2);margin-top:4px;display:block}
+.hv-item{padding:8px 0;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.hv-item:last-child{border-bottom:none}
+.hv-badge{font-size:9px;text-transform:uppercase;letter-spacing:.08em;padding:2px 8px;border-radius:2px;
+  border:1px solid;font-weight:700}
+.hv-badge.active{color:#4CAF50;border-color:#4CAF50}
+.hv-badge.off{color:var(--fg2);border-color:var(--border)}
+.hv-cmd-inp{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:2px;
+  color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;box-sizing:border-box}
+.hv-cmd-inp:focus{border-color:var(--or2)}
+.hv-out{background:var(--bg2);border:1px solid var(--border);border-radius:2px;padding:10px;
+  font-size:11px;color:var(--fg2);min-height:60px;margin-top:8px;white-space:pre-wrap}
+.hv-status-bar{font-size:10px;color:var(--fg2);margin-bottom:12px;padding:6px 10px;
+  background:var(--bg3);border:1px solid var(--border);border-radius:2px}
+.hv-status-bar.ok{border-color:#4CAF50;color:#4CAF50}
+.hv-status-bar.err{border-color:#EF5350;color:#EF5350}
+.hv-status-bar.warn{border-color:var(--or2);color:var(--or)}
+</style>
+<div class=page-head>Hypervisor Node</div>
+<div class=page>
+<div class="hv-wrap">
+
+  <!-- Connection panel -->
+  <div class=card>
+    <div class=card-hd>NODE CONNECTION</div>
+    <div class=card-body>
+      <div id=hv-conn-status class="hv-status-bar warn">SCANNING FOR REGISTERED NODES...</div>
+      <div id=hv-connected style=display:none>
+        <div class=hv-row id=hv-stats>
+          <div class=hv-stat><span class=hv-stat-val id=hv-cpu>–</span><span class=hv-stat-lbl>CPU %</span></div>
+          <div class=hv-stat><span class=hv-stat-val id=hv-mem>–</span><span class=hv-stat-lbl>MEMORY %</span></div>
+          <div class=hv-stat><span class=hv-stat-val id=hv-disk>–</span><span class=hv-stat-lbl>DISK %</span></div>
+          <div class=hv-stat><span class=hv-stat-val id=hv-vms>–</span><span class=hv-stat-lbl>VM INSTANCES</span></div>
+          <div class=hv-stat><span class=hv-stat-val id=hv-cts>–</span><span class=hv-stat-lbl>CONTAINERS</span></div>
+        </div>
+      </div>
+      <div id=hv-no-node style=display:none>
+        <p style="color:var(--fg2);font-size:11px;margin:0 0 10px">
+          No hypervisor nodes registered. Install and configure a Nexis Hypervisor node — it will register automatically on first boot.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Virtual Instances -->
+  <div class=card id=hv-vms-card style=display:none>
+    <div class=card-hd>VIRTUAL INSTANCES</div>
+    <div class=card-body>
+      <div id=hv-vm-list><span style="color:var(--fg2);font-size:11px">Loading...</span></div>
+    </div>
+  </div>
+
+  <!-- Containers -->
+  <div class=card id=hv-cts-card style=display:none>
+    <div class=card-hd>CONTAINERS</div>
+    <div class=card-body>
+      <div id=hv-ct-list><span style="color:var(--fg2);font-size:11px">Loading...</span></div>
+    </div>
+  </div>
+
+  <!-- Command relay -->
+  <div class=card id=hv-cmd-card style=display:none>
+    <div class=card-hd>COMMAND RELAY</div>
+    <div class=card-body>
+      <div style="font-size:10px;color:var(--fg2);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">
+        Issue commands directly to the hypervisor node via natural language.
+      </div>
+      <div style=display:flex;gap:8px>
+        <input id=hv-cmd class=hv-cmd-inp placeholder="e.g. start vm ubuntu-server · list vms · snapshot dev-box" onkeydown="if(event.key==='Enter')hvSend()">
+        <button class="hv-btn accent" onclick=hvSend()>EXECUTE</button>
+      </div>
+      <div id=hv-out class=hv-out style=display:none></div>
+    </div>
+  </div>
+
+</div>
+</div>
+<script>
+var _hvNode = null;
+
+function hvLoad(){
+  fetch('/api/devices').then(r=>r.json()).then(d=>{
+    var nodes = (d.devices||[]).filter(function(x){return x.device_type==='hypervisor'});
+    if(!nodes.length){
+      document.getElementById('hv-conn-status').textContent='NO HYPERVISOR NODE REGISTERED';
+      document.getElementById('hv-conn-status').className='hv-status-bar err';
+      document.getElementById('hv-no-node').style.display='block';
+      return;
+    }
+    _hvNode = nodes[0];
+    var status = _hvNode.online ? 'NODE ONLINE · ' + _hvNode.hostname.toUpperCase() + ' · ' + (_hvNode.ip||'?')
+                                : 'NODE OFFLINE · ' + _hvNode.hostname.toUpperCase() + ' · LAST SEEN ' + (_hvNode.last_seen||'?').substring(0,16);
+    var cls = _hvNode.online ? 'ok' : 'err';
+    document.getElementById('hv-conn-status').textContent = status;
+    document.getElementById('hv-conn-status').className = 'hv-status-bar ' + cls;
+
+    if(_hvNode.status_json){
+      try{
+        var s = JSON.parse(_hvNode.status_json);
+        document.getElementById('hv-cpu').textContent  = (s.cpu||0).toFixed(1)+'%';
+        document.getElementById('hv-mem').textContent  = (s.mem||0).toFixed(1)+'%';
+        document.getElementById('hv-disk').textContent = (s.disk||0).toFixed(1)+'%';
+        document.getElementById('hv-vms').textContent  = (s.vms_active||0)+' / '+(s.vms_total||0);
+        document.getElementById('hv-cts').textContent  = (s.cts_active||0)+' / '+(s.cts_total||0);
+      }catch(e){}
+    }
+    document.getElementById('hv-connected').style.display='block';
+    document.getElementById('hv-vms-card').style.display='block';
+    document.getElementById('hv-cts-card').style.display='block';
+    document.getElementById('hv-cmd-card').style.display='block';
+
+    if(_hvNode.online){
+      hvLoadVMs();
+      hvLoadCTs();
+    }
+  }).catch(function(){
+    document.getElementById('hv-conn-status').textContent='FAILED TO QUERY DEVICE REGISTRY';
+    document.getElementById('hv-conn-status').className='hv-status-bar err';
+  });
+}
+
+function hvPowerAction(type, id, action){
+  var url = '/api/hv/'+type+'/'+id+'/'+action;
+  fetch(url, {method:'POST',headers:{'Content-Type':'application/json'}})
+    .then(r=>r.json()).then(function(){
+      if(type==='vm') hvLoadVMs(); else hvLoadCTs();
+    });
+}
+
+function hvLoadVMs(){
+  fetch('/api/hv/vms').then(r=>r.json()).then(function(d){
+    var el = document.getElementById('hv-vm-list');
+    if(!d.vms||!d.vms.length){ el.innerHTML='<span style="color:var(--fg2);font-size:11px">No virtual instances provisioned.</span>'; return; }
+    el.innerHTML = d.vms.map(function(v){
+      var running = v.status==='running';
+      var badge = running ? '<span class="hv-badge active">ACTIVE</span>' : '<span class="hv-badge off">'+v.status.toUpperCase()+'</span>';
+      var btns = running
+        ? '<button class=hv-btn onclick="hvPowerAction(\'vm\',\''+v.id+'\',\'stop\')">STOP</button>'
+          + '<button class=hv-btn onclick="hvPowerAction(\'vm\',\''+v.id+'\',\'reboot\')">REBOOT</button>'
+        : '<button class="hv-btn accent" onclick="hvPowerAction(\'vm\',\''+v.id+'\',\'start\')">START</button>';
+      return '<div class=hv-item>'+badge+'<span style="flex:1;font-size:12px">'+v.name+'</span>'
+             +'<span style="color:var(--fg2);font-size:10px;margin-right:10px">'+v.vcpus+' vCPU &nbsp; '+(v.memory_mb/1024).toFixed(1)+' GiB</span>'
+             +btns+'</div>';
+    }).join('');
+  }).catch(function(){
+    document.getElementById('hv-vm-list').innerHTML='<span style="color:var(--fg2);font-size:11px">Unable to reach hypervisor node.</span>';
+  });
+}
+
+function hvLoadCTs(){
+  fetch('/api/hv/containers').then(r=>r.json()).then(function(d){
+    var el = document.getElementById('hv-ct-list');
+    if(!d.containers||!d.containers.length){ el.innerHTML='<span style="color:var(--fg2);font-size:11px">No containers provisioned.</span>'; return; }
+    el.innerHTML = d.containers.map(function(c){
+      var running = c.status==='running';
+      var badge = running ? '<span class="hv-badge active">ACTIVE</span>' : '<span class="hv-badge off">'+c.status.toUpperCase()+'</span>';
+      var btns = running
+        ? '<button class=hv-btn onclick="hvPowerAction(\'container\',\''+c.name+'\',\'stop\')">STOP</button>'
+          + '<button class=hv-btn onclick="hvPowerAction(\'container\',\''+c.name+'\',\'restart\')">RESTART</button>'
+        : '<button class="hv-btn accent" onclick="hvPowerAction(\'container\',\''+c.name+'\',\'start\')">START</button>';
+      return '<div class=hv-item>'+badge+'<span style="flex:1;font-size:12px">'+c.name+'</span>'
+             +'<span style="color:var(--fg2);font-size:10px;margin-right:10px">'+c.memory_mb+' MiB &nbsp; '+c.cpus+' CPU</span>'
+             +btns+'</div>';
+    }).join('');
+  }).catch(function(){
+    document.getElementById('hv-ct-list').innerHTML='<span style="color:var(--fg2);font-size:11px">Unable to reach hypervisor node.</span>';
+  });
+}
+
+function hvSend(){
+  var cmd = document.getElementById('hv-cmd').value.trim();
+  if(!cmd) return;
+  var out = document.getElementById('hv-out');
+  out.style.display='block'; out.textContent='Processing...';
+  fetch('/api/hv/command', {method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({command:cmd})})
+    .then(r=>r.json()).then(function(d){
+      out.textContent = d.result || d.error || JSON.stringify(d);
+      document.getElementById('hv-cmd').value='';
+    }).catch(function(e){ out.textContent='Error: '+e.message; });
+}
+
+hvLoad();
+</script>
+""", 'hypervisor')
 
 
 def _web_cmd(cmd) -> str:
@@ -7072,8 +7407,15 @@ def _start_web():
             if path == '/api/ping':
                 self._send(200, '{"ok":true}', 'application/json'); return
 
+            # Setup wizard — shown before login on fresh install
+            if path == '/setup':
+                self._send(200, _page_setup()); return
+
             # Login page — no auth required
             if path == '/login':
+                # If setup not done, redirect to wizard
+                if not _setup_done():
+                    self._redirect('/setup'); return
                 self._send(200, _page_login()); return
 
             # Logout — clear cookie and redirect
@@ -7088,7 +7430,9 @@ def _start_web():
                 self.end_headers()
                 return
 
-            # All other pages require auth
+            # All other pages require setup + auth
+            if not _setup_done():
+                self._redirect('/setup'); return
             if not self._authed():
                 self._redirect('/login'); return
 
@@ -7101,6 +7445,7 @@ def _start_web():
                 elif path == '/status':              self._send(200, _page_status(db))
                 elif path == '/history':             self._send(200, _page_history(db))
                 elif path == '/devices':             self._send(200, _page_devices(db))
+                elif path == '/hypervisor':          self._send(200, _page_hypervisor())
                 elif path.startswith('/api/audio/'):
                     try:
                         chunk_id = int(path.split('/')[-1])
@@ -7221,6 +7566,35 @@ def _start_web():
                         self._send(200, json.dumps({'error': 'psutil not installed'}), 'application/json')
                 elif path == '/api/probe':
                     self._send(200, json.dumps({'probe': _system_probe()}), 'application/json')
+                elif path == '/api/system/info':
+                    self._send(200, json.dumps({
+                        'hostname': _socket.gethostname(),
+                        'version':  '1.0.0',
+                        'build':    'NX-CTL \u00b7 BUILD 1.0.0',
+                    }), 'application/json')
+                elif path.startswith('/api/hv/'):
+                    # Proxy to registered hypervisor node
+                    hdb   = _db()
+                    devs  = _devices_list(hdb); hdb.close()
+                    node  = next((d for d in devs if d['device_type'] == 'hypervisor'), None)
+                    if not node:
+                        self._send(503, json.dumps({'error': 'no hypervisor node registered'}), 'application/json')
+                    elif not node['online']:
+                        self._send(503, json.dumps({'error': 'hypervisor node offline'}), 'application/json')
+                    else:
+                        hv_ip   = node['ip']
+                        sub     = path[len('/api/hv'):]  # e.g. /vms, /containers
+                        hv_url  = f'https://{hv_ip}:8443/api{sub}'
+                        import ssl as _ssl
+                        ctx = _ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode    = _ssl.CERT_NONE
+                        try:
+                            req = urllib.request.Request(hv_url)
+                            with urllib.request.urlopen(req, context=ctx, timeout=8) as r:
+                                self._send(r.status, r.read(), r.headers.get('Content-Type', 'application/json'))
+                        except Exception as e:
+                            self._send(502, json.dumps({'error': str(e)}), 'application/json')
                 elif path.startswith('/api/probe/device'):
                     # Return last-known info for a specific device from devices table
                     qs     = parse_qs(urlparse(self.path).query)
@@ -7380,6 +7754,26 @@ def _start_web():
                         self._send(200, _page_login('Incorrect password.'))
                 except Exception as e:
                     self._send(200, _page_login(str(e)))
+                return
+
+            # Setup wizard endpoints — no auth required (only active before setup_done)
+            if path in ('/api/setup/password', '/api/setup/complete'):
+                if _setup_done() and path == '/api/setup/complete':
+                    self._send(200, json.dumps({'ok': True}), 'application/json'); return
+                try:
+                    data = json.loads(body) if body else {}
+                    if path == '/api/setup/password':
+                        pw = data.get('password', '').strip()
+                        if len(pw) < 8:
+                            self._send(400, json.dumps({'ok': False, 'error': 'Minimum 8 characters required'}), 'application/json')
+                        else:
+                            _auth_set_password(pw)
+                            self._send(200, json.dumps({'ok': True}), 'application/json')
+                    else:
+                        _setup_complete()
+                        self._send(200, json.dumps({'ok': True}), 'application/json')
+                except Exception as e:
+                    self._send(500, json.dumps({'error': str(e)}), 'application/json')
                 return
 
             # Issue a persistent Bearer token — accepts password, no session required
@@ -7837,6 +8231,86 @@ def _start_web():
                             except Exception as e:
                                 self._send(200, json.dumps({'ok': False, 'message': str(e)}), 'application/json')
 
+                elif path.startswith('/api/hv/'):
+                    # Proxy POST to registered hypervisor node
+                    hdb   = _db()
+                    devs  = _devices_list(hdb); hdb.close()
+                    node  = next((d for d in devs if d['device_type'] == 'hypervisor'), None)
+                    if not node:
+                        self._send(503, json.dumps({'error': 'no hypervisor node registered'}), 'application/json')
+                    elif not node['online']:
+                        self._send(503, json.dumps({'error': 'hypervisor node offline'}), 'application/json')
+                    else:
+                        hv_ip  = node['ip']
+                        sub    = path[len('/api/hv'):]
+                        hv_url = f'https://{hv_ip}:8443/api{sub}'
+                        import ssl as _ssl2
+                        ctx2 = _ssl2.create_default_context()
+                        ctx2.check_hostname = False
+                        ctx2.verify_mode    = _ssl2.CERT_NONE
+                        try:
+                            req2 = urllib.request.Request(hv_url, data=body,
+                                                          headers={'Content-Type': 'application/json'},
+                                                          method='POST')
+                            with urllib.request.urlopen(req2, context=ctx2, timeout=10) as r2:
+                                self._send(r2.status, r2.read(), r2.headers.get('Content-Type', 'application/json'))
+                        except Exception as e:
+                            self._send(502, json.dumps({'error': str(e)}), 'application/json')
+
+                elif path == '/api/devices/register':
+                    # Hypervisor registration endpoint
+                    data   = json.loads(body) if body else {}
+                    dev_id = data.get('device_id', '').strip()
+                    if not dev_id:
+                        self._send(400, json.dumps({'error': 'device_id required'}), 'application/json')
+                    else:
+                        rdb  = _db()
+                        row  = rdb.execute('SELECT role FROM devices WHERE device_id=?', (dev_id,)).fetchone()
+                        role = row['role'] if row else 'hypervisor'
+                        caps = json.dumps(data.get('capabilities', ['vm_manage', 'container_manage', 'console']))
+                        rdb.execute("""
+                            INSERT INTO devices
+                                (device_id,hostname,model,os,arch,device_type,capabilities,ip,mac,role,last_seen)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                            ON CONFLICT(device_id) DO UPDATE SET
+                                hostname=excluded.hostname, model=excluded.model,
+                                os=excluded.os, arch=excluded.arch, ip=excluded.ip,
+                                capabilities=excluded.capabilities,
+                                last_seen=datetime('now')
+                        """, (dev_id,
+                              data.get('hostname', 'nexis-hypervisor'),
+                              data.get('model', 'NX-HV'),
+                              data.get('os', 'Debian 12'),
+                              data.get('arch', 'x86_64'),
+                              'hypervisor', caps,
+                              data.get('ip', ''), data.get('mac', ''), role))
+                        rdb.commit(); rdb.close()
+                        self._send(200, json.dumps({'ok': True, 'device_id': dev_id}), 'application/json')
+
+                elif path == '/api/devices/status':
+                    # Hypervisor live status push (called every 30s by hypervisor daemon)
+                    data   = json.loads(body) if body else {}
+                    dev_id = data.get('device_id', '').strip()
+                    if not dev_id:
+                        self._send(400, json.dumps({'error': 'device_id required'}), 'application/json')
+                    else:
+                        status_blob = json.dumps({
+                            'cpu':        data.get('cpu', 0),
+                            'mem':        data.get('mem', 0),
+                            'disk':       data.get('disk', 0),
+                            'vms_total':  data.get('vms_total', 0),
+                            'vms_active': data.get('vms_active', 0),
+                            'cts_total':  data.get('cts_total', 0),
+                            'cts_active': data.get('cts_active', 0),
+                            'updated_at': data.get('updated_at', ''),
+                        })
+                        sdb = _db()
+                        sdb.execute(
+                            "UPDATE devices SET status_json=?, last_seen=datetime('now') WHERE device_id=?",
+                            (status_blob, dev_id))
+                        sdb.commit(); sdb.close()
+                        self._send(200, json.dumps({'ok': True}), 'application/json')
+
                 elif path == '/api/monitor/thresholds':
                     # Update monitoring thresholds: {"cpu": 85, "mem": 90, "disk": 80}
                     data = json.loads(body) if body else {}
@@ -7914,7 +8388,7 @@ def _seed_shared_history():
 
 
 def main():
-    _log('NeXiS v3.1 starting')
+    _log('Nexis Controller starting')
     _auth_load()         # ensure credentials file exists
     _ensure_tls_cert()   # generate self-signed TLS cert if not present
     _seed_shared_history()

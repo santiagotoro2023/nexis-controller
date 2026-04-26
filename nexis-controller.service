@@ -1,0 +1,18 @@
+[Unit]
+Description=Nexis Controller — AI assistant and device management hub
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/nexis-controller
+ExecStart=/opt/nexis-controller/venv/bin/python3 /opt/nexis-controller/nexis_daemon.py
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

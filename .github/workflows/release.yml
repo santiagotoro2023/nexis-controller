@@ -1,0 +1,121 @@
+# Nexis Controller — Release Pipeline
+# Builds: .deb package
+# Triggered on: version tags (v1.0.0, v1.2.3, …)
+# Uniform versioning with nexis-hypervisor and nexis-worker.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 1.0.0)'
+        required: true
+        default: '1.0.0'
+
+env:
+  NEXIS_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', inputs.version) }}
+
+jobs:
+  build-deb:
+    name: Build .deb Package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: ver
+        run: |
+          V="${{ env.NEXIS_VERSION }}"
+          echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .deb
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          PKG="nexis-controller_${VERSION}_amd64"
+          mkdir -p "${PKG}/DEBIAN"
+          mkdir -p "${PKG}/opt/nexis-controller"
+          mkdir -p "${PKG}/etc/systemd/system"
+          mkdir -p "${PKG}/etc/nexis-controller"
+
+          cp nexis_daemon.py "${PKG}/opt/nexis-controller/"
+          cp requirements.txt "${PKG}/opt/nexis-controller/" 2>/dev/null || true
+          cp nexis-controller.service "${PKG}/etc/systemd/system/" 2>/dev/null || true
+
+          cat > "${PKG}/DEBIAN/control" << EOF
+          Package: nexis-controller
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Depends: python3 (>= 3.11), python3-pip, python3-venv
+          Maintainer: Nexis Project <noreply@nexis.local>
+          Description: Nexis Controller — AI assistant and device management hub
+           Part of the Nexis ecosystem. Manages AI conversations, device control,
+           and coordinates with Nexis Hypervisor nodes.
+          EOF
+
+          cat > "${PKG}/DEBIAN/postinst" << 'EOF'
+          #!/bin/bash
+          set -e
+          python3 -m venv /opt/nexis-controller/venv
+          /opt/nexis-controller/venv/bin/pip install -q -r /opt/nexis-controller/requirements.txt 2>/dev/null || true
+          systemctl daemon-reload
+          systemctl enable nexis-controller 2>/dev/null || true
+          systemctl restart nexis-controller 2>/dev/null || true
+          EOF
+          chmod 0755 "${PKG}/DEBIAN/postinst"
+
+          cat > "${PKG}/DEBIAN/prerm" << 'EOF'
+          #!/bin/bash
+          set -e
+          systemctl stop nexis-controller 2>/dev/null || true
+          systemctl disable nexis-controller 2>/dev/null || true
+          EOF
+          chmod 0755 "${PKG}/DEBIAN/prerm"
+
+          dpkg-deb --build "${PKG}"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ env.NEXIS_VERSION }}"
+          cat > notes.md << EOF
+          ## Nexis Controller ${VERSION}
+
+          ### Artefacts
+          | File | Description |
+          |------|-------------|
+          | \`nexis-controller_${VERSION#v}_amd64.deb\` | Debian package for Debian 12 systems |
+
+          ### Install
+          \`\`\`bash
+          curl -sSL https://raw.githubusercontent.com/santiagotoro2023/nexis-controller/main/install.sh | sudo bash
+          \`\`\`
+          Or install the .deb directly:
+          \`\`\`bash
+          sudo dpkg -i nexis-controller_${VERSION#v}_amd64.deb
+          \`\`\`
+
+          Access the web UI at \`https://<host-ip>:8443\` and complete the setup wizard.
+
+          ---
+          Part of the [Nexis ecosystem](https://github.com/santiagotoro2023).
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Nexis Controller ${{ env.NEXIS_VERSION }}"
+          body_path: notes.md
+          files: |
+            nexis-controller_${{ steps.ver.outputs.version }}_amd64.deb
+          draft: false
+          prerelease: ${{ contains(env.NEXIS_VERSION, '-') }}
