@@ -57,8 +57,8 @@ VOICE_MODELS = {
     },
 }
 
-PIPER_MODEL = str(VOICE_DIR / 'en_US-ryan-high.onnx')
-PIPER_CFG   = str(VOICE_DIR / 'en_US-ryan-high.onnx.json')
+PIPER_MODEL = str(VOICE_DIR / 'glados_piper_medium.onnx')
+PIPER_CFG   = str(VOICE_DIR / 'glados_piper_medium.onnx.json')
 
 MODELS = {
     'fast': {'name': MODEL_FAST,  'label': 'Qwen 14B (Fast)',        'desc': 'Quick responses, general use'},
