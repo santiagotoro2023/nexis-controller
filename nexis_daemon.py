@@ -874,32 +874,9 @@ def _tts_synth(text: str):
 
     rhythm_text = _tts_rhythm(clean, backend)
 
-    if backend == 'espeak':
-        if shutil.which('espeak-ng'):
-            try:
-                proc = subprocess.run(
-                    ['espeak-ng', '-v', 'en-us', '-s', '145', '-p', '35',
-                     '--stdout', rhythm_text],
-                    capture_output=True, timeout=30)
-                if proc.returncode == 0 and proc.stdout:
-                    return _tts_apply_effects(proc.stdout, fx)
-            except Exception as e:
-                _log(f'TTS espeak: {e}', 'WARN')
-        return None
-
     # Piper backend
     voice = _tts_load_voice()
-    if not voice and shutil.which('espeak-ng'):
-        try:
-            # Re-process text for espeak (different rhythm markers)
-            espeak_text = _tts_rhythm(clean, 'espeak')
-            proc = subprocess.run(
-                ['espeak-ng', '-v', 'en-us', '-s', '145', '-p', '35', '--stdout', espeak_text],
-                capture_output=True, timeout=30)
-            if proc.returncode == 0 and proc.stdout:
-                return _tts_apply_effects(proc.stdout, 'heavy')
-        except Exception:
-            pass
+    if not voice:
         return None
 
     if voice:
