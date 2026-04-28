@@ -2,7 +2,8 @@
 set -euo pipefail
 
 REPO="santiagotoro2023/nexis-controller"
-INSTALL_DIR="/opt/nexis-controller"
+VOICE_DIR="/root/.local/share/nexis/voice"
+HF_MED="https://huggingface.co/DavesArmoury/GLaDOS_TTS/resolve/main"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run as root (sudo bash install.sh)" >&2
@@ -26,8 +27,21 @@ curl -fsSL -o "$DEB" "$DEB_URL"
 
 echo "==> Installing..."
 dpkg -i "$DEB"
-
 rm -rf "$TMP"
+
+echo "==> Setting up GLaDOS voice model (~63 MB)..."
+mkdir -p "$VOICE_DIR"
+for FILE in glados_piper_medium.onnx glados_piper_medium.onnx.json; do
+  if [[ ! -f "${VOICE_DIR}/${FILE}" ]]; then
+    curl -fL --progress-bar "${HF_MED}/${FILE}" -o "${VOICE_DIR}/${FILE}"
+  else
+    echo "    ${FILE} already present, skipping."
+  fi
+done
+
+echo "==> Restarting service..."
+systemctl restart nexis-controller
 
 echo ""
 echo "Done. Access the web UI at https://$(hostname -I | awk '{print $1}'):8443"
+echo "CLI: nexis --status"
