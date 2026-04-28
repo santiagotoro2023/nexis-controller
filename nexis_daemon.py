@@ -50,14 +50,14 @@ VOICE_MODELS = {
     'default': {
         'label': 'GlaDOS',
         'desc':  'GlaDOS character voice (high quality)',
-        'onnx':  str(VOICE_DIR / 'en_us-glados-high.onnx'),
-        'json':  str(VOICE_DIR / 'en_us-glados-high.onnx.json'),
+        'onnx':  str(VOICE_DIR / 'glados_piper_medium.onnx'),
+        'json':  str(VOICE_DIR / 'glados_piper_medium.onnx.json'),
         'backend': 'piper',
     },
 }
 
-PIPER_MODEL = str(VOICE_DIR / 'en_us-glados-high.onnx')
-PIPER_CFG   = str(VOICE_DIR / 'en_us-glados-high.onnx.json')
+PIPER_MODEL = str(VOICE_DIR / 'glados_piper_medium.onnx')
+PIPER_CFG   = str(VOICE_DIR / 'glados_piper_medium.onnx.json')
 
 MODELS = {
     'fast': {'name': MODEL_FAST,  'label': 'Qwen 14B (Fast)',        'desc': 'Quick responses, general use'},
