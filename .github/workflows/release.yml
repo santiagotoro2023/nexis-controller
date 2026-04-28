@@ -113,7 +113,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Nexis Controller ${{ env.NEXIS_VERSION }}"
+          tag_name: ${{ env.NEXIS_VERSION }}
+          name: "NeXiS Controller ${{ env.NEXIS_VERSION }}"
           body_path: notes.md
           files: |
             nexis-controller_${{ steps.ver.outputs.version }}_amd64.deb
