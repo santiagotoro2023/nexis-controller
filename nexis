@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+OR='\033[38;5;208m';GN='\033[38;5;70m';RD='\033[38;5;160m'
+DIM='\033[2m';BOLD='\033[1m';RST='\033[0m'
+SOCK="/run/nexis/nexis.sock"
+SVC="nexis-controller"
+
+_sigil(){
+  echo -e "${OR}${BOLD}"
+  cat << 'SIG'
+                    .
+                   /|\
+                  / | \
+                 /  |  \
+                / . | . \
+               /  (   )  \
+              /  '  ◉  '  \
+             /   '.   .'   \
+            /     '---'     \
+           /_________________\
+
+      ███╗   ██╗███████╗██╗  ██╗██╗███████╗
+      ████╗  ██║██╔════╝╚██╗██╔╝██║██╔════╝
+      ██╔██╗ ██║█████╗   ╚███╔╝ ██║███████╗
+      ██║╚██╗██║██╔══╝   ██╔██╗ ██║╚════██║
+      ██║ ╚████║███████╗██╔╝ ██╗██║███████║
+      ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═╝╚══════╝
+
+      N e X i S
+SIG
+  echo -e "${RST}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --status|-s)
+      echo ""
+      systemctl is-active "$SVC" &>/dev/null \
+        && echo -e "  ${GN}●${RST} daemon   active" \
+        || echo -e "  ${RD}●${RST} daemon   offline"
+      curl -sfk https://localhost:8443/ -o /dev/null \
+        && echo -e "  ${GN}●${RST} web      https://localhost:8443" \
+        || echo -e "  ${RD}●${RST} web      offline"
+      echo ""; exit 0;;
+    --start)   sudo systemctl start   "$SVC" && echo -e "${GN}  started.${RST}"   || echo -e "${RD}  failed.${RST}"; exit 0;;
+    --stop)    sudo systemctl stop    "$SVC" && echo -e "${GN}  stopped.${RST}"   || echo -e "${RD}  failed.${RST}"; exit 0;;
+    --restart) sudo systemctl restart "$SVC" && echo -e "${GN}  restarted.${RST}" || echo -e "${RD}  failed.${RST}"; exit 0;;
+    --logs)
+      N="${2:-50}"; shift 2>/dev/null || true
+      journalctl -u "$SVC" -n "$N" --no-pager; exit 0;;
+    --web) xdg-open https://localhost:8443 2>/dev/null || echo "https://localhost:8443"; exit 0;;
+    --help|-h)
+      echo -e "\n  ${OR}${BOLD}NeXiS Controller${RST}"
+      echo -e "  ${DIM}──────────────────────────────────${RST}"
+      echo -e "  ${OR}nexis${RST}              open interactive session"
+      echo -e "  ${OR}nexis --status${RST}     service + web status"
+      echo -e "  ${OR}nexis --start/stop/restart${RST}"
+      echo -e "  ${OR}nexis --logs [n]${RST}   service journal"
+      echo -e "  ${OR}nexis --web${RST}        open web UI\n"
+      exit 0;;
+    *) echo -e "${RD}  unknown: $1${RST}  (nexis --help)"; exit 1;;
+  esac
+  shift
+done
+
+[[ ! -S "$SOCK" ]] && echo -e "\n  ${RD}NeXiS not running.${RST}\n  ${DIM}nexis --start${RST}\n" && exit 1
+
+if ! command -v socat &>/dev/null; then
+  echo -e "${RD}  socat not found — install with: sudo apt-get install socat${RST}" >&2; exit 1
+fi
+
+clear; _sigil
+MEM=$(free -h 2>/dev/null | awk '/^Mem:/{print $3"/"$2}')
+LOAD=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+echo -e "  ${DIM}────────────────────────────────────────────────────${RST}"
+printf  "  ${DIM}host   ${RST}%-26s  ${DIM}load  ${RST}%s\n" "$(hostname -s)" "$LOAD"
+printf  "  ${DIM}ram    ${RST}%s\n" "$MEM"
+echo -e "  ${DIM}────────────────────────────────────────────────────${RST}\n"
+exec socat - UNIX-CONNECT:"$SOCK"

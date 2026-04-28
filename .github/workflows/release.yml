@@ -44,10 +44,13 @@ jobs:
           mkdir -p "${PKG}/opt/nexis-controller"
           mkdir -p "${PKG}/etc/systemd/system"
           mkdir -p "${PKG}/etc/nexis-controller"
+          mkdir -p "${PKG}/usr/local/bin"
 
           cp nexis_daemon.py "${PKG}/opt/nexis-controller/"
           cp requirements.txt "${PKG}/opt/nexis-controller/" 2>/dev/null || true
           cp nexis-controller.service "${PKG}/etc/systemd/system/" 2>/dev/null || true
+          cp nexis "${PKG}/usr/local/bin/nexis"
+          chmod 0755 "${PKG}/usr/local/bin/nexis"
 
           cat > "${PKG}/DEBIAN/control" << EOF
           Package: nexis-controller
@@ -55,7 +58,7 @@ jobs:
           Section: utils
           Priority: optional
           Architecture: amd64
-          Depends: python3 (>= 3.11), python3-pip, python3-venv
+          Depends: python3 (>= 3.11), python3-pip, python3-venv, socat
           Maintainer: Nexis Project <noreply@nexis.local>
           Description: Nexis Controller — AI assistant and device management hub
            Part of the Nexis ecosystem. Manages AI conversations, device control,
