@@ -1910,6 +1910,14 @@ def _db():
             post_action TEXT DEFAULT '',
             created_at  TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS hypervisor_nodes (
+            id        TEXT PRIMARY KEY,
+            name      TEXT NOT NULL,
+            url       TEXT NOT NULL,
+            api_token TEXT NOT NULL DEFAULT '',
+            added_at  TEXT DEFAULT (datetime('now')),
+            last_seen TEXT
+        );
     """)
     conn.commit()
     # Migrations
@@ -7756,25 +7764,66 @@ def _start_web():
                         'version':  '1.0.0',
                         'build':    'NX-CTL \u00b7 BUILD 1.0.0',
                     }), 'application/json')
+                elif path == '/api/hyp/nodes':
+                    ndb   = _db()
+                    nodes = [dict(r) for r in ndb.execute(
+                        'SELECT id, name, url, added_at, last_seen FROM hypervisor_nodes'
+                    ).fetchall()]
+                    ndb.close()
+                    self._send(200, json.dumps({'nodes': nodes}), 'application/json')
+                elif path == '/api/hyp/vms':
+                    result = []
+                    ndb    = _db()
+                    nodes  = [dict(r) for r in ndb.execute('SELECT * FROM hypervisor_nodes').fetchall()]
+                    ndb.close()
+                    import ssl as _ssl_h; import urllib.request as _ur_h
+                    ctx_h = _ssl_h.create_default_context(); ctx_h.check_hostname = False; ctx_h.verify_mode = _ssl_h.CERT_NONE
+                    for n in nodes:
+                        if not n.get('api_token'): continue
+                        try:
+                            req = _ur_h.Request(f"{n['url']}/api/cluster/vms",
+                                headers={'Authorization': f"Bearer {n['api_token']}"})
+                            with _ur_h.urlopen(req, context=ctx_h, timeout=8) as r:
+                                vms = json.loads(r.read())
+                                if isinstance(vms, list): result.extend(vms)
+                        except Exception: pass
+                    self._send(200, json.dumps(result), 'application/json')
+                elif path == '/api/hyp/metrics':
+                    result = []
+                    ndb    = _db()
+                    nodes  = [dict(r) for r in ndb.execute('SELECT * FROM hypervisor_nodes').fetchall()]
+                    ndb.close()
+                    import ssl as _ssl_m; import urllib.request as _ur_m
+                    ctx_m = _ssl_m.create_default_context(); ctx_m.check_hostname = False; ctx_m.verify_mode = _ssl_m.CERT_NONE
+                    for n in nodes:
+                        entry = {'node_id': n['id'], 'node_name': n['name']}
+                        if not n.get('api_token'):
+                            entry['error'] = 'no api_token'; result.append(entry); continue
+                        try:
+                            req = _ur_m.Request(f"{n['url']}/api/metrics/current",
+                                headers={'Authorization': f"Bearer {n['api_token']}"})
+                            with _ur_m.urlopen(req, context=ctx_m, timeout=8) as r:
+                                entry.update(json.loads(r.read()))
+                        except Exception as e:
+                            entry['error'] = str(e)
+                        result.append(entry)
+                    self._send(200, json.dumps(result), 'application/json')
                 elif path.startswith('/api/hv/'):
-                    # Proxy to registered hypervisor node
-                    hdb   = _db()
-                    devs  = _devices_list(hdb); hdb.close()
-                    node  = next((d for d in devs if d['device_type'] == 'hypervisor'), None)
+                    # Legacy proxy — uses hypervisor_nodes table with api_token
+                    ndb    = _db()
+                    nodes  = [dict(r) for r in ndb.execute('SELECT * FROM hypervisor_nodes LIMIT 1').fetchall()]
+                    ndb.close()
+                    node   = nodes[0] if nodes else None
                     if not node:
                         self._send(503, json.dumps({'error': 'no hypervisor node registered'}), 'application/json')
-                    elif not node['online']:
-                        self._send(503, json.dumps({'error': 'hypervisor node offline'}), 'application/json')
                     else:
-                        hv_ip   = node['ip']
-                        sub     = path[len('/api/hv'):]  # e.g. /vms, /containers
-                        hv_url  = f'https://{hv_ip}:8443/api{sub}'
+                        sub    = path[len('/api/hv'):]
+                        hv_url = f"{node['url']}/api{sub}"
                         import ssl as _ssl
-                        ctx = _ssl.create_default_context()
-                        ctx.check_hostname = False
-                        ctx.verify_mode    = _ssl.CERT_NONE
+                        ctx = _ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
                         try:
-                            req = urllib.request.Request(hv_url)
+                            req = urllib.request.Request(hv_url,
+                                headers={'Authorization': f"Bearer {node['api_token']}"})
                             with urllib.request.urlopen(req, context=ctx, timeout=8) as r:
                                 self._send(r.status, r.read(), r.headers.get('Content-Type', 'application/json'))
                         except Exception as e:
@@ -7996,6 +8045,49 @@ def _start_web():
                         }), 'application/json')
                     else:
                         self._send(401, json.dumps({'valid': False, 'error': 'Invalid credentials.'}), 'application/json')
+                except Exception as e:
+                    self._send(500, json.dumps({'error': str(e)}), 'application/json')
+                return
+
+            # NeXiS ecosystem login alias (called by hypervisor setup wizard)
+            if path == '/api/auth/login':
+                try:
+                    data     = json.loads(body) if body else {}
+                    username = data.get('username', '').strip()
+                    password = data.get('password', '')
+                    if not username: username = 'creator'
+                    if _user_check(username, password):
+                        tok = _api_token_create(username)
+                        self._send(200, json.dumps({'token': tok, 'username': username}), 'application/json')
+                    else:
+                        self._send(401, json.dumps({'error': 'Invalid credentials.'}), 'application/json')
+                except Exception as e:
+                    self._send(500, json.dumps({'error': str(e)}), 'application/json')
+                return
+
+            # Hypervisor self-registration (called after setup wizard connects)
+            if path == '/api/hyp/nodes/register':
+                try:
+                    data  = json.loads(body) if body else {}
+                    name  = data.get('name', '').strip()
+                    url   = data.get('url', '').strip().rstrip('/')
+                    if not name or not url:
+                        self._send(400, json.dumps({'error': 'name and url required'}), 'application/json')
+                    else:
+                        import secrets as _sec
+                        node_id   = _sec.token_hex(8)
+                        api_token = _sec.token_hex(32)
+                        rdb = _db()
+                        existing = rdb.execute('SELECT id FROM hypervisor_nodes WHERE url=?', (url,)).fetchone()
+                        if existing:
+                            node_id = existing['id']
+                            rdb.execute('UPDATE hypervisor_nodes SET name=?, api_token=?, last_seen=datetime('now') WHERE id=?',
+                                        (name, api_token, node_id))
+                        else:
+                            rdb.execute('INSERT INTO hypervisor_nodes (id, name, url, api_token) VALUES (?,?,?,?)',
+                                        (node_id, name, url, api_token))
+                        rdb.commit(); rdb.close()
+                        self._send(200, json.dumps({'ok': True, 'node_id': node_id, 'api_token': api_token}), 'application/json')
                 except Exception as e:
                     self._send(500, json.dumps({'error': str(e)}), 'application/json')
                 return
@@ -8486,28 +8578,66 @@ def _start_web():
                             except Exception as e:
                                 self._send(200, json.dumps({'ok': False, 'message': str(e)}), 'application/json')
 
-                elif path.startswith('/api/hv/'):
-                    # Proxy POST to registered hypervisor node
-                    hdb   = _db()
-                    devs  = _devices_list(hdb); hdb.close()
-                    node  = next((d for d in devs if d['device_type'] == 'hypervisor'), None)
-                    if not node:
-                        self._send(503, json.dumps({'error': 'no hypervisor node registered'}), 'application/json')
-                    elif not node['online']:
-                        self._send(503, json.dumps({'error': 'hypervisor node offline'}), 'application/json')
+                elif path == '/api/hyp/nodes':
+                    data = json.loads(body) if body else {}
+                    name = data.get('name', '').strip(); url = data.get('url', '').strip().rstrip('/')
+                    api_token = data.get('api_token', '').strip()
+                    if not name or not url:
+                        self._send(400, json.dumps({'error': 'name and url required'}), 'application/json')
                     else:
-                        hv_ip  = node['ip']
-                        sub    = path[len('/api/hv'):]
-                        hv_url = f'https://{hv_ip}:8443/api{sub}'
-                        import ssl as _ssl2
-                        ctx2 = _ssl2.create_default_context()
-                        ctx2.check_hostname = False
-                        ctx2.verify_mode    = _ssl2.CERT_NONE
+                        import secrets as _s2
+                        node_id = _s2.token_hex(8)
+                        ndb2 = _db()
+                        ndb2.execute('INSERT OR REPLACE INTO hypervisor_nodes (id,name,url,api_token) VALUES (?,?,?,?)',
+                                     (node_id, name, url, api_token))
+                        ndb2.commit(); ndb2.close()
+                        self._send(200, json.dumps({'ok': True, 'node_id': node_id}), 'application/json')
+                elif path.startswith('/api/hyp/nodes/') and path.endswith('/delete'):
+                    node_id = path.split('/api/hyp/nodes/')[-1].replace('/delete','').strip('/')
+                    ndb3 = _db(); ndb3.execute('DELETE FROM hypervisor_nodes WHERE id=?', (node_id,))
+                    ndb3.commit(); ndb3.close()
+                    self._send(200, json.dumps({'ok': True}), 'application/json')
+                elif re.match(r'^/api/hyp/nodes/[^/]+/vms/[^/]+/[^/]+$', path):
+                    parts    = path.split('/')
+                    node_id  = parts[4]; vm_id = parts[6]; action = parts[7]
+                    if action not in ('start','stop','reboot','force-stop'):
+                        self._send(400, json.dumps({'error': 'invalid action'}), 'application/json')
+                    else:
+                        ndb4 = _db()
+                        row4 = ndb4.execute('SELECT * FROM hypervisor_nodes WHERE id=?', (node_id,)).fetchone()
+                        ndb4.close()
+                        if not row4:
+                            self._send(404, json.dumps({'error': 'node not found'}), 'application/json')
+                        else:
+                            import ssl as _ssl3; import urllib.request as _ur3
+                            ctx3 = _ssl3.create_default_context(); ctx3.check_hostname = False; ctx3.verify_mode = _ssl3.CERT_NONE
+                            hv_url3 = f"{row4['url']}/api/vms/{vm_id}/{action}"
+                            try:
+                                req3 = _ur3.Request(hv_url3, data=b'{}',
+                                    headers={'Authorization': f"Bearer {row4['api_token']}", 'Content-Type': 'application/json'},
+                                    method='POST')
+                                with _ur3.urlopen(req3, context=ctx3, timeout=10) as r3:
+                                    self._send(r3.status, r3.read(), 'application/json')
+                            except Exception as e:
+                                self._send(502, json.dumps({'error': str(e)}), 'application/json')
+                elif path.startswith('/api/hv/'):
+                    # Legacy POST proxy — uses hypervisor_nodes table with api_token
+                    ndb5   = _db()
+                    nodes5 = [dict(r) for r in ndb5.execute('SELECT * FROM hypervisor_nodes LIMIT 1').fetchall()]
+                    ndb5.close()
+                    node5  = nodes5[0] if nodes5 else None
+                    if not node5:
+                        self._send(503, json.dumps({'error': 'no hypervisor node registered'}), 'application/json')
+                    else:
+                        sub5   = path[len('/api/hv'):]
+                        hv_url5 = f"{node5['url']}/api{sub5}"
+                        import ssl as _ssl2; import urllib.request as _ur2
+                        ctx2 = _ssl2.create_default_context(); ctx2.check_hostname = False; ctx2.verify_mode = _ssl2.CERT_NONE
                         try:
-                            req2 = urllib.request.Request(hv_url, data=body,
-                                                          headers={'Content-Type': 'application/json'},
-                                                          method='POST')
-                            with urllib.request.urlopen(req2, context=ctx2, timeout=10) as r2:
+                            req2 = _ur2.Request(hv_url5, data=body,
+                                headers={'Authorization': f"Bearer {node5['api_token']}", 'Content-Type': 'application/json'},
+                                method='POST')
+                            with _ur2.urlopen(req2, context=ctx2, timeout=10) as r2:
                                 self._send(r2.status, r2.read(), r2.headers.get('Content-Type', 'application/json'))
                         except Exception as e:
                             self._send(502, json.dumps({'error': str(e)}), 'application/json')
