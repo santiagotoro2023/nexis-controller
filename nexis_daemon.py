@@ -53,7 +53,6 @@ VOICE_MODELS = {
         'onnx':  str(VOICE_DIR / 'glados_piper_medium.onnx'),
         'json':  str(VOICE_DIR / 'glados_piper_medium.onnx.json'),
         'backend': 'piper',
-        'fx':    'character',
     },
 }
 
@@ -796,7 +795,9 @@ def _tts_rhythm(text: str, backend: str = 'piper') -> str:
         text = re.sub(r'\bKB\b', 'kilobytes', text)
     return text
 
-def _tts_apply_effects(wav_bytes: bytes, fx: str = 'character') -> bytes:
+def _tts_apply_effects(wav_bytes: bytes, fx: str = 'none') -> bytes:
+    if fx not in ('character', 'heavy'):
+        return wav_bytes
     if fx == 'heavy':
         sox_chain = [
             'gain', '-4', 'pitch', '-350',
@@ -869,7 +870,7 @@ def _tts_synth(text: str):
     mk  = _voice_model()
     m   = VOICE_MODELS.get(mk, VOICE_MODELS['default'])
     backend = m.get('backend', 'piper')
-    fx  = m.get('fx', 'character')
+    fx  = m.get('fx', 'none')
 
     rhythm_text = _tts_rhythm(clean, backend)
 
