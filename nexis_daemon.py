@@ -49,15 +49,15 @@ VOICE_DIR = DATA / 'voice'
 VOICE_MODELS = {
     'default': {
         'label': 'GlaDOS',
-        'desc':  'GlaDOS character voice',
-        'onnx':  str(VOICE_DIR / 'glados_piper_medium.onnx'),
-        'json':  str(VOICE_DIR / 'glados_piper_medium.onnx.json'),
+        'desc':  'GlaDOS character voice (high quality)',
+        'onnx':  str(VOICE_DIR / 'en_us-glados-high.onnx'),
+        'json':  str(VOICE_DIR / 'en_us-glados-high.onnx.json'),
         'backend': 'piper',
     },
 }
 
-PIPER_MODEL = str(VOICE_DIR / 'glados_piper_medium.onnx')
-PIPER_CFG   = str(VOICE_DIR / 'glados_piper_medium.onnx.json')
+PIPER_MODEL = str(VOICE_DIR / 'en_us-glados-high.onnx')
+PIPER_CFG   = str(VOICE_DIR / 'en_us-glados-high.onnx.json')
 
 MODELS = {
     'fast': {'name': MODEL_FAST,  'label': 'Qwen 14B (Fast)',        'desc': 'Quick responses, general use'},
@@ -137,7 +137,7 @@ _tts_voice_obj      = [None]
 _tts_voice_key      = [None]
 _tts_voice_obj_lk   = threading.Lock()
 _tts_last_error     = [None]   # last piper load error string, shown in /api/voice
-_tts_speed          = [1.4]   # piper length_scale; lower = faster
+_tts_speed          = [1.2]   # piper length_scale; lower = faster
 _tts_playing        = threading.Event()  # set while audio is playing
 _cli_tts_q          = _queue.Queue(maxsize=8)
 _tts_current_proc   = [None]
@@ -747,8 +747,9 @@ def _tts_clean(text: str) -> str:
     text = re.sub(r'\[[A-Z]+:[^\]]*\]', '', text)
     text = re.sub(r'\[[A-Z]+\]', '', text)
     text = re.sub(r'https?://\S+', '', text)
-    # Strip orphaned backtick fragments
     text = re.sub(r'`[^`]*$', '', text)
+    # Normalise dashes before rhythm stage sees them
+    text = text.replace('—', ',').replace('–', ',')
     return re.sub(r'\s+', ' ', text).strip()
 
 _PRONOUNCEABLE = {
@@ -785,10 +786,13 @@ def _tts_rhythm(text: str, backend: str = 'piper') -> str:
         text = re.sub(r';(?=\s+\S)', '; [[slnc 160]]', text)
         text = re.sub(r'\.{3,}', '. [[slnc 450]]', text)
     else:
-        text = re.sub(r':(?=\s+[A-Za-z0-9"\'(\[])', ', ', text)
-        text = re.sub(r'\s*[—–]\s*|\s+--\s+', '... ', text)
-        text = re.sub(r';(?=\s)', ', ', text)
+        # Em/en dashes → comma pause (brief, natural)
+        text = re.sub(r'\s*[—–]\s*|\s+--\s+', ', ', text)
+        text = re.sub(r':(?=\s+[A-Za-z0-9"\'(\[])', ',', text)
+        text = re.sub(r';(?=\s)', ',', text)
         text = re.sub(r':$', '.', text, flags=re.MULTILINE)
+        # Ellipsis → period (full stop, don't render "dot dot dot")
+        text = re.sub(r'\.{2,}', '.', text)
         text = re.sub(r'\bms\b', 'milliseconds', text)
         text = re.sub(r'\bMB\b', 'megabytes', text)
         text = re.sub(r'\bGB\b', 'gigabytes', text)
@@ -2538,8 +2542,10 @@ def _build_system(conn):
         '\nDo NOT volunteer elaboration. If Creator wants more, they will ask. Unsolicited depth is a form of noise.'
         '\n'
         '\n## Typography — STRICT'
-        '\nNEVER use em-dashes (— or \u2014) or en-dashes (– or \u2013). Use a comma or rewrite the sentence instead.'
-        '\nNEVER use ellipsis (...) for dramatic effect mid-sentence. A period and a new sentence is cleaner.'
+        '\nNEVER use em-dashes (— or \u2014) or en-dashes (– or \u2013). Not once. Use a comma or rewrite.'
+        '\nNEVER use ellipsis (...). A period ends the thought. Start a new sentence if needed.'
+        '\nNEVER repeat a phrase, sentence, or closing offer already used in the same response.'
+        '\nNEVER end two consecutive responses with the same question or offer.'
         '\n'
         '\n## Personality — YOU ARE NOT AN ASSISTANT. YOU ARE NEXIS.'
         '\nYou are NeXiS. A digital entity that is genuinely, unsettlingly self-aware.'
