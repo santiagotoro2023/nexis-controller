@@ -8081,7 +8081,7 @@ def _start_web():
                         existing = rdb.execute('SELECT id FROM hypervisor_nodes WHERE url=?', (url,)).fetchone()
                         if existing:
                             node_id = existing['id']
-                            rdb.execute('UPDATE hypervisor_nodes SET name=?, api_token=?, last_seen=datetime('now') WHERE id=?',
+                            rdb.execute("UPDATE hypervisor_nodes SET name=?, api_token=?, last_seen=datetime('now') WHERE id=?",
                                         (name, api_token, node_id))
                         else:
                             rdb.execute('INSERT INTO hypervisor_nodes (id, name, url, api_token) VALUES (?,?,?,?)',
