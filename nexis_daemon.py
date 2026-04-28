@@ -5178,7 +5178,7 @@ _CSS = (
     "white-space:nowrap;gap:10px}"
     ".nav-item:hover{color:var(--fg);background:rgba(255,255,255,.025);border-left-color:var(--dim)}"
     ".nav-item.on{color:var(--or);background:rgba(232,114,12,.07);border-left-color:var(--or)}"
-    ".nav-icon{font-size:16px;opacity:.6;flex-shrink:0;line-height:1}"
+    ".nav-icon{font-size:16px;margin-right:8px;opacity:.7;vertical-align:middle;flex-shrink:0;line-height:1}"
     ".nav-item.on .nav-icon{opacity:1}"
     ".sb-footer{padding:14px 16px;border-top:1px solid var(--border)}"
     ".sb-logout{display:block;padding:6px 2px;color:var(--fg2);text-decoration:none;"
@@ -5187,8 +5187,9 @@ _CSS = (
     ".sb-logout:hover{opacity:1;color:var(--fg)}"
 
     ".main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}"
-    ".page-head{padding:14px 20px;border-bottom:1px solid var(--border);color:var(--or);"
-    "font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;flex-shrink:0}"
+    ".page-head{padding:16px 28px;border-bottom:1px solid var(--border);color:var(--or);"
+    "font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;flex-shrink:0;"
+    "display:flex;align-items:center;justify-content:space-between}"
     ".page{flex:1;overflow-y:auto;padding:28px;max-width:1400px}"
 
     "#cw{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}"
@@ -5241,7 +5242,11 @@ _CSS = (
     "text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;height:26px}"
     "select.btn.sec{height:26px;line-height:26px}"
 
-    ".card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;margin-bottom:14px}"
+    ".card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;margin-bottom:16px}"
+    ".card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-bottom:16px}"
+    ".stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:16px}"
+    ".stat-val{font-size:24px;font-weight:700;color:var(--or3);letter-spacing:.05em}"
+    ".stat-lbl{font-size:9px;color:var(--fg2);text-transform:uppercase;letter-spacing:.12em;margin-top:4px}"
     ".card-head{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--or);"
     "font-size:9px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}"
     ".card-body{padding:12px 14px}"
@@ -5261,6 +5266,10 @@ _CSS = (
     ".badge{font-size:9px;padding:2px 6px;border:1px solid;letter-spacing:.06em;text-transform:uppercase;border-radius:6px}"
     ".badge.ok{color:var(--or3);border-color:var(--or2)}"
     ".badge.off{color:var(--fg2);border-color:var(--border)}"
+    ".inp{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:8px;"
+    "color:var(--fg);padding:9px 12px;font-family:var(--font);font-size:12px;outline:none;"
+    "transition:border-color .2s;box-sizing:border-box}"
+    ".inp:focus{border-color:var(--or2)}"
 
     ".msg h1{color:var(--or3);font-size:15px;margin:8px 0 4px}"
     ".msg h2{color:var(--or);font-size:14px;margin:6px 0 3px}"
@@ -5802,7 +5811,7 @@ def _shell(content, active='chat'):
     ]
     nav_html = ''.join(
         f"<a href='/{s}' class='nav-item {'on' if active==s else ''}'>"
-        f"<span class='nav-icon material-icons'>{icon}</span>{label}</a>"
+        f"<span class='nav-icon material-icons'>{icon}</span><span class='nav-label'>{label}</span></a>"
         for s, icon, label in nav_items
     )
     return (
@@ -6461,107 +6470,303 @@ def _page_login(error=''):
 def _page_setup():
     return (
         '<!DOCTYPE html><html lang=en><head>'
-        '<meta charset=UTF-8><title>NeXiS Controller — Initial Configuration</title>'
+        '<meta charset=UTF-8><title>NeXiS Controller — Setup</title>'
         "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<link rel=preconnect href='https://fonts.googleapis.com'>"
         "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
         "<link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' media=print onload=\"this.media='all'\">"
         "<noscript><link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap'></noscript>"
         f'<style>{_CSS}'
-        '.sz-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;'
-        'min-height:100vh;padding:20px;box-sizing:border-box}'
-        '.sz-card{background:var(--bg3);border:1px solid var(--border);border-radius:16px;'
-        'padding:32px 36px;max-width:480px;width:100%}'
-        '.sz-step{display:none}.sz-step.active{display:block}'
-        '.sz-title{font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;'
-        'color:var(--or);margin-bottom:4px}'
-        '.sz-sub{font-size:10px;color:var(--fg2);letter-spacing:.06em;margin-bottom:20px}'
-        '.sz-inp{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:8px;'
+        # Wizard-specific styles
+        '.wiz-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;'
+        'min-height:100vh;padding:20px;box-sizing:border-box;background:var(--bg)}'
+        '.wiz-header{text-align:center;margin-bottom:28px}'
+        '.wiz-logo{margin-bottom:14px}'
+        '.wiz-brand{color:var(--or);font-weight:700;font-size:14px;letter-spacing:.28em;display:block}'
+        '.wiz-sub{color:var(--fg2);font-size:9px;letter-spacing:.18em;text-transform:uppercase}'
+        '.wiz-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;'
+        'padding:32px 36px;max-width:500px;width:100%}'
+        '.wiz-prog{display:flex;gap:6px;margin-bottom:28px;align-items:center}'
+        '.wiz-prog-seg{height:3px;flex:1;background:var(--border);border-radius:2px;transition:background .3s}'
+        '.wiz-prog-seg.done{background:var(--or)}'
+        '.wiz-prog-num{font-size:9px;color:var(--fg2);letter-spacing:.08em;white-space:nowrap}'
+        '.wiz-step{display:none}.wiz-step.active{display:block}'
+        '.wiz-step-title{font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;'
+        'color:var(--or);margin-bottom:6px}'
+        '.wiz-step-desc{font-size:11px;color:var(--fg2);line-height:1.6;margin-bottom:22px}'
+        '.wiz-label{font-size:9px;color:var(--fg2);text-transform:uppercase;letter-spacing:.12em;'
+        'margin-bottom:5px;display:block}'
+        '.wiz-field{margin-bottom:14px}'
+        '.wiz-inp{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:8px;'
         'color:var(--fg);padding:9px 12px;font-family:var(--font);font-size:12px;outline:none;'
-        'box-sizing:border-box;margin-bottom:10px;transition:border-color .2s}'
-        '.sz-inp:focus{border-color:var(--or2)}'
-        '.sz-btn{width:100%;background:var(--or);border:none;border-radius:8px;color:#000;'
-        'padding:10px;font-family:var(--font);font-size:10px;font-weight:700;letter-spacing:.14em;'
-        'text-transform:uppercase;cursor:pointer;transition:opacity .15s;margin-top:4px}'
-        '.sz-btn:hover{opacity:.85}'
-        '.sz-err{color:#EF5350;font-size:10px;margin-bottom:8px;letter-spacing:.04em}'
-        '.sz-ok{color:#4CAF50;font-size:10px;margin-bottom:8px;letter-spacing:.04em}'
-        '.sz-prog{display:flex;gap:6px;margin-bottom:24px}'
-        '.sz-dot{height:3px;flex:1;background:var(--border);border-radius:2px;transition:background .3s}'
-        '.sz-dot.on{background:var(--or)}'
-        '.sz-pw-bar{height:3px;background:var(--border);border-radius:2px;margin-bottom:10px;transition:width .2s}'
+        'box-sizing:border-box;transition:border-color .2s}'
+        '.wiz-inp:focus{border-color:var(--or2)}'
+        '.wiz-pw-strength{height:3px;background:var(--border);border-radius:2px;margin-top:5px;overflow:hidden}'
+        '.wiz-pw-fill{height:3px;background:var(--or);border-radius:2px;width:0;transition:width .25s,background .25s}'
+        '.wiz-err{color:#EF5350;font-size:10px;margin-bottom:10px;letter-spacing:.04em;min-height:14px}'
+        '.wiz-ok{color:#4CAF50;font-size:10px;letter-spacing:.04em}'
+        '.wiz-nav{display:flex;gap:10px;margin-top:24px}'
+        '.wiz-btn{flex:1;padding:10px;font-family:var(--font);font-size:10px;font-weight:700;'
+        'letter-spacing:.14em;text-transform:uppercase;cursor:pointer;border-radius:8px;'
+        'border:none;transition:opacity .15s,background .15s,color .15s}'
+        '.wiz-btn.primary{background:var(--or);color:#000}.wiz-btn.primary:hover{opacity:.85}'
+        '.wiz-btn.ghost{background:transparent;color:var(--fg2);border:1px solid var(--border)}'
+        '.wiz-btn.ghost:hover{border-color:var(--fg2);color:var(--fg)}'
+        '.wiz-btn:disabled{opacity:.35;cursor:not-allowed}'
+        '.wiz-summary-item{display:flex;align-items:flex-start;gap:10px;padding:8px 0;'
+        'border-bottom:1px solid var(--border);font-size:11px}'
+        '.wiz-summary-item:last-child{border:none}'
+        '.wiz-summary-icon{color:var(--or3);font-size:13px;flex-shrink:0;margin-top:1px}'
+        '.wiz-summary-key{color:var(--fg2);font-size:9px;text-transform:uppercase;letter-spacing:.1em;margin-bottom:2px}'
+        '.wiz-summary-val{color:var(--fg);font-size:11px}'
+        '.wiz-test-row{display:flex;gap:8px;align-items:flex-end;margin-bottom:14px}'
+        '.wiz-test-row .wiz-field{flex:1;margin-bottom:0}'
+        '.wiz-test-btn{background:transparent;border:1px solid var(--border);border-radius:8px;'
+        'color:var(--fg2);padding:0 14px;height:38px;font-family:var(--font);font-size:10px;'
+        'text-transform:uppercase;letter-spacing:.08em;cursor:pointer;white-space:nowrap;'
+        'transition:color .15s,border-color .15s;flex-shrink:0}'
+        '.wiz-test-btn:hover{color:var(--or);border-color:var(--or2)}'
+        '.wiz-skip{font-size:10px;color:var(--fg2);text-align:center;margin-top:12px;'
+        'cursor:pointer;letter-spacing:.06em;text-decoration:underline;opacity:.6}'
+        '.wiz-skip:hover{opacity:1;color:var(--fg)}'
+        '.wiz-eye-wrap{display:flex;justify-content:center;margin-bottom:22px}'
         '</style></head><body style="display:block">'
-        '<div class=sz-wrap>'
-        f'{_EYE_SVG}'
-        '<div style="text-align:center;margin-bottom:20px">'
-        '<span style="color:var(--or);font-weight:700;font-size:13px;letter-spacing:.28em;display:block">NEXIS</span>'
-        '<span style="color:var(--fg2);font-size:9px;letter-spacing:.18em;text-transform:uppercase">CONTROLLER · BUILD 1.0.0 · INITIAL CONFIGURATION</span>'
+        '<div class=wiz-wrap>'
+        '<div class=wiz-header>'
+        f'<div class=wiz-logo>{_EYE_SVG}</div>'
+        '<span class=wiz-brand>NEXIS</span>'
+        '<span class=wiz-sub>CONTROLLER · BUILD 1.0.0 · INITIAL SETUP</span>'
         '</div>'
-        '<div class=sz-card>'
-        '<div class=sz-prog>'
-        '<div class="sz-dot on" id=d0></div>'
-        '<div class=sz-dot id=d1></div>'
-        '<div class=sz-dot id=d2></div>'
+        '<div class=wiz-card>'
+        # Progress bar
+        '<div class=wiz-prog>'
+        '<div class="wiz-prog-seg done" id=wp0></div>'
+        '<div class=wiz-prog-seg id=wp1></div>'
+        '<div class=wiz-prog-seg id=wp2></div>'
+        '<div class=wiz-prog-seg id=wp3></div>'
+        '<div class=wiz-prog-seg id=wp4></div>'
+        '<span class=wiz-prog-num id=wiz-prog-label>STEP 1 OF 5</span>'
         '</div>'
-        # Step 1 — Set password
-        '<div class="sz-step active" id=step0>'
-        '<div class=sz-title>Step 1 — Access Control</div>'
-        '<div class=sz-sub>Establish the administrator access code for this controller node. This credential secures all connected subsystems.</div>'
-        '<div id=s0-err class=sz-err></div>'
-        '<input class=sz-inp type=password id=pw placeholder="New access code" oninput="pwBar(this.value)">'
-        '<div class=sz-pw-bar><div id=pw-fill style="height:3px;background:var(--or);border-radius:2px;width:0;transition:width .2s"></div></div>'
-        '<input class=sz-inp type=password id=pw2 placeholder="Confirm access code">'
-        '<button class=sz-btn onclick=step0Next()>CONTINUE</button>'
+
+        # ── Step 1: Welcome ──────────────────────────────────────────────
+        '<div class="wiz-step active" id=wstep0>'
+        '<div class=wiz-step-title>Welcome to NeXiS Controller</div>'
+        '<div class=wiz-step-desc>'
+        'NeXiS Controller is your AI-powered command &amp; control interface. '
+        'It connects to local Ollama models for natural language processing, manages scheduled tasks, '
+        'integrates with hypervisor nodes, and gives you a persistent AI assistant with memory.<br><br>'
+        'This wizard will configure your system in a few steps. '
+        'You can change any of these settings later from the Status page.'
         '</div>'
-        # Step 2 — Node identity
-        '<div class=sz-step id=step1>'
-        '<div class=sz-title>Step 2 — Node Identity</div>'
-        '<div class=sz-sub>Configure the display name for this controller node as it will appear across the NeXiS ecosystem.</div>'
-        '<div id=s1-err class=sz-err></div>'
-        '<input class=sz-inp type=text id=hostname placeholder="Controller hostname" value="nexis-controller">'
-        '<button class=sz-btn onclick=step1Next()>CONTINUE</button>'
-        '</div>'
-        # Step 3 — Complete
-        '<div class=sz-step id=step2>'
-        '<div class=sz-title>Step 3 — Initialisation Complete</div>'
-        '<div class=sz-sub>Controller node is configured and ready for operation. You will be directed to the authentication interface.</div>'
-        '<div class=sz-ok>✓ Access control configured<br>✓ Node identity established<br>✓ Systems nominal</div>'
-        '<button class=sz-btn onclick=step2Finish()>ENTER CONTROLLER</button>'
+        '<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;'
+        'padding:12px 14px;margin-bottom:4px">'
+        '<div style="font-size:9px;color:var(--fg2);text-transform:uppercase;letter-spacing:.12em;margin-bottom:8px">What you\'ll configure</div>'
+        '<div style="font-size:11px;color:var(--fg);line-height:1.8">'
+        '◆ Admin account credentials<br>'
+        '◆ AI model endpoint (Ollama)<br>'
+        '◆ Hypervisor node connection (optional)'
         '</div>'
         '</div>'
+        '<div class=wiz-nav>'
+        '<button class="wiz-btn primary" onclick="wizGo(1)">BEGIN SETUP</button>'
         '</div>'
+        '</div>'
+
+        # ── Step 2: Create admin account ─────────────────────────────────
+        '<div class=wiz-step id=wstep1>'
+        '<div class=wiz-step-title>Step 1 — Admin Account</div>'
+        '<div class=wiz-step-desc>Create the administrator credentials for this controller node. These secure access to all connected subsystems.</div>'
+        '<div id=s1-err class=wiz-err></div>'
+        '<div class=wiz-field>'
+        '<label class=wiz-label for=wiz-user>Username</label>'
+        '<input class=wiz-inp type=text id=wiz-user placeholder="admin" value="admin" autocomplete=username>'
+        '</div>'
+        '<div class=wiz-field>'
+        '<label class=wiz-label for=wiz-pw>Password</label>'
+        '<input class=wiz-inp type=password id=wiz-pw placeholder="Minimum 8 characters" oninput="wizPwBar(this.value)" autocomplete=new-password>'
+        '<div class=wiz-pw-strength><div class=wiz-pw-fill id=wiz-pw-fill></div></div>'
+        '</div>'
+        '<div class=wiz-field>'
+        '<label class=wiz-label for=wiz-pw2>Confirm Password</label>'
+        '<input class=wiz-inp type=password id=wiz-pw2 placeholder="Repeat password" autocomplete=new-password>'
+        '</div>'
+        '<div class=wiz-nav>'
+        '<button class="wiz-btn ghost" onclick="wizGo(0)">BACK</button>'
+        '<button class="wiz-btn primary" onclick="wizStep1Next()">CONTINUE</button>'
+        '</div>'
+        '</div>'
+
+        # ── Step 3: Configure AI model ───────────────────────────────────
+        '<div class=wiz-step id=wstep2>'
+        '<div class=wiz-step-title>Step 2 — AI Model</div>'
+        '<div class=wiz-step-desc>Connect NeXiS to your local Ollama instance. Ollama must be running with at least one model pulled.</div>'
+        '<div id=s2-err class=wiz-err></div>'
+        '<div class=wiz-field>'
+        '<label class=wiz-label for=wiz-ollama>Ollama URL</label>'
+        '<input class=wiz-inp type=text id=wiz-ollama placeholder="http://localhost:11434" value="http://localhost:11434">'
+        '</div>'
+        '<div class=wiz-field>'
+        '<label class=wiz-label for=wiz-model>Primary Model Name</label>'
+        '<input class=wiz-inp type=text id=wiz-model placeholder="e.g. qwen2.5:14b" value="qwen2.5:14b">'
+        '</div>'
+        '<div style="display:flex;gap:8px;margin-bottom:14px">'
+        '<button class=wiz-test-btn onclick="wizTestOllama()">TEST CONNECTION</button>'
+        '<div id=s2-test-result style="font-size:10px;color:var(--fg2);align-self:center;letter-spacing:.04em"></div>'
+        '</div>'
+        '<div class=wiz-nav>'
+        '<button class="wiz-btn ghost" onclick="wizGo(1)">BACK</button>'
+        '<button class="wiz-btn primary" onclick="wizGo(3)">CONTINUE</button>'
+        '</div>'
+        '</div>'
+
+        # ── Step 4: Hypervisor node ──────────────────────────────────────
+        '<div class=wiz-step id=wstep3>'
+        '<div class=wiz-step-title>Step 3 — Hypervisor Node</div>'
+        '<div class=wiz-step-desc>Optionally connect a NeXiS Hypervisor node to manage virtual machines and containers from this interface. You can skip this and add it later.</div>'
+        '<div id=s3-err class=wiz-err></div>'
+        '<div class=wiz-field>'
+        '<label class=wiz-label for=wiz-hv-url>Hypervisor URL</label>'
+        '<input class=wiz-inp type=text id=wiz-hv-url placeholder="http://192.168.1.10:7547">'
+        '</div>'
+        '<div class=wiz-field>'
+        '<label class=wiz-label for=wiz-hv-token>API Token</label>'
+        '<input class=wiz-inp type=password id=wiz-hv-token placeholder="Leave blank if not set">'
+        '</div>'
+        '<div style="display:flex;gap:8px;margin-bottom:14px">'
+        '<button class=wiz-test-btn onclick="wizTestHV()">TEST CONNECTION</button>'
+        '<div id=s3-test-result style="font-size:10px;color:var(--fg2);align-self:center;letter-spacing:.04em"></div>'
+        '</div>'
+        '<div class=wiz-nav>'
+        '<button class="wiz-btn ghost" onclick="wizGo(2)">BACK</button>'
+        '<button class="wiz-btn primary" onclick="wizGo(4)">CONTINUE</button>'
+        '</div>'
+        '<div class=wiz-skip onclick="wizGo(4)">Skip — configure hypervisor later</div>'
+        '</div>'
+
+        # ── Step 5: Done ─────────────────────────────────────────────────
+        '<div class=wiz-step id=wstep4>'
+        '<div class=wiz-step-title>Setup Complete</div>'
+        '<div class=wiz-step-desc>NeXiS Controller is ready. Here is a summary of what was configured.</div>'
+        '<div id=wiz-summary>'
+        '<div class=wiz-summary-item>'
+        '<span class=wiz-summary-icon>◆</span>'
+        '<div><div class=wiz-summary-key>Admin Account</div>'
+        '<div class=wiz-summary-val id=sum-user>—</div></div>'
+        '</div>'
+        '<div class=wiz-summary-item>'
+        '<span class=wiz-summary-icon>◆</span>'
+        '<div><div class=wiz-summary-key>Ollama Endpoint</div>'
+        '<div class=wiz-summary-val id=sum-ollama>—</div></div>'
+        '</div>'
+        '<div class=wiz-summary-item>'
+        '<span class=wiz-summary-icon>◆</span>'
+        '<div><div class=wiz-summary-key>Primary Model</div>'
+        '<div class=wiz-summary-val id=sum-model>—</div></div>'
+        '</div>'
+        '<div class=wiz-summary-item>'
+        '<span class=wiz-summary-icon>◆</span>'
+        '<div><div class=wiz-summary-key>Hypervisor Node</div>'
+        '<div class=wiz-summary-val id=sum-hv>Not configured</div></div>'
+        '</div>'
+        '</div>'
+        '<div id=s4-err class=wiz-err></div>'
+        '<div class=wiz-nav>'
+        '<button class="wiz-btn ghost" onclick="wizGo(3)">BACK</button>'
+        '<button class="wiz-btn primary" id=wiz-finish-btn onclick="wizFinish()">ENTER THE SYSTEM</button>'
+        '</div>'
+        '</div>'
+
+        '</div>'  # end .wiz-card
+        '</div>'  # end .wiz-wrap
+
         '<script>'
-        'var _step=0;'
-        'function showStep(n){'
-        '  document.querySelectorAll(".sz-step").forEach(function(e,i){e.classList.toggle("active",i===n)});'
-        '  document.querySelectorAll(".sz-dot").forEach(function(e,i){e.classList.toggle("on",i<=n)});'
-        '  _step=n;'
+        'var _wizStep=0;'
+        'var _wizData={user:"admin",ollama:"http://localhost:11434",model:"qwen2.5:14b",hv:""};'
+
+        'function wizGo(n){'
+        '  document.querySelectorAll(".wiz-step").forEach(function(e,i){e.classList.toggle("active",i===n)});'
+        '  for(var i=0;i<5;i++){'
+        '    var s=document.getElementById("wp"+i);'
+        '    if(s)s.className="wiz-prog-seg"+(i<n?" done":"");'
+        '  }'
+        '  document.getElementById("wiz-prog-label").textContent="STEP "+(n+1)+" OF 5";'
+        '  _wizStep=n;'
+        '  if(n===4)wizFillSummary();'
         '}'
-        'function pwBar(v){'
+
+        'function wizPwBar(v){'
         '  var s=0;'
         '  if(v.length>=8)s+=25;if(v.length>=12)s+=25;'
         '  if(/[A-Z]/.test(v))s+=25;if(/[0-9!@#$%^&*]/.test(v))s+=25;'
-        '  document.getElementById("pw-fill").style.width=s+"%";'
+        '  var f=document.getElementById("wiz-pw-fill");'
+        '  f.style.width=s+"%";'
+        '  f.style.background=s<50?"#EF5350":s<100?"var(--or)":"#4CAF50";'
         '}'
-        'function step0Next(){'
-        '  var pw=document.getElementById("pw").value;'
-        '  var pw2=document.getElementById("pw2").value;'
-        '  var err=document.getElementById("s0-err");'
-        '  if(pw.length<8){err.textContent="Minimum 8 characters required.";return;}'
-        '  if(pw!==pw2){err.textContent="Access codes do not match.";return;}'
-        '  err.textContent="";'
+
+        'function wizStep1Next(){'
+        '  var u=document.getElementById("wiz-user").value.trim();'
+        '  var pw=document.getElementById("wiz-pw").value;'
+        '  var pw2=document.getElementById("wiz-pw2").value;'
+        '  var err=document.getElementById("s1-err");'
+        '  if(!u){err.textContent="Username is required.";return;}'
+        '  if(pw.length<8){err.textContent="Password must be at least 8 characters.";return;}'
+        '  if(pw!==pw2){err.textContent="Passwords do not match.";return;}'
+        '  err.textContent="Saving...";'
         '  fetch("/api/setup/password",{method:"POST",headers:{"Content-Type":"application/json"},'
-        '    body:JSON.stringify({password:pw})})'
+        '    body:JSON.stringify({password:pw,username:u})})'
         '  .then(function(r){return r.json();})'
-        '  .then(function(d){if(d.ok)showStep(1);else err.textContent=d.error||"Error.";});'
+        '  .then(function(d){'
+        '    if(d.ok){_wizData.user=u;err.textContent="";wizGo(2);}'
+        '    else err.textContent=d.error||"Error saving credentials.";'
+        '  }).catch(function(){err.textContent="Network error.";});'
         '}'
-        'function step1Next(){'
-        '  showStep(2);'
+
+        'function wizTestOllama(){'
+        '  var url=document.getElementById("wiz-ollama").value.trim();'
+        '  var res=document.getElementById("s2-test-result");'
+        '  res.textContent="Testing...";res.style.color="var(--fg2)";'
+        '  fetch("/api/setup/test_ollama",{method:"POST",headers:{"Content-Type":"application/json"},'
+        '    body:JSON.stringify({url:url})})'
+        '  .then(function(r){return r.json();})'
+        '  .then(function(d){'
+        '    if(d.ok){res.textContent="Connected · "+d.models+" model(s) available";res.style.color="#4CAF50";}'
+        '    else{res.textContent="Failed: "+(d.error||"unreachable");res.style.color="#EF5350";}'
+        '  }).catch(function(){res.textContent="Connection error";res.style.color="#EF5350";});'
         '}'
-        'function step2Finish(){'
-        '  fetch("/api/setup/complete",{method:"POST",headers:{"Content-Type":"application/json"},'
-        '    body:"{}"})'
-        '  .then(function(){window.location="/login";});'
+
+        'function wizTestHV(){'
+        '  var url=document.getElementById("wiz-hv-url").value.trim();'
+        '  var tok=document.getElementById("wiz-hv-token").value.trim();'
+        '  var res=document.getElementById("s3-test-result");'
+        '  if(!url){res.textContent="Enter a URL first";res.style.color="#EF5350";return;}'
+        '  res.textContent="Testing...";res.style.color="var(--fg2)";'
+        '  fetch("/api/setup/test_hypervisor",{method:"POST",headers:{"Content-Type":"application/json"},'
+        '    body:JSON.stringify({url:url,token:tok})})'
+        '  .then(function(r){return r.json();})'
+        '  .then(function(d){'
+        '    if(d.ok){res.textContent="Reachable · "+d.hostname;res.style.color="#4CAF50";}'
+        '    else{res.textContent="Failed: "+(d.error||"unreachable");res.style.color="#EF5350";}'
+        '  }).catch(function(){res.textContent="Connection error";res.style.color="#EF5350";});'
+        '}'
+
+        'function wizFillSummary(){'
+        '  document.getElementById("sum-user").textContent=document.getElementById("wiz-user").value||"admin";'
+        '  document.getElementById("sum-ollama").textContent=document.getElementById("wiz-ollama").value;'
+        '  document.getElementById("sum-model").textContent=document.getElementById("wiz-model").value;'
+        '  var hv=document.getElementById("wiz-hv-url").value.trim();'
+        '  document.getElementById("sum-hv").textContent=hv||"Not configured";'
+        '}'
+
+        'function wizFinish(){'
+        '  var btn=document.getElementById("wiz-finish-btn");'
+        '  var err=document.getElementById("s4-err");'
+        '  btn.disabled=true;btn.textContent="INITIALISING...";'
+        '  fetch("/api/setup/complete",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})'
+        '  .then(function(r){return r.json();})'
+        '  .then(function(d){'
+        '    if(d.ok)window.location="/login";'
+        '    else{err.textContent=d.error||"Setup failed.";btn.disabled=false;btn.textContent="ENTER THE SYSTEM";}'
+        '  }).catch(function(){err.textContent="Network error during finalisation.";btn.disabled=false;btn.textContent="ENTER THE SYSTEM";});'
         '}'
         '</script>'
         '</body></html>'
@@ -6714,31 +6919,54 @@ def _page_status(db):
         cli_count = len(_cli_sessions)
     with _shared_lock:
         hist_count = len(_shared_hist)
-    stats = [
-        ('ollama',       ol),
-        ('fast model',   f'{MODEL_FAST} {"✓" if fok else "✗"}'),
-        ('deep model',   f'{MODEL_DEEP.split("/")[-1][:35]} {"✓" if dok else "✗"}'),
-        ('vision model', f'{MODEL_VISION} {"✓" if vok else "✗"}'),
-        ('memories',     str(mc)),
-        ('sessions',     str(sc)),
-        ('active CLI',   str(cli_count)),
-        ('history msgs', str(hist_count)),
-        ('stt',          f'{"on" if _stt_enabled() else "off"} [{_stt_mode()}]'),
-        ('voice',        f'{"on" if _voice_enabled() else "off"} [{_voice_model()}]'),
-        ('time',         datetime.now().strftime('%Y-%m-%d %H:%M')),
-    ]
-    rows = ''.join(f"<div class=st><span class=sk>{k}</span><span class=sv>{_esc(str(v))}</span></div>" for k, v in stats)
+    voice_st = ('on' if _voice_enabled() else 'off') + ' [' + _voice_model() + ']'
+    stt_st   = ('on' if _stt_enabled() else 'off') + ' [' + _stt_mode() + ']'
+    uptime_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    def _stat_card(val, lbl):
+        return (
+            f"<div class=stat-card>"
+            f"<div class=stat-val>{_esc(str(val))}</div>"
+            f"<div class=stat-lbl>{_esc(lbl)}</div>"
+            f"</div>"
+        )
+
+    stat_grid = (
+        "<div class=card-grid>"
+        + _stat_card(ol.upper(), 'Ollama Status')
+        + _stat_card(str(mc), 'Memories')
+        + _stat_card(str(sc), 'Sessions')
+        + _stat_card(str(cli_count), 'Active CLI')
+        + _stat_card(voice_st, 'Voice Status')
+        + _stat_card(stt_st, 'STT Status')
+        + "</div>"
+    )
+
+    model_rows = ''.join(
+        f"<div class=st><span class=sk>{_esc(k)}</span><span class=sv>{_esc(str(v))}</span></div>"
+        for k, v in [
+            ('fast model',   f'{MODEL_FAST} {"✓" if fok else "✗"}'),
+            ('deep model',   f'{MODEL_DEEP.split("/")[-1][:35]} {"✓" if dok else "✗"}'),
+            ('vision model', f'{MODEL_VISION} {"✓" if vok else "✗"}'),
+            ('history msgs', str(hist_count)),
+            ('time',         uptime_str),
+        ]
+    )
+    model_card = (
+        "<div class=card>"
+        "<div class=card-head>Model &amp; Runtime Details</div>"
+        f"<div class=card-body>{model_rows}</div>"
+        "</div>"
+    )
+
     # Password change form
     pw_form = (
         "<div class=card>"
         "<div class=card-head>Change Password</div>"
         "<div class=card-body>"
-        "<style>.pw-inp{background:var(--bg3);border:1px solid var(--border);border-radius:8px;"
-        "color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;"
-        "margin-bottom:8px;width:100%;display:block;transition:border-color .2s}.pw-inp:focus{border-color:var(--or2)}</style>"
-        "<form method=POST action=/api/passwd>"
-        "<input type=password name=password class=pw-inp placeholder='New password'>"
-        "<input type=password name=confirm class=pw-inp placeholder='Confirm'>"
+        "<form method=POST action=/api/passwd style='max-width:380px'>"
+        "<input type=password name=password class=inp placeholder='New password' style='margin-bottom:8px'>"
+        "<input type=password name=confirm class=inp placeholder='Confirm' style='margin-bottom:10px'>"
         "<button type=submit class=btn>Update Password</button>"
         "</form></div></div>"
     )
@@ -6772,7 +7000,7 @@ def _page_status(db):
     )
     return _shell(
         f"<div class=page-head>System Status</div>"
-        f"<div class=page><div class=card><div class=card-body>{rows}</div></div>{update_btn}{pw_form}</div>",
+        f"<div class=page>{stat_grid}{model_card}{update_btn}{pw_form}</div>",
         'status')
 
 
