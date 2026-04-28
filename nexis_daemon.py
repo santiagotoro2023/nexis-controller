@@ -137,7 +137,7 @@ _tts_voice_obj      = [None]
 _tts_voice_key      = [None]
 _tts_voice_obj_lk   = threading.Lock()
 _tts_last_error     = [None]   # last piper load error string, shown in /api/voice
-_tts_speed          = [1.2]   # piper length_scale; lower = faster
+_tts_speed          = [1.4]   # piper length_scale; lower = faster
 _tts_playing        = threading.Event()  # set while audio is playing
 _cli_tts_q          = _queue.Queue(maxsize=8)
 _tts_current_proc   = [None]
