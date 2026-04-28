@@ -1370,9 +1370,10 @@ def _watch_service(name: str, stop_event: threading.Event, interval: int = 30):
             _log(msg, 'WARN')
             # Desktop notification
             try:
+                _env = _load_display_env()
                 subprocess.Popen(['notify-send', '-u', 'critical',
                                   f'NeXiS Watch: {name}', f'State changed: {last_state} -> {state}'],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                 env=_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
             # Push to all CLI sessions
@@ -3015,7 +3016,7 @@ def _desktop(action, arg):
             except Exception as e:
                 return f'(tab failed: {e})'
         elif act == 'close':
-            r = subprocess.run(['wmctrl','-c',arg], capture_output=True)
+            r = subprocess.run(['wmctrl','-c',arg], capture_output=True, env=env)
             if r.returncode != 0: subprocess.run(['pkill','-f',arg], capture_output=True)
             return f'closed: {arg[:40]}'
         elif act == 'notify':
@@ -5188,7 +5189,7 @@ _CSS = (
     ".main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}"
     ".page-head{padding:14px 20px;border-bottom:1px solid var(--border);color:var(--or);"
     "font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;flex-shrink:0}"
-    ".page{flex:1;overflow-y:auto;padding:20px}"
+    ".page{flex:1;overflow-y:auto;padding:28px;max-width:1400px}"
 
     "#cw{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}"
     "#msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;"
@@ -6741,9 +6742,37 @@ def _page_status(db):
         "<button type=submit class=btn>Update Password</button>"
         "</form></div></div>"
     )
+    update_btn = (
+        "<div class=card>"
+        "<div class=card-head>Software Update</div>"
+        "<div class=card-body>"
+        "<div id=upd-status style='font-size:11px;color:var(--fg2);margin-bottom:10px'>"
+        "Installed: nexis-controller · check GitHub for latest release</div>"
+        "<button class=btn onclick='doUpdate()' id=upd-btn>Check &amp; Update</button>"
+        "</div></div>"
+        "<script>"
+        "function doUpdate(){"
+        "  document.getElementById('upd-btn').disabled=true;"
+        "  document.getElementById('upd-status').textContent='Downloading latest release...';"
+        "  fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'}})"
+        "  .then(function(r){return r.json();})"
+        "  .then(function(d){"
+        "    if(d.ok){"
+        "      document.getElementById('upd-status').textContent='Updated to '+d.version+'. Restarting service...';"
+        "      setTimeout(function(){location.reload();},4000);"
+        "    }else{"
+        "      document.getElementById('upd-status').textContent='Update failed: '+(d.error||'unknown error');"
+        "      document.getElementById('upd-btn').disabled=false;"
+        "    }"
+        "  }).catch(function(e){"
+        "    document.getElementById('upd-status').textContent='Error: '+e.message;"
+        "    document.getElementById('upd-btn').disabled=false;"
+        "  });}"
+        "</script>"
+    )
     return _shell(
         f"<div class=page-head>System Status</div>"
-        f"<div class=page><div class=card><div class=card-body>{rows}</div></div>{pw_form}</div>",
+        f"<div class=page><div class=card><div class=card-body>{rows}</div></div>{update_btn}{pw_form}</div>",
         'status')
 
 
@@ -6884,8 +6913,8 @@ def _page_hypervisor():
 var _hvNode = null;
 
 function hvLoad(){
-  fetch('/api/devices').then(r=>r.json()).then(d=>{
-    var nodes = (d.devices||[]).filter(function(x){return x.device_type==='hypervisor'});
+  fetch('/api/hyp/nodes').then(r=>r.json()).then(function(d){
+    var nodes = Array.isArray(d) ? d : (d.nodes||[]);
     if(!nodes.length){
       document.getElementById('hv-conn-status').textContent='NO HYPERVISOR NODE REGISTERED';
       document.getElementById('hv-conn-status').className='hv-status-bar err';
@@ -6893,35 +6922,32 @@ function hvLoad(){
       return;
     }
     _hvNode = nodes[0];
-    var status = _hvNode.online ? 'NODE ONLINE · ' + _hvNode.hostname.toUpperCase() + ' · ' + (_hvNode.ip||'?')
-                                : 'NODE OFFLINE · ' + _hvNode.hostname.toUpperCase() + ' · LAST SEEN ' + (_hvNode.last_seen||'?').substring(0,16);
-    var cls = _hvNode.online ? 'ok' : 'err';
+    var status = 'NODE REGISTERED · ' + (_hvNode.name||_hvNode.hostname||'?').toUpperCase() + ' · ' + (_hvNode.url||_hvNode.ip||'?');
     document.getElementById('hv-conn-status').textContent = status;
-    document.getElementById('hv-conn-status').className = 'hv-status-bar ' + cls;
-
-    if(_hvNode.status_json){
-      try{
-        var s = JSON.parse(_hvNode.status_json);
-        document.getElementById('hv-cpu').textContent  = (s.cpu||0).toFixed(1)+'%';
-        document.getElementById('hv-mem').textContent  = (s.mem||0).toFixed(1)+'%';
-        document.getElementById('hv-disk').textContent = (s.disk||0).toFixed(1)+'%';
-        document.getElementById('hv-vms').textContent  = (s.vms_active||0)+' / '+(s.vms_total||0);
-        document.getElementById('hv-cts').textContent  = (s.cts_active||0)+' / '+(s.cts_total||0);
-      }catch(e){}
-    }
+    document.getElementById('hv-conn-status').className = 'hv-status-bar ok';
     document.getElementById('hv-connected').style.display='block';
     document.getElementById('hv-vms-card').style.display='block';
     document.getElementById('hv-cts-card').style.display='block';
     document.getElementById('hv-cmd-card').style.display='block';
-
-    if(_hvNode.online){
-      hvLoadVMs();
-      hvLoadCTs();
-    }
+    hvLoadVMs();
+    hvLoadCTs();
+    hvLoadMetrics();
   }).catch(function(){
-    document.getElementById('hv-conn-status').textContent='FAILED TO QUERY DEVICE REGISTRY';
+    document.getElementById('hv-conn-status').textContent='FAILED TO QUERY HYPERVISOR NODES';
     document.getElementById('hv-conn-status').className='hv-status-bar err';
   });
+}
+
+function hvLoadMetrics(){
+  fetch('/api/hyp/metrics').then(r=>r.json()).then(function(d){
+    if(!d||!d.nodes||!d.nodes.length) return;
+    var s = d.nodes[0];
+    document.getElementById('hv-cpu').textContent  = ((s.cpu_percent)||0).toFixed(1)+'%';
+    document.getElementById('hv-mem').textContent  = ((s.mem_percent)||0).toFixed(1)+'%';
+    document.getElementById('hv-disk').textContent = ((s.disk_percent)||0).toFixed(1)+'%';
+    document.getElementById('hv-vms').textContent  = (s.vms_running||0)+' / '+(s.vms_total||0);
+    document.getElementById('hv-cts').textContent  = (s.cts_running||0)+' / '+(s.cts_total||0);
+  }).catch(function(){});
 }
 
 function hvPowerAction(type, id, action){
@@ -8698,6 +8724,35 @@ def _start_web():
                     with _shared_lock: hl = len(_shared_hist)
                     _sync_broadcast({'typing': False, 'hist_len': hl})
                     self._send(200, json.dumps({'ok': True}), 'application/json')
+
+                elif path == '/api/update':
+                    def _do_update():
+                        try:
+                            import ssl as _su, urllib.request as _ur
+                            ctx = _su.create_default_context()
+                            ctx.check_hostname = False; ctx.verify_mode = _su.CERT_NONE
+                            api_url = 'https://api.github.com/repos/santiagotoro2023/nexis-controller/releases/latest'
+                            with _ur.urlopen(api_url, context=ctx, timeout=15) as r:
+                                release = json.loads(r.read())
+                            assets = release.get('assets', [])
+                            deb_url = next((a['browser_download_url'] for a in assets if a['name'].endswith('.deb')), None)
+                            if not deb_url:
+                                return {'ok': False, 'error': 'No .deb in latest release'}
+                            import tempfile
+                            with tempfile.NamedTemporaryFile(suffix='.deb', delete=False) as tf:
+                                tmp_path = tf.name
+                            with _ur.urlopen(deb_url, context=ctx, timeout=120) as r:
+                                with open(tmp_path, 'wb') as f:
+                                    f.write(r.read())
+                            result = subprocess.run(['dpkg', '-i', tmp_path], capture_output=True, text=True)
+                            os.unlink(tmp_path)
+                            if result.returncode == 0:
+                                subprocess.Popen(['systemctl', 'restart', 'nexis-controller'])
+                                return {'ok': True, 'version': release.get('tag_name', '?')}
+                            return {'ok': False, 'error': result.stderr[:500]}
+                        except Exception as e:
+                            return {'ok': False, 'error': str(e)}
+                    self._send(200, json.dumps(_do_update()), 'application/json')
 
                 elif path == '/api/passwd':
                     ln2   = int(self.headers.get('Content-Length', 0))
