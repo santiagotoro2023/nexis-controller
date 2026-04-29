@@ -5156,48 +5156,111 @@ class Session:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _CSS = (
-    ":root{--bg:#080807;--bg2:#0d0d0a;--bg3:#131310;--or:#e8720c;--or2:#c45c00;"
-    "--or3:#ff9533;--dim:#2a2a1a;--fg:#c4b898;--fg2:#887766;"
-    "--border:#1a1a12;--font:'JetBrains Mono',monospace}"
+    ":root{"
+    "--bg:#080807;--bg2:#0D0D0A;--bg3:#131310;--dim:#2A2A1A;"
+    "--or:#F87200;--or2:#C45C00;--or3:#FF9533;"
+    "--fg:#C4B898;--fg2:#887766;"
+    "--border:#1A1A12;--outline:#3A3A28;"
+    "--green:#4CAF50;--red:#EF5350;--yellow:#FFC107;--blue:#2196F3;"
+    "--font:'JetBrains Mono','Fira Code',monospace}"
     "*{box-sizing:border-box;margin:0;padding:0}"
     "body{background:var(--bg);color:var(--fg);font-family:var(--font);"
     "font-size:13px;line-height:1.6;height:100vh;display:flex;overflow:hidden}"
     "a{color:var(--or2)}"
 
+    # Grid background for login/setup
+    ".grid-bg{position:fixed;inset:0;pointer-events:none;opacity:0.03;"
+    "background-image:linear-gradient(#C4B898 1px,transparent 1px),"
+    "linear-gradient(90deg,#C4B898 1px,transparent 1px);"
+    "background-size:40px 40px}"
+
+    # Sidebar
     ".sidebar{width:240px;background:var(--bg2);border-right:1px solid var(--border);"
-    "display:flex;flex-direction:column;flex-shrink:0;height:100vh;z-index:10}"
+    "display:flex;flex-direction:column;height:100vh;flex-shrink:0}"
     ".sb-brand{padding:18px 16px 14px;display:flex;align-items:center;gap:11px;"
     "border-bottom:1px solid var(--border)}"
     ".sb-brand-text{line-height:1.2}"
-    ".sb-name{color:var(--or);font-weight:700;font-size:13px;letter-spacing:.2em;display:block}"
-    ".sb-ver{color:var(--fg2);font-size:9px;letter-spacing:.08em}"
-    ".sb-nav{flex:1;padding:6px 0;overflow-y:auto}"
-    ".nav-item{display:flex;align-items:center;padding:11px 18px;color:var(--fg2);"
-    "text-decoration:none;font-size:10px;text-transform:uppercase;letter-spacing:.1em;"
-    "border-left:3px solid transparent;transition:color .15s,background .15s,border-color .15s;"
-    "white-space:nowrap;gap:10px}"
-    ".nav-item:hover{color:var(--fg);background:rgba(255,255,255,.025);border-left-color:var(--dim)}"
-    ".nav-item.on{color:var(--or);background:rgba(232,114,12,.07);border-left-color:var(--or)}"
-    ".nav-icon{font-size:16px;margin-right:8px;opacity:.7;vertical-align:middle;flex-shrink:0;line-height:1}"
+    ".sb-name{color:var(--fg);font-weight:600;font-size:13px;letter-spacing:0.2em;display:block;text-transform:uppercase}"
+    ".sb-sub{color:var(--fg2);font-size:9px;letter-spacing:0.3em;text-transform:uppercase}"
+    ".sb-nav{flex:1;padding:10px 8px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}"
+    ".nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;"
+    "border-radius:12px;color:var(--fg2);text-decoration:none;"
+    "font-size:10px;text-transform:uppercase;letter-spacing:0.12em;"
+    "white-space:nowrap;cursor:pointer;transition:all 0.15s;"
+    "border:1px solid transparent;background:transparent}"
+    ".nav-item:hover{color:var(--fg);background:var(--dim)}"
+    ".nav-item.on{color:var(--or);background:rgba(248,114,0,0.08);border-color:rgba(248,114,0,0.18)}"
+    ".nav-icon{font-size:14px;flex-shrink:0;opacity:0.7}"
     ".nav-item.on .nav-icon{opacity:1}"
-    ".sb-footer{padding:14px 16px;border-top:1px solid var(--border)}"
-    ".sb-logout{display:block;padding:6px 2px;color:var(--fg2);text-decoration:none;"
-    "font-size:10px;text-transform:uppercase;letter-spacing:.1em;opacity:.55;"
-    "transition:opacity .15s}"
-    ".sb-logout:hover{opacity:1;color:var(--fg)}"
+    ".sb-footer{padding:10px 8px;border-top:1px solid var(--border)}"
+    ".sb-logout{display:flex;align-items:center;gap:10px;padding:9px 12px;"
+    "border-radius:12px;color:var(--fg2);font-size:10px;"
+    "text-transform:uppercase;letter-spacing:0.12em;cursor:pointer;"
+    "transition:all 0.15s;background:transparent;border:none;width:100%;text-decoration:none}"
+    ".sb-logout:hover{color:var(--red);background:rgba(239,83,80,0.05)}"
+    ".sb-version{font-size:9px;color:var(--fg2);letter-spacing:0.12em;padding:6px 12px 2px}"
 
+    # Main layout
     ".main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}"
-    ".page-head{padding:16px 28px;border-bottom:1px solid var(--border);color:var(--or);"
-    "font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;flex-shrink:0;"
+    ".page-head{padding:14px 24px;border-bottom:1px solid var(--border);"
+    "color:var(--fg2);font-size:10px;font-weight:700;"
+    "letter-spacing:0.2em;text-transform:uppercase;flex-shrink:0;"
     "display:flex;align-items:center;justify-content:space-between}"
-    ".page{flex:1;overflow-y:auto;padding:28px;max-width:1400px}"
+    ".page{flex:1;overflow-y:auto;padding:24px}"
 
+    # Cards - 16px radius
+    ".card{background:var(--bg3);border:1px solid var(--border);border-radius:16px;margin-bottom:16px}"
+    ".card-head{padding:10px 16px;border-bottom:1px solid var(--border);color:var(--or);"
+    "font-size:9px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase}"
+    ".card-body{padding:14px 16px}"
+    ".card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-bottom:16px}"
+    ".stat-card{background:var(--bg3);border:1px solid var(--border);border-radius:16px;padding:18px}"
+    ".stat-val{font-size:26px;font-weight:700;color:var(--or3);letter-spacing:0.05em}"
+    ".stat-lbl{font-size:9px;color:var(--fg2);text-transform:uppercase;letter-spacing:0.15em;margin-top:5px}"
+    ".stat-icon{font-size:18px;margin-bottom:8px;opacity:0.6}"
+
+    # Inputs and buttons
+    ".inp{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:12px;"
+    "color:var(--fg);padding:10px 14px;font-family:var(--font);font-size:13px;"
+    "outline:none;transition:border-color .2s;box-sizing:border-box}"
+    ".inp:focus{border-color:var(--or2)}"
+    ".inp::placeholder{color:var(--fg2)}"
+    "label.lbl{display:block;font-size:10px;color:var(--fg2);text-transform:uppercase;letter-spacing:0.15em;margin-bottom:5px}"
+    ".btn-primary{background:var(--or);border:none;color:var(--bg);padding:10px 20px;"
+    "border-radius:12px;font-family:var(--font);font-size:11px;"
+    "font-weight:700;text-transform:uppercase;letter-spacing:0.15em;"
+    "cursor:pointer;transition:background .15s;width:100%}"
+    ".btn-primary:hover:not(:disabled){background:var(--or3)}"
+    ".btn-primary:disabled{opacity:0.4;cursor:not-allowed}"
+    ".btn-ghost{background:transparent;border:1px solid var(--border);color:var(--fg2);"
+    "padding:8px 16px;border-radius:12px;font-family:var(--font);"
+    "font-size:11px;text-transform:uppercase;letter-spacing:0.12em;"
+    "cursor:pointer;transition:all .15s}"
+    ".btn-ghost:hover:not(:disabled){color:var(--fg);background:var(--dim);border-color:var(--outline)}"
+
+    # Status badges
+    ".badge-running{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;"
+    "font-size:10px;background:rgba(76,175,80,0.1);color:#4CAF50;border:1px solid rgba(76,175,80,0.2);"
+    "text-transform:uppercase;letter-spacing:0.08em}"
+    ".badge-stopped{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;"
+    "font-size:10px;background:rgba(239,83,80,0.1);color:#EF5350;border:1px solid rgba(239,83,80,0.2);"
+    "text-transform:uppercase;letter-spacing:0.08em}"
+    ".badge-ok{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;"
+    "font-size:10px;background:rgba(76,175,80,0.1);color:#4CAF50;border:1px solid rgba(76,175,80,0.2);"
+    "text-transform:uppercase;letter-spacing:0.08em}"
+
+    # Legacy badge compat
+    ".badge{font-size:9px;padding:2px 6px;border:1px solid;letter-spacing:.06em;text-transform:uppercase;border-radius:6px}"
+    ".badge.ok{color:var(--or3);border-color:var(--or2)}"
+    ".badge.off{color:var(--fg2);border-color:var(--border)}"
+
+    # Chat
     "#cw{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}"
     "#msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;"
     "gap:10px;padding:16px 20px 8px;min-height:0}"
     ".msg{padding:10px 14px;font-size:13px;line-height:1.7;"
     "max-width:78%;word-break:break-word;border-radius:12px}"
-    ".msg.u{align-self:flex-end;background:rgba(232,114,12,.07);border:1px solid var(--or2)}"
+    ".msg.u{align-self:flex-end;background:rgba(248,114,0,0.07);border:1px solid var(--or2)}"
     ".msg.n{align-self:flex-start;background:var(--bg2);border:1px solid var(--border);min-width:200px}"
     ".who{font-size:9px;font-weight:700;letter-spacing:.1em;margin-bottom:4px;text-transform:uppercase}"
     ".msg.u .who{color:var(--or2)}.msg.n .who{color:var(--or)}"
@@ -5215,6 +5278,7 @@ _CSS = (
     "#fi{display:none}"
     ".fbadge{font-size:10px;color:var(--or3);padding:0 4px;display:none}"
 
+    # Toolbar / send button (kept as .btn for chat compat)
     ".btn{background:var(--or2);border:1px solid var(--or2);color:var(--bg);"
     "padding:0 14px;height:36px;line-height:36px;"
     "font-family:var(--font);font-size:11px;text-transform:uppercase;"
@@ -5242,14 +5306,7 @@ _CSS = (
     "text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;height:26px}"
     "select.btn.sec{height:26px;line-height:26px}"
 
-    ".card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;margin-bottom:16px}"
-    ".card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-bottom:16px}"
-    ".stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:16px}"
-    ".stat-val{font-size:24px;font-weight:700;color:var(--or3);letter-spacing:.05em}"
-    ".stat-lbl{font-size:9px;color:var(--fg2);text-transform:uppercase;letter-spacing:.12em;margin-top:4px}"
-    ".card-head{padding:9px 14px;border-bottom:1px solid var(--border);color:var(--or);"
-    "font-size:9px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}"
-    ".card-body{padding:12px 14px}"
+    # Misc shared styles
     ".ph{color:var(--or);font-size:11px;font-weight:700;margin-bottom:14px;"
     "padding-bottom:8px;border-bottom:1px solid var(--border);letter-spacing:.1em;text-transform:uppercase}"
     ".mi{padding:8px 0;border-bottom:1px solid var(--border);color:var(--fg2);font-size:12px}"
@@ -5263,20 +5320,14 @@ _CSS = (
     ".sched-row:last-child{border:none}"
     ".sched-name{color:var(--or);font-weight:700;margin-bottom:3px}"
     ".sched-meta{color:var(--fg2);font-size:10px;margin-top:2px}"
-    ".badge{font-size:9px;padding:2px 6px;border:1px solid;letter-spacing:.06em;text-transform:uppercase;border-radius:6px}"
-    ".badge.ok{color:var(--or3);border-color:var(--or2)}"
-    ".badge.off{color:var(--fg2);border-color:var(--border)}"
-    ".inp{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:8px;"
-    "color:var(--fg);padding:9px 12px;font-family:var(--font);font-size:12px;outline:none;"
-    "transition:border-color .2s;box-sizing:border-box}"
-    ".inp:focus{border-color:var(--or2)}"
 
+    # Markdown rendering in chat
     ".msg h1{color:var(--or3);font-size:15px;margin:8px 0 4px}"
     ".msg h2{color:var(--or);font-size:14px;margin:6px 0 3px}"
     ".msg h3{color:var(--or2);font-size:13px;margin:4px 0 2px}"
     ".msg p{margin:3px 0}"
     ".msg li{margin:2px 0 2px 16px;list-style:none}"
-    ".msg li::before{content:'·';color:var(--or2);margin-right:6px}"
+    ".msg li::before{content:'\\B7';color:var(--or2);margin-right:6px}"
     ".msg code{background:var(--bg3);padding:1px 5px;"
     "font-family:var(--font);font-size:12px;color:var(--or3)}"
     ".msg strong{color:var(--or3);font-weight:700}"
@@ -5305,16 +5356,6 @@ _CSS = (
     ".cursor{color:var(--or3);animation:blink 1s infinite}"
     ".status-line{font-size:10px;color:var(--fg2);opacity:.65;margin:0 0 4px;letter-spacing:.04em}"
 
-    ".login-wrap{display:flex;justify-content:center;align-items:center;"
-    "height:100vh;flex-direction:column;gap:20px;background:var(--bg)}"
-    ".login-box{background:var(--bg2);border:1px solid var(--border);"
-    "border-radius:16px;padding:32px 36px;min-width:300px}"
-    ".login-box input{width:100%;background:var(--bg3);border:1px solid var(--border);"
-    "border-radius:8px;color:var(--fg);padding:9px 11px;font-family:var(--font);"
-    "font-size:13px;outline:none;margin-bottom:10px;transition:border-color .2s}"
-    ".login-box input:focus{border-color:var(--or2)}"
-    ".login-err{color:#c07070;font-size:11px;margin-bottom:10px}"
-
     "#inp.stt-active{border-color:var(--or);box-shadow:0 0 0 1px var(--or)}"
     "#conv-badge{display:none;font-size:9px;color:var(--or);border:1px solid var(--or2);"
     "padding:1px 5px;letter-spacing:.08em;text-transform:uppercase;align-self:center}"
@@ -5329,23 +5370,29 @@ _CSS = (
     "body{flex-direction:column}"
     ".sidebar{width:100%;height:auto;border-right:none;border-bottom:1px solid var(--border);flex-direction:row}"
     ".sb-brand{padding:10px 14px;border-bottom:none;border-right:1px solid var(--border);flex-shrink:0}"
-    ".sb-ver{display:none}"
-    ".sb-nav{display:flex;flex-direction:row;padding:0;overflow-x:auto;overflow-y:hidden}"
-    ".nav-item{padding:10px 14px;border-left:none;border-bottom:3px solid transparent;flex-direction:column;gap:2px;font-size:9px}"
-    ".nav-item.on{border-left-color:transparent;border-bottom-color:var(--or)}"
-    ".nav-item:hover{border-left-color:transparent}"
+    ".sb-sub{display:none}"
+    ".sb-nav{flex-direction:row;padding:4px;overflow-x:auto;overflow-y:hidden;gap:2px}"
+    ".nav-item{padding:8px 10px;flex-direction:column;gap:2px;font-size:9px;border-radius:10px}"
     ".sb-footer{display:none}"
     ".main{min-height:0}"
     "}"
 )
 
 _EYE_SVG = (
-    '<svg width="28" height="32" viewBox="0 0 28 32" xmlns="http://www.w3.org/2000/svg">'
-    '<polygon points="14,2 26,28 2,28" fill="none" stroke="#c45c00" stroke-width="1.5"/>'
-    '<line x1="14" y1="2" x2="14" y2="28" stroke="#c45c00" stroke-width="0.7" opacity="0.4"/>'
-    '<circle cx="14" cy="19" r="5" fill="none" stroke="#c45c00" stroke-width="1.2"/>'
-    '<circle cx="14" cy="19" r="2.5" fill="#e8720c"/>'
-    '<circle cx="14" cy="19" r="1" fill="#ff9533"/>'
+    '<svg viewBox="0 0 56 56" fill="none" width="28" height="28">'
+    '<path d="M28 5 L53 49 L3 49 Z" stroke="#F87200" stroke-width="2" stroke-linejoin="round"/>'
+    '<ellipse cx="28" cy="36" rx="9" ry="5.5" stroke="#F87200" stroke-width="1.5" fill="none"/>'
+    '<circle cx="28" cy="36" r="3" fill="#F87200"/>'
+    '<circle cx="28" cy="36" r="1.3" fill="#080807"/>'
+    '</svg>'
+)
+
+_EYE_SVG_LG = (
+    '<svg viewBox="0 0 56 56" fill="none" width="48" height="48">'
+    '<path d="M28 5 L53 49 L3 49 Z" stroke="#F87200" stroke-width="2" stroke-linejoin="round"/>'
+    '<ellipse cx="28" cy="36" rx="9" ry="5.5" stroke="#F87200" stroke-width="1.5" fill="none"/>'
+    '<circle cx="28" cy="36" r="3" fill="#F87200"/>'
+    '<circle cx="28" cy="36" r="1.3" fill="#080807"/>'
     '</svg>'
 )
 
@@ -5799,19 +5846,19 @@ document.addEventListener('keydown',function(e){
 
 def _shell(content, active='chat'):
     nav_items = [
-        ('chat',      'chat',          'Chat'),
-        ('remote',    'tune',          'Remote'),
-        ('history',   'history',       'History'),
-        ('memory',    'memory',        'Memory'),
-        ('schedules', 'schedule',      'Schedules'),
-        ('devices',   'devices',       'Devices'),
-        ('hypervisor','dns',           'Hypervisor'),
-        ('users',     'manage_accounts','Users'),
-        ('status',    'monitor_heart', 'Status'),
+        ('chat',       '\U0001F4AC', 'Chat'),
+        ('remote',     '⚙',     'Remote'),
+        ('history',    '⏳',     'History'),
+        ('memory',     '\U0001F9E0', 'Memory'),
+        ('schedules',  '\U0001F4C5', 'Schedules'),
+        ('devices',    '\U0001F4BB', 'Devices'),
+        ('hypervisor', '\U0001F5A5', 'Hypervisor'),
+        ('users',      '\U0001F465', 'Users'),
+        ('status',     '\U0001F4CA', 'Status'),
     ]
     nav_html = ''.join(
         f"<a href='/{s}' class='nav-item {'on' if active==s else ''}'>"
-        f"<span class='nav-icon material-icons'>{icon}</span><span class='nav-label'>{label}</span></a>"
+        f"<span class='nav-icon'>{icon}</span><span>{label}</span></a>"
         for s, icon, label in nav_items
     )
     return (
@@ -5823,20 +5870,23 @@ def _shell(content, active='chat'):
         "<link rel=preconnect href='https://fonts.googleapis.com'>"
         "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
         "<link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' media=print onload=\"this.media='all'\">"
-        "<link rel=stylesheet href='https://fonts.googleapis.com/icon?family=Material+Icons' media=print onload=\"this.media='all'\">"
-        "<noscript><link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap'><link rel=stylesheet href='https://fonts.googleapis.com/icon?family=Material+Icons'></noscript>"
+        "<noscript><link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap'></noscript>"
         f'<style>{_CSS}</style></head><body>'
         '<div class=sidebar>'
         '<div class=sb-brand>'
         f'{_EYE_SVG}'
         '<div class=sb-brand-text>'
         '<span class=sb-name>NeXiS</span>'
-        '<span class=sb-ver>CONTROLLER · BUILD 1.0.0</span>'
+        '<span class=sb-sub>Controller</span>'
         '</div>'
         '</div>'
         f'<nav class=sb-nav>{nav_html}</nav>'
         '<div class=sb-footer>'
-        "<a href='/logout' class=sb-logout>↩ Logout</a>"
+        "<a href='/logout' class=sb-logout>"
+        '<span style="font-size:14px;opacity:0.7">↩</span>'
+        '<span>Logout</span>'
+        '</a>'
+        '<div class=sb-version>Build 1.0.0</div>'
         '</div>'
         '</div>'
         f'<div class=main>{content}</div>'
@@ -6432,7 +6482,10 @@ function delUser(u){{
 
 
 def _page_login(error=''):
-    err_html = f'<div class=login-err>{_esc(error)}</div>' if error else ''
+    err_html = (
+        f'<div style="color:var(--red);font-size:11px;margin-bottom:12px;'
+        f'letter-spacing:0.04em;text-align:center">{_esc(error)}</div>'
+    ) if error else ''
     return (
         '<!DOCTYPE html><html lang=en><head>'
         '<meta charset=UTF-8><title>NeXiS Controller</title>'
@@ -6441,29 +6494,43 @@ def _page_login(error=''):
         "<link rel=preconnect href='https://fonts.gstatic.com' crossorigin>"
         "<link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap' media=print onload=\"this.media='all'\">"
         "<noscript><link rel=stylesheet href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap'></noscript>"
-        f'<style>{_CSS}'
-        '.login-box label{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.14em;color:var(--fg2);margin-bottom:5px}'
-        '.login-box .field{margin-bottom:12px}'
-        '</style></head><body style="display:block">'
-        '<div class=login-wrap>'
-        f'{_EYE_SVG}'
-        '<div style="text-align:center;margin-bottom:20px">'
-        '<span style="color:var(--or);font-weight:700;font-size:15px;letter-spacing:.32em;display:block;margin-bottom:3px">NeXiS</span>'
-        '<span style="color:var(--fg2);font-size:9px;letter-spacing:.2em;text-transform:uppercase">CONTROLLER · BUILD 1.0.0</span>'
+        f'<style>{_CSS}</style>'
+        '</head>'
+        '<body style="display:block;min-height:100vh;background:var(--bg)">'
+        '<div style="min-height:100vh;background:var(--bg);display:flex;align-items:center;'
+        'justify-content:center;padding:16px;position:relative;">'
+        '<div class=grid-bg></div>'
+        '<div style="width:100%;max-width:340px;position:relative;">'
+        '<div style="text-align:center;margin-bottom:40px;">'
+        f'{_EYE_SVG_LG}'
+        '<div style="font-size:18px;font-weight:600;color:var(--fg);letter-spacing:0.4em;'
+        'text-transform:uppercase;margin-top:16px;">NeXiS</div>'
+        '<div style="color:var(--fg2);font-size:10px;letter-spacing:0.5em;'
+        'text-transform:uppercase;margin-top:4px;">Controller</div>'
         '</div>'
-        '<div class=login-box>'
-        '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.14em;color:var(--fg2);margin-bottom:18px;text-align:center">Sign In</div>'
+        '<div class=card style="padding:28px;">'
+        '<div style="text-align:center;font-size:10px;color:var(--fg2);letter-spacing:0.3em;'
+        'text-transform:uppercase;margin-bottom:20px;">Identity Verification Required</div>'
         f'{err_html}'
         '<form method=POST action=/login>'
-        '<div class=field><label>Username</label>'
-        '<input type=text name=username placeholder="username" autofocus autocomplete=username></div>'
-        '<div class=field><label>Password</label>'
-        '<input type=password name=password placeholder="password" autocomplete=current-password></div>'
-        '<button type=submit class=btn style="width:100%;text-transform:uppercase;letter-spacing:.12em;margin-top:4px">Sign In</button>'
-        '</form>'
-        '<div style="font-size:9px;color:var(--fg2);text-align:center;margin-top:14px;letter-spacing:.06em">Neural Execution and Cross-device Inference System</div>'
+        '<div style="margin-bottom:14px;">'
+        '<label class=lbl>Username</label>'
+        '<input type=text name=username class=inp placeholder="username" autofocus autocomplete=username>'
         '</div>'
-        '</div></body></html>'
+        '<div style="margin-bottom:20px;">'
+        '<label class=lbl>Password</label>'
+        '<input type=password name=password class=inp placeholder="password" autocomplete=current-password>'
+        '</div>'
+        '<button type=submit class=btn-primary>Authenticate</button>'
+        '</form>'
+        '</div>'
+        '<div style="text-align:center;color:var(--fg2);font-size:10px;margin-top:20px;'
+        'letter-spacing:0.2em;text-transform:uppercase;">'
+        'Authorised Personnel Only &middot; Local Access'
+        '</div>'
+        '</div>'
+        '</div>'
+        '</body></html>'
     )
 
 
@@ -6479,39 +6546,39 @@ def _page_setup():
         f'<style>{_CSS}'
         # Wizard-specific styles
         '.wiz-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;'
-        'min-height:100vh;padding:20px;box-sizing:border-box;background:var(--bg)}'
+        'min-height:100vh;padding:20px;box-sizing:border-box;background:var(--bg);position:relative}'
         '.wiz-header{text-align:center;margin-bottom:28px}'
-        '.wiz-logo{margin-bottom:14px}'
-        '.wiz-brand{color:var(--or);font-weight:700;font-size:14px;letter-spacing:.28em;display:block}'
-        '.wiz-sub{color:var(--fg2);font-size:9px;letter-spacing:.18em;text-transform:uppercase}'
-        '.wiz-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;'
-        'padding:32px 36px;max-width:500px;width:100%}'
-        '.wiz-prog{display:flex;gap:6px;margin-bottom:28px;align-items:center}'
+        '.wiz-brand{color:var(--fg);font-weight:600;font-size:18px;letter-spacing:0.4em;text-transform:uppercase;display:block;margin-top:16px}'
+        '.wiz-sub{color:var(--fg2);font-size:10px;letter-spacing:0.5em;text-transform:uppercase;margin-top:4px;display:block}'
+        '.wiz-card{background:var(--bg3);border:1px solid var(--border);border-radius:16px;'
+        'padding:32px 36px;max-width:480px;width:100%}'
+        '.wiz-prog{display:flex;gap:6px;margin-bottom:8px;align-items:center}'
         '.wiz-prog-seg{height:3px;flex:1;background:var(--border);border-radius:2px;transition:background .3s}'
         '.wiz-prog-seg.done{background:var(--or)}'
-        '.wiz-prog-num{font-size:9px;color:var(--fg2);letter-spacing:.08em;white-space:nowrap}'
+        '.wiz-prog-num{font-size:9px;color:var(--or);letter-spacing:.08em;white-space:nowrap;margin-bottom:20px;display:block}'
         '.wiz-step{display:none}.wiz-step.active{display:block}'
         '.wiz-step-title{font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;'
         'color:var(--or);margin-bottom:6px}'
         '.wiz-step-desc{font-size:11px;color:var(--fg2);line-height:1.6;margin-bottom:22px}'
-        '.wiz-label{font-size:9px;color:var(--fg2);text-transform:uppercase;letter-spacing:.12em;'
+        '.wiz-label{font-size:10px;color:var(--fg2);text-transform:uppercase;letter-spacing:0.15em;'
         'margin-bottom:5px;display:block}'
         '.wiz-field{margin-bottom:14px}'
-        '.wiz-inp{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:8px;'
-        'color:var(--fg);padding:9px 12px;font-family:var(--font);font-size:12px;outline:none;'
+        '.wiz-inp{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:12px;'
+        'color:var(--fg);padding:10px 14px;font-family:var(--font);font-size:13px;outline:none;'
         'box-sizing:border-box;transition:border-color .2s}'
+        '.wiz-inp::placeholder{color:var(--fg2)}'
         '.wiz-inp:focus{border-color:var(--or2)}'
         '.wiz-pw-strength{height:3px;background:var(--border);border-radius:2px;margin-top:5px;overflow:hidden}'
         '.wiz-pw-fill{height:3px;background:var(--or);border-radius:2px;width:0;transition:width .25s,background .25s}'
         '.wiz-err{color:#EF5350;font-size:10px;margin-bottom:10px;letter-spacing:.04em;min-height:14px}'
         '.wiz-ok{color:#4CAF50;font-size:10px;letter-spacing:.04em}'
         '.wiz-nav{display:flex;gap:10px;margin-top:24px}'
-        '.wiz-btn{flex:1;padding:10px;font-family:var(--font);font-size:10px;font-weight:700;'
-        'letter-spacing:.14em;text-transform:uppercase;cursor:pointer;border-radius:8px;'
-        'border:none;transition:opacity .15s,background .15s,color .15s}'
-        '.wiz-btn.primary{background:var(--or);color:#000}.wiz-btn.primary:hover{opacity:.85}'
+        '.wiz-btn{flex:1;padding:10px;font-family:var(--font);font-size:11px;font-weight:700;'
+        'letter-spacing:0.15em;text-transform:uppercase;cursor:pointer;border-radius:12px;'
+        'border:none;transition:all .15s}'
+        '.wiz-btn.primary{background:var(--or);color:var(--bg)}.wiz-btn.primary:hover:not(:disabled){background:var(--or3)}'
         '.wiz-btn.ghost{background:transparent;color:var(--fg2);border:1px solid var(--border)}'
-        '.wiz-btn.ghost:hover{border-color:var(--fg2);color:var(--fg)}'
+        '.wiz-btn.ghost:hover:not(:disabled){color:var(--fg);background:var(--dim);border-color:var(--outline)}'
         '.wiz-btn:disabled{opacity:.35;cursor:not-allowed}'
         '.wiz-summary-item{display:flex;align-items:flex-start;gap:10px;padding:8px 0;'
         'border-bottom:1px solid var(--border);font-size:11px}'
@@ -6521,21 +6588,21 @@ def _page_setup():
         '.wiz-summary-val{color:var(--fg);font-size:11px}'
         '.wiz-test-row{display:flex;gap:8px;align-items:flex-end;margin-bottom:14px}'
         '.wiz-test-row .wiz-field{flex:1;margin-bottom:0}'
-        '.wiz-test-btn{background:transparent;border:1px solid var(--border);border-radius:8px;'
-        'color:var(--fg2);padding:0 14px;height:38px;font-family:var(--font);font-size:10px;'
-        'text-transform:uppercase;letter-spacing:.08em;cursor:pointer;white-space:nowrap;'
-        'transition:color .15s,border-color .15s;flex-shrink:0}'
-        '.wiz-test-btn:hover{color:var(--or);border-color:var(--or2)}'
+        '.wiz-test-btn{background:transparent;border:1px solid var(--border);border-radius:12px;'
+        'color:var(--fg2);padding:0 14px;height:44px;font-family:var(--font);font-size:10px;'
+        'text-transform:uppercase;letter-spacing:.12em;cursor:pointer;white-space:nowrap;'
+        'transition:all .15s;flex-shrink:0}'
+        '.wiz-test-btn:hover{color:var(--fg);background:var(--dim);border-color:var(--outline)}'
         '.wiz-skip{font-size:10px;color:var(--fg2);text-align:center;margin-top:12px;'
         'cursor:pointer;letter-spacing:.06em;text-decoration:underline;opacity:.6}'
         '.wiz-skip:hover{opacity:1;color:var(--fg)}'
-        '.wiz-eye-wrap{display:flex;justify-content:center;margin-bottom:22px}'
         '</style></head><body style="display:block">'
         '<div class=wiz-wrap>'
+        '<div class=grid-bg></div>'
         '<div class=wiz-header>'
-        f'<div class=wiz-logo>{_EYE_SVG}</div>'
-        '<span class=wiz-brand>NEXIS</span>'
-        '<span class=wiz-sub>CONTROLLER · BUILD 1.0.0 · INITIAL SETUP</span>'
+        f'{_EYE_SVG_LG}'
+        '<span class=wiz-brand>NeXiS</span>'
+        '<span class=wiz-sub>Controller</span>'
         '</div>'
         '<div class=wiz-card>'
         # Progress bar
@@ -6923,22 +6990,28 @@ def _page_status(db):
     stt_st   = ('on' if _stt_enabled() else 'off') + ' [' + _stt_mode() + ']'
     uptime_str = datetime.now().strftime('%Y-%m-%d %H:%M')
 
-    def _stat_card(val, lbl):
+    def _stat_card(icon, val, lbl, color=None):
+        val_style = f'color:{color}' if color else ''
         return (
             f"<div class=stat-card>"
-            f"<div class=stat-val>{_esc(str(val))}</div>"
+            f"<div class=stat-icon>{icon}</div>"
+            f"<div class=stat-val style='{val_style}'>{_esc(str(val))}</div>"
             f"<div class=stat-lbl>{_esc(lbl)}</div>"
             f"</div>"
         )
 
+    ol_color = 'var(--green)' if ol == 'online' else 'var(--red)'
+    voice_short = 'ON' if _voice_enabled() else 'OFF'
+    stt_short   = 'ON' if _stt_enabled() else 'OFF'
+
     stat_grid = (
         "<div class=card-grid>"
-        + _stat_card(ol.upper(), 'Ollama Status')
-        + _stat_card(str(mc), 'Memories')
-        + _stat_card(str(sc), 'Sessions')
-        + _stat_card(str(cli_count), 'Active CLI')
-        + _stat_card(voice_st, 'Voice Status')
-        + _stat_card(stt_st, 'STT Status')
+        + _stat_card('\U0001F9E0', ol.upper(), 'Ollama Status', ol_color)
+        + _stat_card('\U0001F4BE', str(mc), 'Memories')
+        + _stat_card('\U0001F4AC', str(sc), 'Sessions')
+        + _stat_card('⚡', str(cli_count), 'Active CLI')
+        + _stat_card('\U0001F50A', voice_short, 'Voice Output')
+        + _stat_card('\U0001F3A4', stt_short, 'Voice Input (STT)')
         + "</div>"
     )
 
@@ -6948,6 +7021,8 @@ def _page_status(db):
             ('fast model',   f'{MODEL_FAST} {"✓" if fok else "✗"}'),
             ('deep model',   f'{MODEL_DEEP.split("/")[-1][:35]} {"✓" if dok else "✗"}'),
             ('vision model', f'{MODEL_VISION} {"✓" if vok else "✗"}'),
+            ('voice model',  _voice_model()),
+            ('stt mode',     _stt_mode()),
             ('history msgs', str(hist_count)),
             ('time',         uptime_str),
         ]
@@ -6965,9 +7040,15 @@ def _page_status(db):
         "<div class=card-head>Change Password</div>"
         "<div class=card-body>"
         "<form method=POST action=/api/passwd style='max-width:380px'>"
-        "<input type=password name=password class=inp placeholder='New password' style='margin-bottom:8px'>"
-        "<input type=password name=confirm class=inp placeholder='Confirm' style='margin-bottom:10px'>"
-        "<button type=submit class=btn>Update Password</button>"
+        "<div style='margin-bottom:8px'>"
+        "<label class=lbl>New Password</label>"
+        "<input type=password name=password class=inp placeholder='New password'>"
+        "</div>"
+        "<div style='margin-bottom:14px'>"
+        "<label class=lbl>Confirm</label>"
+        "<input type=password name=confirm class=inp placeholder='Confirm'>"
+        "</div>"
+        "<button type=submit class=btn-primary>Update Password</button>"
         "</form></div></div>"
     )
     update_btn = (
@@ -6976,7 +7057,7 @@ def _page_status(db):
         "<div class=card-body>"
         "<div id=upd-status style='font-size:11px;color:var(--fg2);margin-bottom:10px'>"
         "Installed: nexis-controller · check GitHub for latest release</div>"
-        "<button class=btn onclick='doUpdate()' id=upd-btn>Check &amp; Update</button>"
+        "<button class=btn-primary onclick='doUpdate()' id=upd-btn>Check &amp; Update</button>"
         "</div></div>"
         "<script>"
         "function doUpdate(){"
