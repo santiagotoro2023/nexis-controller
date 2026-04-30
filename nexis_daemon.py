@@ -5902,7 +5902,7 @@ def _shell(content, active='chat'):
         f'<nav class=sb-nav>{nav_html}</nav>'
         '<div class=sb-footer>'
         "<a href='/logout' class=sb-logout>"
-        '<span style="font-size:14px;opacity:0.7">↩</span>'
+        "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='opacity:0.7;flex-shrink:0'><path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/><polyline points='16 17 21 12 16 7'/><line x1='21' y1='12' x2='9' y2='12'/></svg>"
         '<span>Logout</span>'
         '</a>'
         '<div class=sb-version>Build 1.0.0</div>'
@@ -5988,7 +5988,7 @@ def _page_remote():
           <button class=rm-btn onclick=da('media','next')>Next<svg width='12' height='12' viewBox='0 0 24 24' fill='currentColor' style='vertical-align:middle;margin-left:4px'><polygon points='5 4 15 12 5 20 5 4'/><line x1='19' y1='5' x2='19' y2='19' stroke='currentColor' stroke-width='2'/></svg></button>
         </div>
         <div class=rm-row>
-          <button class=rm-btn onclick=da('media','seek_backward')>−10s</button>
+          <button class=rm-btn onclick=da('media','seek_backward')>-10s</button>
           <button class=rm-btn onclick=da('media','seek_forward')>+10s</button>
           <button class=rm-btn onclick=da('media','stop')>Stop</button>
         </div>
@@ -6064,7 +6064,7 @@ def _page_remote():
           <button class=rm-btn onclick=mc('media','next')>Next<svg width='12' height='12' viewBox='0 0 24 24' fill='currentColor' style='vertical-align:middle;margin-left:4px'><polygon points='5 4 15 12 5 20 5 4'/><line x1='19' y1='5' x2='19' y2='19' stroke='currentColor' stroke-width='2'/></svg></button>
         </div>
         <div class=rm-row>
-          <button class=rm-btn onclick=mc('media','seek_backward')>−10s</button>
+          <button class=rm-btn onclick=mc('media','seek_backward')>-10s</button>
           <button class=rm-btn onclick=mc('media','seek_forward')>+10s</button>
           <button class=rm-btn onclick=mc('media','stop')>Stop</button>
         </div>
