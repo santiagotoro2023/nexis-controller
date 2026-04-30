@@ -5983,9 +5983,9 @@ def _page_remote():
       <div class=card-head>Media</div>
       <div class=card-body>
         <div class=rm-row>
-          <button class=rm-btn onclick=da('media','previous')>⏮ Prev</button>
-          <button class='rm-btn wide accent' onclick=da('media','play-pause')>⏯ Play / Pause</button>
-          <button class=rm-btn onclick=da('media','next')>Next ⏭</button>
+          <button class=rm-btn onclick=da('media','previous')><svg width='12' height='12' viewBox='0 0 24 24' fill='currentColor' style='vertical-align:middle;margin-right:4px'><polygon points='19 20 9 12 19 4 19 20'/><line x1='5' y1='19' x2='5' y2='5' stroke='currentColor' stroke-width='2'/></svg>Prev</button>
+          <button class='rm-btn wide accent' onclick=da('media','play-pause')><svg width='12' height='12' viewBox='0 0 24 24' fill='currentColor' style='vertical-align:middle;margin-right:4px'><polygon points='5 3 19 12 5 21 5 3'/></svg>Play / Pause</button>
+          <button class=rm-btn onclick=da('media','next')>Next<svg width='12' height='12' viewBox='0 0 24 24' fill='currentColor' style='vertical-align:middle;margin-left:4px'><polygon points='5 4 15 12 5 20 5 4'/><line x1='19' y1='5' x2='19' y2='19' stroke='currentColor' stroke-width='2'/></svg></button>
         </div>
         <div class=rm-row>
           <button class=rm-btn onclick=da('media','seek_backward')>−10s</button>
@@ -6059,9 +6059,9 @@ def _page_remote():
       <div class=card-head>Media</div>
       <div class=card-body>
         <div class=rm-row>
-          <button class=rm-btn onclick=mc('media','previous')>⏮ Prev</button>
-          <button class='rm-btn wide accent' onclick=mc('media','play-pause')>⏯ Play / Pause</button>
-          <button class=rm-btn onclick=mc('media','next')>Next ⏭</button>
+          <button class=rm-btn onclick=mc('media','previous')><svg width='12' height='12' viewBox='0 0 24 24' fill='currentColor' style='vertical-align:middle;margin-right:4px'><polygon points='19 20 9 12 19 4 19 20'/><line x1='5' y1='19' x2='5' y2='5' stroke='currentColor' stroke-width='2'/></svg>Prev</button>
+          <button class='rm-btn wide accent' onclick=mc('media','play-pause')><svg width='12' height='12' viewBox='0 0 24 24' fill='currentColor' style='vertical-align:middle;margin-right:4px'><polygon points='5 3 19 12 5 21 5 3'/></svg>Play / Pause</button>
+          <button class=rm-btn onclick=mc('media','next')>Next<svg width='12' height='12' viewBox='0 0 24 24' fill='currentColor' style='vertical-align:middle;margin-left:4px'><polygon points='5 4 15 12 5 20 5 4'/><line x1='19' y1='5' x2='19' y2='19' stroke='currentColor' stroke-width='2'/></svg></button>
         </div>
         <div class=rm-row>
           <button class=rm-btn onclick=mc('media','seek_backward')>−10s</button>
@@ -6205,7 +6205,7 @@ function loadDevices(){
       var sel=document.getElementById('devsel');
       sel.innerHTML='';
       _devs.forEach(function(d,i){
-        var dot=d.online?'●':'○';
+        var dot=d.online?'[on]':'[--]';
         var role=d.role?' ['+d.role+']':'';
         var opt=document.createElement('option');
         opt.value=i;
@@ -6361,7 +6361,7 @@ def _page_devices(db):
     for d in devices:
         online   = d['online']
         dot_col  = '#4CAF50' if online else 'var(--fg2)'
-        dot      = '●' if online else '○'
+        dot      = f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{dot_col};margin-right:6px;vertical-align:middle;flex-shrink:0"></span>'
         status   = 'online' if online else 'offline'
         role_b   = f'<span class="badge ok">{_esc(d["role"])}</span>' if d["role"] else ''
         batt_str = ''
@@ -7040,9 +7040,9 @@ def _page_status(db):
     model_rows = ''.join(
         f"<div class=st><span class=sk>{_esc(k)}</span><span class=sv>{_esc(str(v))}</span></div>"
         for k, v in [
-            ('fast model',   f'{MODEL_FAST} {"✓" if fok else "✗"}'),
-            ('deep model',   f'{MODEL_DEEP.split("/")[-1][:35]} {"✓" if dok else "✗"}'),
-            ('vision model', f'{MODEL_VISION} {"✓" if vok else "✗"}'),
+            ('fast model',   f'{MODEL_FAST} <span style="color:{"#4CAF50" if fok else "#EF5350"};font-size:10px">{"OK" if fok else "unavailable"}</span>'),
+            ('deep model',   f'{MODEL_DEEP.split("/")[-1][:35]} <span style="color:{"#4CAF50" if dok else "#EF5350"};font-size:10px">{"OK" if dok else "unavailable"}</span>'),
+            ('vision model', f'{MODEL_VISION} <span style="color:{"#4CAF50" if vok else "#EF5350"};font-size:10px">{"OK" if vok else "unavailable"}</span>'),
             ('voice model',  _voice_model()),
             ('stt mode',     _stt_mode()),
             ('history msgs', str(hist_count)),
