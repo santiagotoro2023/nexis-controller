@@ -5190,7 +5190,7 @@ _CSS = (
     "border:1px solid transparent;background:transparent}"
     ".nav-item:hover{color:var(--fg);background:var(--dim)}"
     ".nav-item.on{color:var(--or);background:rgba(248,114,0,0.08);border-color:rgba(248,114,0,0.18)}"
-    ".nav-icon{font-size:14px;flex-shrink:0;opacity:0.7}"
+    ".nav-icon{display:flex;align-items:center;flex-shrink:0;opacity:0.7}"
     ".nav-item.on .nav-icon{opacity:1}"
     ".sb-footer{padding:10px 8px;border-top:1px solid var(--border)}"
     ".sb-logout{display:flex;align-items:center;gap:10px;padding:9px 12px;"
@@ -5217,7 +5217,7 @@ _CSS = (
     ".stat-card{background:var(--bg3);border:1px solid var(--border);border-radius:16px;padding:18px}"
     ".stat-val{font-size:26px;font-weight:700;color:var(--or3);letter-spacing:0.05em}"
     ".stat-lbl{font-size:9px;color:var(--fg2);text-transform:uppercase;letter-spacing:0.15em;margin-top:5px}"
-    ".stat-icon{font-size:18px;margin-bottom:8px;opacity:0.6}"
+    ".stat-icon{display:flex;align-items:center;justify-content:center;margin-bottom:8px;opacity:0.6}"
 
     # Inputs and buttons
     ".inp{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:12px;"
@@ -5406,6 +5406,27 @@ _FAVICON_SVG = (
     '<circle cx="16" cy="21" r="1.1" fill="#ff9533"/>'
     '</svg>'
 )
+
+_S = "stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'"
+def _svg(w, h, body):
+    return f"<svg xmlns='http://www.w3.org/2000/svg' width='{w}' height='{h}' viewBox='0 0 24 24' fill='none' {_S}>{body}</svg>"
+
+_IC_CHAT     = _svg(16,16,"<path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/>")
+_IC_REMOTE   = _svg(16,16,"<circle cx='12' cy='12' r='3'/><path d='M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'/>")
+_IC_HISTORY  = _svg(16,16,"<circle cx='12' cy='12' r='10'/><polyline points='12 6 12 12 16 14'/>")
+_IC_MEMORY   = _svg(16,16,"<rect x='2' y='2' width='20' height='8' rx='2'/><rect x='2' y='14' width='20' height='8' rx='2'/><line x1='6' y1='6' x2='6.01' y2='6'/><line x1='6' y1='18' x2='6.01' y2='18'/>")
+_IC_SCHEDULE = _svg(16,16,"<rect x='3' y='4' width='18' height='18' rx='2' ry='2'/><line x1='16' y1='2' x2='16' y2='6'/><line x1='8' y1='2' x2='8' y2='6'/><line x1='3' y1='10' x2='21' y2='10'/>")
+_IC_DEVICES  = _svg(16,16,"<rect x='2' y='3' width='20' height='14' rx='2'/><line x1='8' y1='21' x2='16' y2='21'/><line x1='12' y1='17' x2='12' y2='21'/>")
+_IC_HYPERV   = _svg(16,16,"<rect x='2' y='2' width='20' height='14' rx='2'/><path d='M8 21h8M12 17v4'/><path d='M7 7h.01M12 7h5M7 11h10'/>")
+_IC_USERS    = _svg(16,16,"<path d='M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'/><circle cx='9' cy='7' r='4'/><path d='M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75'/>")
+_IC_STATUS   = _svg(16,16,"<line x1='18' y1='20' x2='18' y2='10'/><line x1='12' y1='20' x2='12' y2='4'/><line x1='6' y1='20' x2='6' y2='14'/>")
+
+_IC_BRAIN    = _svg(18,18,"<path d='M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-1.07-3 2.5 2.5 0 0 1-.62-3.97A3 3 0 0 1 5 8.5a3 3 0 0 1 4.5-2.6'/><path d='M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 1.07-3 2.5 2.5 0 0 0 .62-3.97A3 3 0 0 0 19 8.5a3 3 0 0 0-4.5-2.6'/>")
+_IC_DATABASE = _svg(18,18,"<ellipse cx='12' cy='5' rx='9' ry='3'/><path d='M21 12c0 1.66-4 3-9 3s-9-1.34-9-3'/><path d='M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5'/>")
+_IC_SESSIONS = _svg(18,18,"<path d='M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z'/>")
+_IC_TERMINAL = _svg(18,18,"<polyline points='4 17 10 11 4 5'/><line x1='12' y1='19' x2='20' y2='19'/>")
+_IC_VOLUME   = _svg(18,18,"<polygon points='11 5 6 9 2 9 2 15 6 15 11 19 11 5'/><path d='M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07'/>")
+_IC_MIC      = _svg(18,18,"<path d='M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z'/><path d='M19 10v2a7 7 0 0 1-14 0v-2'/><line x1='12' y1='19' x2='12' y2='23'/><line x1='8' y1='23' x2='16' y2='23'/>")
 
 _CHAT_JS = r"""
 var M=document.getElementById('msgs');
@@ -5846,15 +5867,15 @@ document.addEventListener('keydown',function(e){
 
 def _shell(content, active='chat'):
     nav_items = [
-        ('chat',       '\U0001F4AC', 'Chat'),
-        ('remote',     '⚙',     'Remote'),
-        ('history',    '⏳',     'History'),
-        ('memory',     '\U0001F9E0', 'Memory'),
-        ('schedules',  '\U0001F4C5', 'Schedules'),
-        ('devices',    '\U0001F4BB', 'Devices'),
-        ('hypervisor', '\U0001F5A5', 'Hypervisor'),
-        ('users',      '\U0001F465', 'Users'),
-        ('status',     '\U0001F4CA', 'Status'),
+        ('chat',       _IC_CHAT,     'Chat'),
+        ('remote',     _IC_REMOTE,   'Remote'),
+        ('history',    _IC_HISTORY,  'History'),
+        ('memory',     _IC_MEMORY,   'Memory'),
+        ('schedules',  _IC_SCHEDULE, 'Schedules'),
+        ('devices',    _IC_DEVICES,  'Devices'),
+        ('hypervisor', _IC_HYPERV,   'Hypervisor'),
+        ('users',      _IC_USERS,    'Users'),
+        ('status',     _IC_STATUS,   'Status'),
     ]
     nav_html = ''.join(
         f"<a href='/{s}' class='nav-item {'on' if active==s else ''}'>"
@@ -7006,12 +7027,12 @@ def _page_status(db):
 
     stat_grid = (
         "<div class=card-grid>"
-        + _stat_card('\U0001F9E0', ol.upper(), 'Ollama Status', ol_color)
-        + _stat_card('\U0001F4BE', str(mc), 'Memories')
-        + _stat_card('\U0001F4AC', str(sc), 'Sessions')
-        + _stat_card('⚡', str(cli_count), 'Active CLI')
-        + _stat_card('\U0001F50A', voice_short, 'Voice Output')
-        + _stat_card('\U0001F3A4', stt_short, 'Voice Input (STT)')
+        + _stat_card(_IC_BRAIN,    ol.upper(), 'Ollama Status', ol_color)
+        + _stat_card(_IC_DATABASE, str(mc), 'Memories')
+        + _stat_card(_IC_SESSIONS, str(sc), 'Sessions')
+        + _stat_card(_IC_TERMINAL, str(cli_count), 'Active CLI')
+        + _stat_card(_IC_VOLUME,   voice_short, 'Voice Output')
+        + _stat_card(_IC_MIC,      stt_short, 'Voice Input (STT)')
         + "</div>"
     )
 
