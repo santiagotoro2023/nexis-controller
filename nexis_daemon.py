@@ -5379,20 +5379,18 @@ _CSS = (
 )
 
 _EYE_SVG = (
-    '<svg viewBox="0 0 56 56" fill="none" width="28" height="28">'
-    '<path d="M28 5 L53 49 L3 49 Z" stroke="#F87200" stroke-width="2" stroke-linejoin="round"/>'
-    '<ellipse cx="28" cy="36" rx="9" ry="5.5" stroke="#F87200" stroke-width="1.5" fill="none"/>'
-    '<circle cx="28" cy="36" r="3" fill="#F87200"/>'
-    '<circle cx="28" cy="36" r="1.3" fill="#080807"/>'
+    '<svg viewBox="0 0 36 36" fill="none" width="30" height="30" style="display:block;flex-shrink:0">'
+    '<path d="M18 4 L33 31 L3 31 Z" stroke="#F87200" stroke-width="1.8" stroke-linejoin="round" fill="rgba(248,114,0,0.07)"/>'
+    '<ellipse cx="18" cy="23" rx="5.5" ry="3.3" stroke="#F87200" stroke-width="1.2" fill="none"/>'
+    '<circle cx="18" cy="23" r="2.2" fill="#F87200"/>'
     '</svg>'
 )
 
 _EYE_SVG_LG = (
-    '<svg viewBox="0 0 56 56" fill="none" width="48" height="48">'
-    '<path d="M28 5 L53 49 L3 49 Z" stroke="#F87200" stroke-width="2" stroke-linejoin="round"/>'
-    '<ellipse cx="28" cy="36" rx="9" ry="5.5" stroke="#F87200" stroke-width="1.5" fill="none"/>'
-    '<circle cx="28" cy="36" r="3" fill="#F87200"/>'
-    '<circle cx="28" cy="36" r="1.3" fill="#080807"/>'
+    '<svg viewBox="0 0 36 36" fill="none" width="48" height="48" style="display:block;flex-shrink:0">'
+    '<path d="M18 4 L33 31 L3 31 Z" stroke="#F87200" stroke-width="1.8" stroke-linejoin="round" fill="rgba(248,114,0,0.07)"/>'
+    '<ellipse cx="18" cy="23" rx="5.5" ry="3.3" stroke="#F87200" stroke-width="1.2" fill="none"/>'
+    '<circle cx="18" cy="23" r="2.2" fill="#F87200"/>'
     '</svg>'
 )
 
@@ -5962,7 +5960,7 @@ def _page_remote():
         <button class=rm-btn onclick=loadDevices() style='flex:0;min-width:80px'>Refresh</button>
         <button class=rm-btn onclick=probeSelected() style='flex:0;min-width:70px'>Probe</button>
       </div>
-      <div id=offline-note class=rm-offline>⚠ device offline — commands queue and deliver when back online</div>
+      <div id=offline-note class=rm-offline><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='display:inline-block;vertical-align:middle;margin-right:5px'><path d='M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z'/><line x1='12' y1='9' x2='12' y2='13'/><line x1='12' y1='17' x2='12.01' y2='17'/></svg>device offline — commands queue and deliver when back online</div>
     </div>
   </div>
 
@@ -6456,7 +6454,10 @@ def _page_users():
   transition:border-color .2s;flex:1;min-width:120px}}
 .um-inp:focus{{border-color:var(--or2)}}
 .um-sel{{background:var(--bg3);border:1px solid var(--border);border-radius:8px;
-  color:var(--fg);padding:8px 10px;font-family:var(--font);font-size:12px;outline:none;cursor:pointer}}
+  color:var(--fg);padding:8px 28px 8px 10px;font-family:var(--font);font-size:12px;outline:none;cursor:pointer;
+  -webkit-appearance:none;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 8px center}}
 .um-err{{color:#EF5350;font-size:11px;margin-top:6px;letter-spacing:.04em}}
 .um-ok{{color:#4CAF50;font-size:11px;margin-top:6px;letter-spacing:.04em}}
 </style>
@@ -6649,10 +6650,10 @@ def _page_setup():
         '<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;'
         'padding:12px 14px;margin-bottom:4px">'
         '<div style="font-size:9px;color:var(--fg2);text-transform:uppercase;letter-spacing:.12em;margin-bottom:8px">What you\'ll configure</div>'
-        '<div style="font-size:11px;color:var(--fg);line-height:1.8">'
-        '◆ Admin account credentials<br>'
-        '◆ AI model endpoint (Ollama)<br>'
-        '◆ Hypervisor node connection (optional)'
+        '<div style="font-size:11px;color:var(--fg);line-height:2;display:flex;flex-direction:column;gap:2px">'
+        '<div style="display:flex;align-items:center;gap:7px"><span style="width:5px;height:5px;border-radius:50%;background:var(--or3);flex-shrink:0;display:inline-block"></span>Admin account credentials</div>'
+        '<div style="display:flex;align-items:center;gap:7px"><span style="width:5px;height:5px;border-radius:50%;background:var(--or3);flex-shrink:0;display:inline-block"></span>AI model endpoint (Ollama)</div>'
+        '<div style="display:flex;align-items:center;gap:7px"><span style="width:5px;height:5px;border-radius:50%;background:var(--or3);flex-shrink:0;display:inline-block"></span>Hypervisor node connection (optional)</div>'
         '</div>'
         '</div>'
         '<div class=wiz-nav>'
@@ -6737,22 +6738,22 @@ def _page_setup():
         '<div class=wiz-step-desc>NeXiS Controller is ready. Here is a summary of what was configured.</div>'
         '<div id=wiz-summary>'
         '<div class=wiz-summary-item>'
-        '<span class=wiz-summary-icon>◆</span>'
+        '<span class=wiz-summary-icon><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 8 12 12 14 14"/></svg></span>'
         '<div><div class=wiz-summary-key>Admin Account</div>'
         '<div class=wiz-summary-val id=sum-user>—</div></div>'
         '</div>'
         '<div class=wiz-summary-item>'
-        '<span class=wiz-summary-icon>◆</span>'
+        '<span class=wiz-summary-icon><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 8 12 12 14 14"/></svg></span>'
         '<div><div class=wiz-summary-key>Ollama Endpoint</div>'
         '<div class=wiz-summary-val id=sum-ollama>—</div></div>'
         '</div>'
         '<div class=wiz-summary-item>'
-        '<span class=wiz-summary-icon>◆</span>'
+        '<span class=wiz-summary-icon><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 8 12 12 14 14"/></svg></span>'
         '<div><div class=wiz-summary-key>Primary Model</div>'
         '<div class=wiz-summary-val id=sum-model>—</div></div>'
         '</div>'
         '<div class=wiz-summary-item>'
-        '<span class=wiz-summary-icon>◆</span>'
+        '<span class=wiz-summary-icon><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 8 12 12 14 14"/></svg></span>'
         '<div><div class=wiz-summary-key>Hypervisor Node</div>'
         '<div class=wiz-summary-val id=sum-hv>Not configured</div></div>'
         '</div>'
