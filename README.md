@@ -76,6 +76,39 @@ The installer handles: system packages, Python environment, Ollama, Piper TTS, W
 
 ---
 
+## Removal
+
+To completely remove NeXiS Controller from the host:
+
+```bash
+# Stop and remove the service
+sudo systemctl stop nexis-controller-daemon.service
+sudo systemctl disable nexis-controller-daemon.service
+sudo rm -f /etc/systemd/system/nexis-controller-daemon.service
+sudo systemctl daemon-reload
+
+# Remove the installation directory (code, venv, database, TLS cert)
+sudo rm -rf /opt/nexis-controller
+
+# Remove Piper TTS binaries installed by nexis (if present)
+sudo rm -rf /opt/piper
+
+# Remove Whisper model cache (optional)
+sudo rm -rf /root/.cache/huggingface
+
+# Remove Ollama and its models — skip if used by other services
+sudo systemctl stop ollama 2>/dev/null || true
+sudo systemctl disable ollama 2>/dev/null || true
+sudo rm -f /etc/systemd/system/ollama.service
+sudo systemctl daemon-reload
+sudo rm -f /usr/local/bin/ollama
+sudo rm -rf /usr/share/ollama
+```
+
+> Paired hypervisor nodes and Workers will lose their connection once the Controller is gone. Re-run their respective setup wizards to point them at a replacement instance.
+
+---
+
 ## First Access
 
 1. Open `https://<host-ip>:8443` in a browser
