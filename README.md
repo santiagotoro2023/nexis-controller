@@ -92,7 +92,7 @@ curl -sSL https://raw.githubusercontent.com/santiagotoro2023/nexis-controller/ma
 
 Always removed: service, package, binary, install directory.
 
-Prompted individually: voice/TTS models, Ollama models, stored memories, chat history, config directory (TLS certs, credentials, schedules).
+Prompted individually: voice/TTS models, Ollama models, registered devices, stored memories, chat history, config directory (TLS certs, credentials, schedules).
 
 ---
 
