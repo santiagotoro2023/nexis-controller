@@ -6994,6 +6994,12 @@ function runSched(id){
 
 
 def _page_status(db):
+    try:
+        _cv = subprocess.run(['dpkg-query', '-W', '-f=${Version}', 'nexis-controller'],
+                             capture_output=True, text=True)
+        current_ver = _cv.stdout.strip() or 'unknown'
+    except Exception:
+        current_ver = 'unknown'
     mc = db.execute('SELECT COUNT(*) FROM memories').fetchone()[0]
     sc = db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]
     try:
@@ -7078,15 +7084,15 @@ def _page_status(db):
         "<div class=card>"
         "<div class=card-head>Software Update</div>"
         "<div class=card-body>"
-        "<div id=upd-status style='font-size:11px;color:var(--fg2);margin-bottom:10px'>"
-        "Installed: nexis-controller · check GitHub for latest release</div>"
+        f"<div id=upd-status style='font-size:11px;color:var(--fg2);margin-bottom:10px'>"
+        f"Installed: {current_ver or 'nexis-controller'}</div>"
         "<button class=btn-primary onclick='doUpdate()' id=upd-btn>Check &amp; Update</button>"
         "</div></div>"
         "<script>"
         "function doUpdate(){"
         "  var btn=document.getElementById('upd-btn');"
         "  var st=document.getElementById('upd-status');"
-        "  btn.disabled=true; st.textContent='Starting update...';"
+        "  btn.disabled=true; st.textContent='Checking...';"
         "  fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'}})"
         "  .then(function(r){return r.json();})"
         "  .then(function(d){"
@@ -7098,10 +7104,13 @@ def _page_status(db):
         "    fetch('/api/update/status').then(function(r){return r.json();})"
         "    .then(function(d){"
         "      var st=document.getElementById('upd-status');"
+        "      var btn=document.getElementById('upd-btn');"
         "      if(d.running){st.textContent=d.status||'Working...'; pollUpdate();}"
+        "      else if(d.result&&d.result.ok&&d.result.up_to_date){"
+        "        st.textContent='Already up to date ('+d.result.version+')'; btn.disabled=false;}"
         "      else if(d.result&&d.result.ok){"
-        "        st.textContent='Updated to '+d.result.version+'. Restarting...';"
-        "        setTimeout(function(){location.reload();},5000);}"
+        "        st.textContent='Installed '+d.result.version+'. Restarting, reconnecting in 15s...';"
+        "        setTimeout(function(){location.reload();},15000);}"
         "      else if(d.result){"
         "        st.textContent='Failed: '+(d.result.error||'unknown');"
         "        document.getElementById('upd-btn').disabled=false;}"
@@ -9071,56 +9080,52 @@ def _start_web():
                     else:
                         _update_state.update({'running': True, 'result': None, 'status': 'Checking latest release...'})
                         def _do_update_bg():
-                            import stat as _stat
-                            policy = '/usr/sbin/policy-rc.d'
                             tmp_path = None
                             try:
-                                import ssl as _su, urllib.request as _ur
+                                import ssl as _su, urllib.request as _ur, tempfile
                                 ctx = _su.create_default_context()
                                 ctx.check_hostname = False; ctx.verify_mode = _su.CERT_NONE
                                 api_url = 'https://api.github.com/repos/santiagotoro2023/nexis-controller/releases/latest'
                                 with _ur.urlopen(api_url, context=ctx, timeout=15) as r:
                                     release = json.loads(r.read())
-                                assets = release.get('assets', [])
-                                deb_url = next((a['browser_download_url'] for a in assets if a['name'].endswith('.deb')), None)
-                                if not deb_url:
-                                    _update_state.update({'running': False, 'result': {'ok': False, 'error': 'No .deb in latest release'}})
+                                latest_tag = release.get('tag_name', '')
+                                latest_ver = latest_tag.lstrip('v')
+                                # Check installed version — never touch dpkg if already current
+                                cur = subprocess.run(
+                                    ['dpkg-query', '-W', '-f=${Version}', 'nexis-controller'],
+                                    capture_output=True, text=True)
+                                current_ver = cur.stdout.strip()
+                                if current_ver and current_ver == latest_ver:
+                                    _update_state.update({'running': False, 'result': {
+                                        'ok': True, 'up_to_date': True, 'version': latest_tag}})
                                     return
-                                import tempfile
-                                _update_state['status'] = 'Downloading package...'
+                                assets = release.get('assets', [])
+                                deb_url = next((a['browser_download_url'] for a in assets
+                                                if a['name'].endswith('.deb')), None)
+                                if not deb_url:
+                                    _update_state.update({'running': False, 'result': {
+                                        'ok': False, 'error': 'No .deb asset in latest release'}})
+                                    return
+                                _update_state['status'] = f'Downloading {latest_tag}...'
                                 with tempfile.NamedTemporaryFile(suffix='.deb', delete=False) as tf:
                                     tmp_path = tf.name
                                 with _ur.urlopen(deb_url, context=ctx, timeout=180) as r:
                                     with open(tmp_path, 'wb') as f:
                                         f.write(r.read())
-                                _update_state['status'] = 'Installing...'
-                                # Block postinst from restarting the service mid-install —
-                                # dpkg's postinst calls systemctl which would kill this process
-                                # before dpkg finishes, leaving the package in a broken state.
-                                try:
-                                    with open(policy, 'w') as _pf:
-                                        _pf.write('#!/bin/sh\nexit 101\n')
-                                    os.chmod(policy, _stat.S_IRWXU | _stat.S_IRGRP | _stat.S_IXGRP | _stat.S_IROTH | _stat.S_IXOTH)
-                                except Exception:
-                                    pass
-                                result = subprocess.run(['dpkg', '-i', tmp_path], capture_output=True, text=True)
-                                try: os.unlink(policy)
-                                except Exception: pass
-                                try: os.unlink(tmp_path)
-                                except Exception: pass
-                                if result.returncode == 0:
-                                    ver = release.get('tag_name', '?')
-                                    _update_state.update({'running': False, 'result': {'ok': True, 'version': ver}, 'status': f'Installed {ver}, restarting...'})
-                                    # Restart in a fully detached subprocess so it survives this process dying
-                                    subprocess.Popen(
-                                        ['bash', '-c', 'sleep 4 && systemctl restart nexis-controller'],
-                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
-                                else:
-                                    _update_state.update({'running': False, 'result': {'ok': False, 'error': result.stderr[:500]}})
+                                # Hand install off to a detached bash script so dpkg's postinst
+                                # can restart the service without killing this thread mid-install.
+                                _update_state['status'] = f'Installing {latest_tag}...'
+                                ver = latest_tag
+                                _update_state.update({'running': False, 'result': {
+                                    'ok': True, 'version': ver}, 'status': f'Installing {ver}, restarting...'})
+                                subprocess.Popen(
+                                    ['bash', '-c',
+                                     f'sleep 3 && dpkg -i {tmp_path} && rm -f {tmp_path}'],
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=open('/tmp/nexis-update.log', 'w'),
+                                    stderr=subprocess.STDOUT,
+                                    close_fds=True, start_new_session=True)
                             except Exception as e:
-                                try: os.unlink(policy)
-                                except Exception: pass
                                 if tmp_path:
                                     try: os.unlink(tmp_path)
                                     except Exception: pass
