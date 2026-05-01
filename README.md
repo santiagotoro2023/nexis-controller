@@ -22,7 +22,7 @@ The intelligence layer of the NeXiS ecosystem. A self-hosted AI assistant and ce
 | [nexis-hypervisor](https://github.com/santiagotoro2023/nexis-hypervisor) | Per-node compute management |
 | [nexis-worker](https://github.com/santiagotoro2023/nexis-worker) | Mobile and desktop client |
 
-The Controller is the single point of truth for authentication. Workers log in here. Hypervisor nodes pair here by providing their URL and credentials — no separate token distribution required. One login reaches everything.
+Workers and Hypervisors authenticate against the Controller. One set of credentials reaches everything.
 
 ---
 
@@ -32,8 +32,14 @@ The Controller is the single point of truth for authentication. Workers log in h
 - Local LLM inference via Ollama — no data leaves the host
 - Configurable model selection; swap models at runtime
 - Persistent conversation memory across sessions and devices
-- Voice interface: text-to-speech (Piper TTS) and speech-to-text (Whisper)
-- **Hypervisor tool calls**: the LLM can start, stop, create, snapshot, and inspect VMs on any paired hypervisor node, directly from conversation
+- Voice interface: text-to-speech (Piper/GLaDOS TTS) and speech-to-text (Whisper)
+- Hypervisor tool calls: the LLM can start, stop, create, snapshot, and inspect VMs on any paired hypervisor node, directly from conversation
+
+**Web UI**
+- Dark-themed, professional interface with inline SVG icons throughout
+- Sections: Chat, Remote, History, Memory, Schedules, Devices, Hypervisor, Users, Status
+- Software update via the Status page — async background download, live progress polling
+- Custom-styled role dropdown; no native browser chrome
 
 **SSO — Single Sign-On**
 - Authenticate once; credentials are valid across hypervisor nodes and Workers
@@ -42,7 +48,7 @@ The Controller is the single point of truth for authentication. Workers log in h
 
 **Hypervisor Integration**
 - Pair one or more NeXiS Hypervisor nodes (they self-register on setup)
-- Aggregate VM and container view across all nodes via `/api/hyp/vms`
+- Aggregate VM and container view across all nodes
 - Live resource metrics from all nodes
 - Issue VM power actions from the Controller or via LLM tool calls
 
@@ -72,40 +78,21 @@ The Controller is the single point of truth for authentication. Workers log in h
 curl -sSL https://raw.githubusercontent.com/santiagotoro2023/nexis-controller/main/install-nexis-controller.sh | sudo bash
 ```
 
-The installer handles: system packages, Python environment, Ollama, Piper TTS, Whisper STT, model downloads, and the systemd service (`nexis-controller-daemon.service`).
+The installer handles: system packages, Python environment, Ollama, Piper TTS, Whisper STT, GLaDOS voice model download, and the systemd service.
 
 ---
 
-## Removal
+## Uninstallation
 
-To completely remove NeXiS Controller from the host:
+An interactive uninstall script prompts you individually about what data to keep:
 
 ```bash
-# Stop and remove the service
-sudo systemctl stop nexis-controller-daemon.service
-sudo systemctl disable nexis-controller-daemon.service
-sudo rm -f /etc/systemd/system/nexis-controller-daemon.service
-sudo systemctl daemon-reload
-
-# Remove the installation directory (code, venv, database, TLS cert)
-sudo rm -rf /opt/nexis-controller
-
-# Remove Piper TTS binaries installed by nexis (if present)
-sudo rm -rf /opt/piper
-
-# Remove Whisper model cache (optional)
-sudo rm -rf /root/.cache/huggingface
-
-# Remove Ollama and its models — skip if used by other services
-sudo systemctl stop ollama 2>/dev/null || true
-sudo systemctl disable ollama 2>/dev/null || true
-sudo rm -f /etc/systemd/system/ollama.service
-sudo systemctl daemon-reload
-sudo rm -f /usr/local/bin/ollama
-sudo rm -rf /usr/share/ollama
+curl -sSL https://raw.githubusercontent.com/santiagotoro2023/nexis-controller/main/uninstall-nexis-controller.sh | sudo bash
 ```
 
-> Paired hypervisor nodes and Workers will lose their connection once the Controller is gone. Re-run their respective setup wizards to point them at a replacement instance.
+Always removed: service, package, binary, install directory.
+
+Prompted individually: voice/TTS models, Ollama models, stored memories, chat history, config directory (TLS certs, credentials, schedules).
 
 ---
 
@@ -114,7 +101,7 @@ sudo rm -rf /usr/share/ollama
 1. Open `https://<host-ip>:8443` in a browser
 2. Accept the self-signed certificate
 3. Complete the setup wizard — set a username and password
-4. Hypervisor nodes will appear in **Nodes** as they pair via their own setup wizards
+4. Hypervisor nodes appear in **Hypervisor** as they pair via their own setup wizards
 
 ---
 
@@ -124,34 +111,14 @@ Hypervisor nodes pair themselves automatically during their own setup wizard:
 
 1. On the hypervisor machine, open `https://<node-ip>:8443`
 2. Enter this Controller's URL, your username, and password
-3. The hypervisor authenticates against the Controller, then self-registers
-4. The node appears in **Nodes** in the Controller dashboard
-
-> No manual token copying required — the Controller generates an api_token and the hypervisor stores it transparently.
+3. The hypervisor authenticates and self-registers
+4. The node appears in **Hypervisor** in the Controller web UI
 
 ---
 
-## LLM Hypervisor Tool Calls
+## Software Updates
 
-The LLM can control VMs directly. Register tools in your chat handler:
-
-```python
-from daemon.api.hypervisors import HYP_TOOLS, dispatch_hyp_tool
-
-response = ollama.chat(
-    model=model,
-    messages=messages,
-    tools=HYP_TOOLS,
-    stream=False,
-)
-if response.message.tool_calls:
-    for call in response.message.tool_calls:
-        result = dispatch_hyp_tool(call.function.name, call.function.arguments)
-        messages.append({'role': 'tool', 'content': json.dumps(result)})
-    # continue loop → LLM produces final natural-language response
-```
-
-Available tools: `hyp_list_vms`, `hyp_vm_action`, `hyp_create_vm`, `hyp_snapshot_vm`, `hyp_get_metrics`
+Updates can be applied from the **Status** page in the web UI (Check & Update button). The download and install run in a background thread — the UI polls for progress and reloads automatically when the service restarts.
 
 ---
 
@@ -173,13 +140,15 @@ All endpoints require `Authorization: Bearer <token>` unless marked public.
 | `GET /api/memories` | Persistent memory entries |
 | `GET /api/hyp/nodes` | List paired hypervisor nodes |
 | `POST /api/hyp/nodes` | Manually add a hypervisor node |
-| `POST /api/hyp/nodes/register` | Hypervisor self-registration (called by node setup) |
+| `POST /api/hyp/nodes/register` | Hypervisor self-registration |
 | `GET /api/hyp/vms` | All VMs across all nodes |
 | `GET /api/hyp/metrics` | Live metrics from all nodes |
 | `POST /api/hyp/nodes/{id}/vms/{vm_id}/{action}` | VM power action |
 | `GET /api/ha/*` | Home Assistant bridge |
 | `GET /api/schedules` | Automation schedules |
 | `POST /api/exec` | Remote code execution |
+| `POST /api/update` | Start background software update |
+| `GET /api/update/status` | Poll update progress |
 
 ---
 
@@ -187,9 +156,12 @@ All endpoints require `Authorization: Bearer <token>` unless marked public.
 
 | Layer | Technology |
 |-------|-----------|
-| Daemon | Python 3.11 · FastAPI / aiohttp |
+| Daemon | Python 3.11 · stdlib `http.server` · `ThreadingMixIn` |
 | LLM | Ollama (local inference) |
-| Voice | Piper TTS · Faster-Whisper STT |
-| Auth | Bearer token · SHA-256 · SQLite sessions |
+| Voice | Piper TTS (GLaDOS model) · Faster-Whisper STT |
+| Storage | SQLite · `~/.local/share/nexis/` |
+| Config | `~/.config/nexis/` (TLS certs, auth, schedules, integrations) |
+| Auth | Bearer token · SHA-256 hashing · SQLite sessions |
 | Realtime | Server-Sent Events (SSE) |
-| Service | systemd `nexis-controller-daemon.service` |
+| Web UI | Inline HTML/CSS/JS served directly by the daemon |
+| Service | systemd `nexis-controller.service` |
