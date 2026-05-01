@@ -9071,6 +9071,9 @@ def _start_web():
                     else:
                         _update_state.update({'running': True, 'result': None, 'status': 'Checking latest release...'})
                         def _do_update_bg():
+                            import stat as _stat
+                            policy = '/usr/sbin/policy-rc.d'
+                            tmp_path = None
                             try:
                                 import ssl as _su, urllib.request as _ur
                                 ctx = _su.create_default_context()
@@ -9091,16 +9094,36 @@ def _start_web():
                                     with open(tmp_path, 'wb') as f:
                                         f.write(r.read())
                                 _update_state['status'] = 'Installing...'
+                                # Block postinst from restarting the service mid-install —
+                                # dpkg's postinst calls systemctl which would kill this process
+                                # before dpkg finishes, leaving the package in a broken state.
+                                try:
+                                    with open(policy, 'w') as _pf:
+                                        _pf.write('#!/bin/sh\nexit 101\n')
+                                    os.chmod(policy, _stat.S_IRWXU | _stat.S_IRGRP | _stat.S_IXGRP | _stat.S_IROTH | _stat.S_IXOTH)
+                                except Exception:
+                                    pass
                                 result = subprocess.run(['dpkg', '-i', tmp_path], capture_output=True, text=True)
-                                os.unlink(tmp_path)
+                                try: os.unlink(policy)
+                                except Exception: pass
+                                try: os.unlink(tmp_path)
+                                except Exception: pass
                                 if result.returncode == 0:
                                     ver = release.get('tag_name', '?')
                                     _update_state.update({'running': False, 'result': {'ok': True, 'version': ver}, 'status': f'Installed {ver}, restarting...'})
-                                    import time as _t; _t.sleep(3)
-                                    subprocess.Popen(['systemctl', 'restart', 'nexis-controller'])
+                                    # Restart in a fully detached subprocess so it survives this process dying
+                                    subprocess.Popen(
+                                        ['bash', '-c', 'sleep 4 && systemctl restart nexis-controller'],
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
                                 else:
                                     _update_state.update({'running': False, 'result': {'ok': False, 'error': result.stderr[:500]}})
                             except Exception as e:
+                                try: os.unlink(policy)
+                                except Exception: pass
+                                if tmp_path:
+                                    try: os.unlink(tmp_path)
+                                    except Exception: pass
                                 _update_state.update({'running': False, 'result': {'ok': False, 'error': str(e)}})
                         threading.Thread(target=_do_update_bg, daemon=True).start()
                         self._send(200, json.dumps({'ok': True, 'started': True}), 'application/json')
