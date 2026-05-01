@@ -95,6 +95,7 @@ _embed_lk = threading.Lock()
 _shared_hist    = []
 _shared_lock    = threading.Lock()
 _daemon_start   = time.time()   # used by /api/health for uptime
+_update_state   = {'running': False, 'result': None, 'status': ''}
 
 # ── Abort streaming ───────────────────────────────────────────────────────────
 _web_abort_event  = threading.Event()  # set to abort current WebUI response
@@ -5177,9 +5178,9 @@ _CSS = (
     # Sidebar
     ".sidebar{width:240px;background:var(--bg2);border-right:1px solid var(--border);"
     "display:flex;flex-direction:column;height:100vh;flex-shrink:0}"
-    ".sb-brand{padding:18px 16px 14px;display:flex;align-items:center;gap:11px;"
+    ".sb-brand{padding:20px 16px 16px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:9px;"
     "border-bottom:1px solid var(--border)}"
-    ".sb-brand-text{line-height:1.2}"
+    ".sb-brand-text{line-height:1.2;text-align:center}"
     ".sb-name{color:var(--fg);font-weight:600;font-size:13px;letter-spacing:0.2em;display:block;text-transform:uppercase}"
     ".sb-sub{color:var(--fg2);font-size:9px;letter-spacing:0.3em;text-transform:uppercase}"
     ".sb-nav{flex:1;padding:10px 8px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}"
@@ -7038,7 +7039,7 @@ def _page_status(db):
     )
 
     model_rows = ''.join(
-        f"<div class=st><span class=sk>{_esc(k)}</span><span class=sv>{_esc(str(v))}</span></div>"
+        f"<div class=st><span class=sk>{_esc(k)}</span><span class=sv>{str(v)}</span></div>"
         for k, v in [
             ('fast model',   f'{MODEL_FAST} <span style="color:{"#4CAF50" if fok else "#EF5350"};font-size:10px">{"OK" if fok else "unavailable"}</span>'),
             ('deep model',   f'{MODEL_DEEP.split("/")[-1][:35]} <span style="color:{"#4CAF50" if dok else "#EF5350"};font-size:10px">{"OK" if dok else "unavailable"}</span>'),
@@ -7083,22 +7084,30 @@ def _page_status(db):
         "</div></div>"
         "<script>"
         "function doUpdate(){"
-        "  document.getElementById('upd-btn').disabled=true;"
-        "  document.getElementById('upd-status').textContent='Downloading latest release...';"
+        "  var btn=document.getElementById('upd-btn');"
+        "  var st=document.getElementById('upd-status');"
+        "  btn.disabled=true; st.textContent='Starting update...';"
         "  fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'}})"
         "  .then(function(r){return r.json();})"
         "  .then(function(d){"
-        "    if(d.ok){"
-        "      document.getElementById('upd-status').textContent='Updated to '+d.version+'. Restarting service...';"
-        "      setTimeout(function(){location.reload();},4000);"
-        "    }else{"
-        "      document.getElementById('upd-status').textContent='Update failed: '+(d.error||'unknown error');"
-        "      document.getElementById('upd-btn').disabled=false;"
-        "    }"
-        "  }).catch(function(e){"
-        "    document.getElementById('upd-status').textContent='Error: '+e.message;"
-        "    document.getElementById('upd-btn').disabled=false;"
-        "  });}"
+        "    if(d.started){st.textContent='Downloading...'; pollUpdate();}"
+        "    else{st.textContent='Error: '+(d.error||'unknown'); btn.disabled=false;}"
+        "  }).catch(function(e){st.textContent='Error: '+e.message; btn.disabled=false;});}"
+        "function pollUpdate(){"
+        "  setTimeout(function(){"
+        "    fetch('/api/update/status').then(function(r){return r.json();})"
+        "    .then(function(d){"
+        "      var st=document.getElementById('upd-status');"
+        "      if(d.running){st.textContent=d.status||'Working...'; pollUpdate();}"
+        "      else if(d.result&&d.result.ok){"
+        "        st.textContent='Updated to '+d.result.version+'. Restarting...';"
+        "        setTimeout(function(){location.reload();},5000);}"
+        "      else if(d.result){"
+        "        st.textContent='Failed: '+(d.result.error||'unknown');"
+        "        document.getElementById('upd-btn').disabled=false;}"
+        "      else{pollUpdate();}"
+        "    }).catch(function(){pollUpdate();});"
+        "  },2000);}"
         "</script>"
     )
     return _shell(
@@ -9057,33 +9066,47 @@ def _start_web():
                     self._send(200, json.dumps({'ok': True}), 'application/json')
 
                 elif path == '/api/update':
-                    def _do_update():
-                        try:
-                            import ssl as _su, urllib.request as _ur
-                            ctx = _su.create_default_context()
-                            ctx.check_hostname = False; ctx.verify_mode = _su.CERT_NONE
-                            api_url = 'https://api.github.com/repos/santiagotoro2023/nexis-controller/releases/latest'
-                            with _ur.urlopen(api_url, context=ctx, timeout=15) as r:
-                                release = json.loads(r.read())
-                            assets = release.get('assets', [])
-                            deb_url = next((a['browser_download_url'] for a in assets if a['name'].endswith('.deb')), None)
-                            if not deb_url:
-                                return {'ok': False, 'error': 'No .deb in latest release'}
-                            import tempfile
-                            with tempfile.NamedTemporaryFile(suffix='.deb', delete=False) as tf:
-                                tmp_path = tf.name
-                            with _ur.urlopen(deb_url, context=ctx, timeout=120) as r:
-                                with open(tmp_path, 'wb') as f:
-                                    f.write(r.read())
-                            result = subprocess.run(['dpkg', '-i', tmp_path], capture_output=True, text=True)
-                            os.unlink(tmp_path)
-                            if result.returncode == 0:
-                                subprocess.Popen(['systemctl', 'restart', 'nexis-controller'])
-                                return {'ok': True, 'version': release.get('tag_name', '?')}
-                            return {'ok': False, 'error': result.stderr[:500]}
-                        except Exception as e:
-                            return {'ok': False, 'error': str(e)}
-                    self._send(200, json.dumps(_do_update()), 'application/json')
+                    if _update_state['running']:
+                        self._send(200, json.dumps({'ok': False, 'error': 'Update already in progress'}), 'application/json')
+                    else:
+                        _update_state.update({'running': True, 'result': None, 'status': 'Checking latest release...'})
+                        def _do_update_bg():
+                            try:
+                                import ssl as _su, urllib.request as _ur
+                                ctx = _su.create_default_context()
+                                ctx.check_hostname = False; ctx.verify_mode = _su.CERT_NONE
+                                api_url = 'https://api.github.com/repos/santiagotoro2023/nexis-controller/releases/latest'
+                                with _ur.urlopen(api_url, context=ctx, timeout=15) as r:
+                                    release = json.loads(r.read())
+                                assets = release.get('assets', [])
+                                deb_url = next((a['browser_download_url'] for a in assets if a['name'].endswith('.deb')), None)
+                                if not deb_url:
+                                    _update_state.update({'running': False, 'result': {'ok': False, 'error': 'No .deb in latest release'}})
+                                    return
+                                import tempfile
+                                _update_state['status'] = 'Downloading package...'
+                                with tempfile.NamedTemporaryFile(suffix='.deb', delete=False) as tf:
+                                    tmp_path = tf.name
+                                with _ur.urlopen(deb_url, context=ctx, timeout=180) as r:
+                                    with open(tmp_path, 'wb') as f:
+                                        f.write(r.read())
+                                _update_state['status'] = 'Installing...'
+                                result = subprocess.run(['dpkg', '-i', tmp_path], capture_output=True, text=True)
+                                os.unlink(tmp_path)
+                                if result.returncode == 0:
+                                    ver = release.get('tag_name', '?')
+                                    _update_state.update({'running': False, 'result': {'ok': True, 'version': ver}, 'status': f'Installed {ver}, restarting...'})
+                                    import time as _t; _t.sleep(3)
+                                    subprocess.Popen(['systemctl', 'restart', 'nexis-controller'])
+                                else:
+                                    _update_state.update({'running': False, 'result': {'ok': False, 'error': result.stderr[:500]}})
+                            except Exception as e:
+                                _update_state.update({'running': False, 'result': {'ok': False, 'error': str(e)}})
+                        threading.Thread(target=_do_update_bg, daemon=True).start()
+                        self._send(200, json.dumps({'ok': True, 'started': True}), 'application/json')
+
+                elif path == '/api/update/status':
+                    self._send(200, json.dumps(_update_state), 'application/json')
 
                 elif path == '/api/passwd':
                     ln2   = int(self.headers.get('Content-Length', 0))
