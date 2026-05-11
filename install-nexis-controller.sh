@@ -42,6 +42,20 @@ done
 echo "==> Restarting service..."
 systemctl restart nexis-controller
 
+echo "==> Waiting for daemon to initialise..."
+sleep 5
+
+if [ -f /tmp/nexis_first_run_password.txt ]; then
+    echo ""
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║       NeXiS Controller First-Run Login        ║"
+    echo "╠══════════════════════════════════════════════╣"
+    cat /tmp/nexis_first_run_password.txt | grep -E "Username:|Password:"
+    echo "╚══════════════════════════════════════════════╝"
+    echo ""
+    echo "Store these credentials securely — the password will not be shown again."
+fi
+
 echo ""
 echo "Done. Access the web UI at https://$(hostname -I | awk '{print $1}'):8443"
 echo "CLI: nexis --status"
