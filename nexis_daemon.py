@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NeXiS Controller — Build 1.0.24"""
+"""NeXiS Controller — Build 1.0.25"""
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
@@ -211,8 +211,17 @@ def _auth_load():
         pass
     # Generate a secure random password on first run
     _generated_pw = secrets.token_urlsafe(37)[:50]
-    creds = {'username': 'creator', 'hash': hashlib.sha256(_generated_pw.encode()).hexdigest()}
+    _pw_hash = hashlib.sha256(_generated_pw.encode()).hexdigest()
+    creds = {'username': 'creator', 'hash': _pw_hash}
     AUTH_FILE.write_text(json.dumps(creds, indent=2))
+    # Sync into users.json so the login form (_user_check) uses the same password
+    _users_first_run = [{
+        'username':   'creator',
+        'hash':       _pw_hash,
+        'role':       'admin',
+        'created_at': datetime.utcnow().isoformat(),
+    }]
+    USERS_FILE.write_text(json.dumps({'users': _users_first_run}, indent=2))
     with open('/tmp/nexis_first_run_password.txt', 'w') as _f:
         _f.write(f'NeXiS Controller First-Run Password\nUsername: creator\nPassword: {_generated_pw}\n\nStore this securely -- it won\'t be shown again.\n')
     print(f"\n{'='*60}\nNeXiS Controller first-run password:\nUsername: creator\nPassword: {_generated_pw}\n{'='*60}\n")
@@ -6087,7 +6096,7 @@ def _shell(content, active='chat', role='admin'):
         "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='opacity:0.7;flex-shrink:0'><path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/><polyline points='16 17 21 12 16 7'/><line x1='21' y1='12' x2='9' y2='12'/></svg>"
         '<span>Logout</span>'
         '</a>'
-        '<div class=sb-version>Build 1.0.24</div>'
+        '<div class=sb-version>Build 1.0.25</div>'
         '</div>'
         '</div>'
         f'<div class=main>{content}</div>'
