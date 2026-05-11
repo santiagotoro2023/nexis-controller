@@ -1,1 +1,1 @@
-#!/usr/bin/env python3
+PLACEHOLDER_REPLACED_BELOW
