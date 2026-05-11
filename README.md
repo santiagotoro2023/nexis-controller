@@ -11,7 +11,7 @@ NeXiS Controller  — central intelligence · SSO · management plane  ← you a
         ↕ authenticated API + LLM tool calls
 NeXiS Hypervisor  — one per compute node
         ↑
-NeXiS Worker      — Android / Linux desktop client
+NeXiS Worker      — Android / Linux / Windows desktop client
 ```
 
 | Repo | Role |
@@ -21,6 +21,20 @@ NeXiS Worker      — Android / Linux desktop client
 | [nexis-worker](https://github.com/santiagotoro2023/nexis-worker) | Mobile and desktop client |
 
 Workers and Hypervisors authenticate against the Controller. One set of credentials reaches everything.
+
+---
+
+## What's New in v1.0.20
+
+- **Memory keyword search** — `_memories_search()` runs on every incoming message; relevant memories are retrieved by keyword and injected as context before the LLM sees the query
+- **Auto-extract memories** — 12 regex patterns scan user messages in real time and automatically persist personal facts (name, job title, location, preferences, dislikes, email, phone, role)
+- **Previous conversation context** — recent session summaries are included as context for new conversations, giving the AI continuity across sessions
+- **Tools & Capabilities admin tab** — new admin-only sidebar section; lists all 18 built-in capabilities; full CRUD for custom shell, Python, and HTTP tools; custom tools are injected into the AI system prompt and can be invoked by name mid-conversation
+- **noVNC remote screen** — every device card on the Devices page now has a **SCREEN** button; clicking it sends a `start_vnc` command to the target Worker, starts a `websockify` subprocess on the Controller host (WebSocket → VNC TCP proxy), and serves an inline noVNC viewer; requires `pip3 install websockify` on the Controller host
+- **Delete conversations** — the History page has a per-session Delete button
+- **Admin data filter** — `/devices` and `/history` pages include a user-selector dropdown for admin accounts (driven by `?user=` query parameter)
+- **Secure first-run password** — a 50-character random password is generated on first boot, written to `/tmp/nexis_first_run_password.txt`, and displayed prominently by the install script
+- **Vision model changed to `moondream`** — replaces `qwen2.5vl:7b`; uses the `/api/generate` endpoint directly
 
 ---
 
@@ -58,18 +72,21 @@ The daemon runs as a systemd service and exposes an HTTPS web UI on port 8443, b
 ## Features
 
 ### AI Assistant
-- Local LLM inference via Ollama — models: `qwen2.5:14b` (fast), `qwen2.5vl:7b` (vision), Omega-Darker 22B (deep/fallback)
+- Local LLM inference via Ollama — models: `qwen2.5:14b` (fast), `moondream` (vision, uses `/api/generate`), Omega-Darker 22B (deep/fallback)
 - Streaming token output in both CLI and web UI
 - Automatic model routing — switches to the deep model if the fast model declines a query
 - Web search via DuckDuckGo (no API key required)
 - File pipeline: read, diff, edit, git commit, push
-- Image analysis (inline path or upload)
+- Image analysis via `moondream` (inline path or upload)
 - System probe: CPU / RAM / GPU / processes / network
 - Desktop actions: open URLs, launch/close apps, send desktop notifications, copy to clipboard
 
 ### Conversation & Memory
 - Per-user chat history with full session continuity across CLI and web
 - Persistent memory stored in SQLite — survives restarts and reinstalls
+- **Keyword memory search** (`_memories_search()`) — on every user message, memories are searched by keyword and injected as context automatically
+- **Auto-extraction** — 12 regex patterns parse user messages for personal facts (name, job, location, preferences, dislikes, email, phone, role) and persist them without any explicit command
+- **Previous conversation context** — recent sessions are summarised and included as background context for the current conversation
 - Memory backup/restore on uninstall
 - `//memory`, `//forget <term>`, `//clear` session commands
 
@@ -82,13 +99,23 @@ The daemon runs as a systemd service and exposes an HTTPS web UI on port 8443, b
 - **admin** role: full access to all data, all devices, all users
 - **user** role: sees only their own chat history, memory, and devices
 - Admin can filter the Devices, History, and Memory pages by user
-- Creator account password is generated on first run and displayed in the terminal during install; change it immediately via `//passwd` or the web UI
+- Creator account password is a 50-character random string generated on first run, written to `/tmp/nexis_first_run_password.txt`, and displayed by the install script; change it immediately via `//passwd` or the web UI
 
 ### Device Management
 - Workers register via `POST /api/devices/register` with a device ID, name, type, and URL
 - Controller queues commands for Workers; Workers poll `GET /api/devices/commands`
+- **noVNC remote screen** — **SCREEN** button on each device card on the Devices page; sends `start_vnc` to the Worker, Controller starts a `websockify` WebSocket→TCP proxy, serves an inline noVNC viewer; requires `pip3 install websockify` on the Controller host
 - Remote desktop control via the **Remote** page
 - Real-time cross-device sync via SSE
+
+### Tools & Capabilities
+- Admin-only **Tools & Capabilities** sidebar tab (v1.0.20+)
+- Lists all 18 built-in capabilities (web search, system probe, file edit, VM control, etc.)
+- Full CRUD for custom tools:
+  - **Shell tools** — arbitrary shell commands exposed to the AI
+  - **Python tools** — Python snippets the AI can execute
+  - **HTTP tools** — outbound HTTP calls the AI can make
+- Custom tool definitions are injected into the AI system prompt; the AI can call them by name mid-conversation
 
 ### Hypervisor Integration
 - Hypervisor nodes self-register at `POST /api/hyp/nodes/register` during their setup wizard
@@ -114,6 +141,7 @@ The daemon runs as a systemd service and exposes an HTTPS web UI on port 8443, b
 - Root / sudo access for installation
 - 8 GB RAM minimum (16 GB recommended for local LLM inference)
 - Internet connection for installation and initial model download
+- `websockify` Python package required for the noVNC remote screen feature (`pip3 install websockify`)
 
 ---
 
@@ -136,7 +164,7 @@ The installer:
 ║       NeXiS Controller First-Run Login        ║
 ╠══════════════════════════════════════════════╣
   Username: admin
-  Password: <generated>
+  Password: <50-char random password>
 ╚══════════════════════════════════════════════╝
 
 Store these credentials securely — the password will not be shown again.
@@ -170,7 +198,7 @@ The script prompts individually about what to keep: voice models, Ollama models,
 
 The Controller uses **session cookies** in the web UI and **Bearer tokens** for API access (including Workers and Hypervisors). Tokens are 90-day TTL and stored in SQLite.
 
-- The first account (creator) password is generated on first run and written to `/tmp/nexis_first_run_password.txt`
+- The first account (creator) password is a 50-character random string generated on first run and written to `/tmp/nexis_first_run_password.txt`
 - The file is removed after it has been read
 - Change it via `//passwd` in the CLI or the Settings page in the web UI
 - Subsequent accounts are created via the **Users** admin page
@@ -178,7 +206,7 @@ The Controller uses **session cookies** in the web UI and **Bearer tokens** for 
 ### RBAC
 
 | Role | Capabilities |
-|------|--------------|
+|------|-------------|
 | `admin` | Full access — all users' history, memory, devices, and admin pages |
 | `user` | Own data only — own chat history, own memory entries, own devices |
 
@@ -189,7 +217,7 @@ Admins see a user filter dropdown on the Devices, History, and Memory pages.
 ## Configuration
 
 | Path | Purpose |
-|------|---------|
+|------|--------|
 | `~/.config/nexis/` | TLS certificates, schedules, integrations, personality config |
 | `~/.local/share/nexis/` | SQLite database, logs, voice models, state |
 | `/etc/systemd/system/nexis-controller.service` | Service unit |
@@ -248,16 +276,18 @@ All endpoints require `Authorization: Bearer <token>` unless marked **public**.
 | `GET` | `/api/models` | List available Ollama models |
 | `POST` | `/api/model` | Switch active model |
 | `GET` | `/api/history` | Conversation history (own, or any user for admin) |
+| `DELETE` | `/api/history/{session_id}` | Delete a conversation session |
 | `GET` | `/api/memories` | Persistent memory entries |
 
 ### Devices
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/devices` | List registered Worker devices |
+| `GET` | `/api/devices` | List registered Worker devices (admin: `?user=` filter) |
 | `POST` | `/api/devices/register` | Register a Worker or Hypervisor device · **public** |
 | `POST` | `/api/devices/status` | Worker/Hypervisor status update |
 | `GET` | `/api/devices/commands` | Poll for queued commands (Workers poll this) |
+| `POST` | `/api/devices/{id}/vnc/start` | Start noVNC session for a device |
 | `GET` | `/api/sync` | Real-time cross-device state via SSE |
 
 ### Hypervisor
@@ -271,6 +301,15 @@ All endpoints require `Authorization: Bearer <token>` unless marked **public**.
 | `GET` | `/api/hyp/vms` | All VMs across all paired nodes |
 | `GET` | `/api/hyp/metrics` | Live metrics from all nodes |
 | `POST` | `/api/hyp/nodes/{id}/vms/{vm_id}/{action}` | VM power action on a specific node |
+
+### Tools
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/tools` | List built-in capabilities and custom tools (admin) |
+| `POST` | `/api/tools` | Create a custom tool (admin) |
+| `PUT` | `/api/tools/{id}` | Update a custom tool (admin) |
+| `DELETE` | `/api/tools/{id}` | Delete a custom tool (admin) |
 
 ### Automation
 
@@ -309,10 +348,11 @@ From that point, all logins to the Hypervisor node are proxied to the Controller
 |---------|-------------|
 | Chat | AI conversation with streaming output |
 | Remote | Remote desktop control for connected Worker devices |
-| History | Per-user conversation history (admin can filter by user) |
-| Memory | Persistent memory entries (admin can filter by user) |
+| History | Per-user conversation history with per-session Delete button (admin can filter by user) |
+| Memory | Persistent memory entries with auto-extraction and keyword search (admin can filter by user) |
 | Schedules | Automated tasks and briefings |
-| Devices | Connected Workers and Hypervisors (admin can filter by user) |
+| Devices | Connected Workers and Hypervisors with noVNC SCREEN button per device (admin can filter by user) |
 | Hypervisor | Aggregate VM/container view and live metrics across all nodes |
+| Tools & Capabilities | Built-in capability list + CRUD for custom shell/Python/HTTP tools — **admin only** |
 | Users | User management — admin only |
 | Status | Service health, version, and one-click software update |
