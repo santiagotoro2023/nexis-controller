@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NeXiS Controller — Build 1.0.29"""
+"""NeXiS Controller — Build 1.0.30"""
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
@@ -6074,7 +6074,7 @@ def _shell(content, active='chat', role='admin'):
         "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='opacity:0.7;flex-shrink:0'><path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/><polyline points='16 17 21 12 16 7'/><line x1='21' y1='12' x2='9' y2='12'/></svg>"
         '<span>Logout</span>'
         '</a>'
-        '<div class=sb-version>Build 1.0.29</div>'
+        '<div class=sb-version>Build 1.0.30</div>'
         '</div>'
         '</div>'
         f'<div class=main>{content}</div>'
@@ -10022,15 +10022,13 @@ def _start_web():
                     self._send(200, json.dumps(_update_state), 'application/json')
 
                 elif path == '/api/passwd':
-                    ln2   = int(self.headers.get('Content-Length', 0))
-                    body2 = self.rfile.read(ln2) if ln2 else b''
-                    # Handle both form POST and JSON
+                    # body already read at top of do_POST — never re-read self.rfile
                     try:
-                        data2 = json.loads(body2) if body2 else {}
+                        data2 = json.loads(body) if body else {}
                         pw = data2.get('password', '')
                         confirm = data2.get('confirm', pw)
                     except Exception:
-                        params2 = parse_qs(body2.decode('utf-8', 'replace'))
+                        params2 = parse_qs(body.decode('utf-8', 'replace'))
                         pw      = params2.get('password', [''])[0]
                         confirm = params2.get('confirm',  [pw])[0]
                     if pw and pw == confirm:
