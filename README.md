@@ -1,10 +1,12 @@
 # NeXiS Controller
 
-The intelligence layer of the NeXiS ecosystem. A self-hosted AI assistant and central management plane that runs on a dedicated Linux host. It connects to NeXiS Hypervisor nodes, manages NeXiS Worker clients, and provides a single authenticated endpoint for the entire ecosystem.
+![Version](https://img.shields.io/badge/version-1.0.22-blue) ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey) ![LLM](https://img.shields.io/badge/LLM-Ollama%20local-green) ![TLS](https://img.shields.io/badge/TLS-self--signed%20TOFU-yellow)
+
+The intelligence layer of the NeXiS ecosystem. A self-hosted AI assistant and central management plane that runs on a dedicated Linux host. It manages NeXiS Hypervisor nodes and NeXiS Worker clients, provides SSO for the entire ecosystem, and exposes a single authenticated HTTPS endpoint for everything.
 
 ---
 
-## Ecosystem
+## Ecosystem Overview
 
 ```
 NeXiS Controller  — central intelligence · SSO · management plane  ← you are here
@@ -17,37 +19,33 @@ NeXiS Worker      — Android / Linux / Windows desktop client
 | Repo | Role |
 |------|------|
 | **nexis-controller** | Central AI assistant · SSO provider · management plane |
-| [nexis-hypervisor](https://github.com/santiagotoro2023/nexis-hypervisor) | Per-node compute management |
+| [nexis-hypervisor](https://github.com/santiagotoro2023/nexis-hypervisor) | Per-node VM and container management |
 | [nexis-worker](https://github.com/santiagotoro2023/nexis-worker) | Mobile and desktop client |
 
 Workers and Hypervisors authenticate against the Controller. One set of credentials reaches everything.
 
 ---
 
-## What's New in v1.0.20
+## Table of Contents
 
-- **Memory keyword search** — `_memories_search()` runs on every incoming message; relevant memories are retrieved by keyword and injected as context before the LLM sees the query
-- **Auto-extract memories** — 12 regex patterns scan user messages in real time and automatically persist personal facts (name, job title, location, preferences, dislikes, email, phone, role)
-- **Previous conversation context** — recent session summaries are included as context for new conversations, giving the AI continuity across sessions
-- **Tools & Capabilities admin tab** — new admin-only sidebar section; lists all 18 built-in capabilities; full CRUD for custom shell, Python, and HTTP tools; custom tools are injected into the AI system prompt and can be invoked by name mid-conversation
-- **noVNC remote screen** — every device card on the Devices page now has a **SCREEN** button; clicking it sends a `start_vnc` command to the target Worker, starts a `websockify` subprocess on the Controller host (WebSocket → VNC TCP proxy), and serves an inline noVNC viewer; requires `pip3 install websockify` on the Controller host
-- **Delete conversations** — the History page has a per-session Delete button
-- **Admin data filter** — `/devices` and `/history` pages include a user-selector dropdown for admin accounts (driven by `?user=` query parameter)
-- **Secure first-run password** — a 50-character random password is generated on first boot, written to `/tmp/nexis_first_run_password.txt`, and displayed prominently by the install script
-- **Vision model changed to `moondream`** — replaces `qwen2.5vl:7b`; uses the `/api/generate` endpoint directly
-
----
-
-## What It Is
-
-NeXiS Controller is a single Python daemon (`nexis_daemon.py`) that serves as:
-
-- A **local AI assistant** backed by Ollama — chat, memory, voice I/O, scheduled briefings
-- A **device management hub** for all NeXiS Workers and Hypervisors registered to it
-- An **SSO provider** — Workers and Hypervisors delegate all login to the Controller
-- A **remote desktop control** plane for connected Worker devices
-
-The daemon runs as a systemd service and exposes an HTTPS web UI on port 8443, backed by a self-signed TLS certificate generated on first run.
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [First Access](#first-access)
+- [Configuration Files](#configuration-files)
+- [Database Schema](#database-schema)
+- [Authentication & RBAC](#authentication--rbac)
+- [Web UI Pages](#web-ui-pages)
+- [AI Models](#ai-models)
+- [AI Tool Tags](#ai-tool-tags)
+- [Memory System](#memory-system)
+- [Personality System](#personality-system)
+- [noVNC Remote Screen](#novnc-remote-screen)
+- [Scheduled Tasks](#scheduled-tasks)
+- [Home Assistant Integration](#home-assistant-integration)
+- [CLI](#cli)
+- [API Reference](#api-reference)
+- [Uninstallation](#uninstallation)
 
 ---
 
@@ -55,83 +53,19 @@ The daemon runs as a systemd service and exposes an HTTPS web UI on port 8443, b
 
 | Layer | Technology |
 |-------|------------|
-| Daemon | Python 3 · stdlib `http.server` + `ThreadingMixIn` |
-| TLS | Self-signed certificate, auto-generated on first run |
-| LLM inference | Ollama (local — no data leaves the host) |
-| Voice synthesis | Piper TTS (GLaDOS voice model) |
-| Voice input | Faster-Whisper STT |
-| Storage | SQLite · `~/.local/share/nexis/` |
-| Config | `~/.config/nexis/` (TLS certs, schedules, integrations) |
-| Auth | Bearer token · SHA-256 password hashing · SQLite sessions |
+| Daemon | Single-file Python 3 daemon (`nexis_daemon.py`, ~10,000 lines) |
+| HTTP server | Python stdlib `BaseHTTPRequestHandler` + `ThreadingMixIn` |
+| TLS | Self-signed certificate, auto-generated on first run; workers use TOFU (trust on first use) |
+| LLM inference | **Ollama** — fully local, no data leaves the host |
+| Voice synthesis | **Piper TTS** with GLaDOS voice model |
+| Voice input | **Faster-Whisper** STT |
+| Storage | **SQLite** at `~/.local/share/nexis/memory/nexis.db` |
+| Config | `~/.config/nexis/` |
+| Auth | Session cookie (`nexis_sess`) + Bearer token · SHA-256 password hashing |
 | Realtime | Server-Sent Events (SSE) |
 | Web UI | Inline HTML/CSS/JS served directly by the daemon |
 | Service | systemd `nexis-controller.service` |
-
----
-
-## Features
-
-### AI Assistant
-- Local LLM inference via Ollama — models: `qwen2.5:14b` (fast), `moondream` (vision, uses `/api/generate`), Omega-Darker 22B (deep/fallback)
-- Streaming token output in both CLI and web UI
-- Automatic model routing — switches to the deep model if the fast model declines a query
-- Web search via DuckDuckGo (no API key required)
-- File pipeline: read, diff, edit, git commit, push
-- Image analysis via `moondream` (inline path or upload)
-- System probe: CPU / RAM / GPU / processes / network
-- Desktop actions: open URLs, launch/close apps, send desktop notifications, copy to clipboard
-
-### Conversation & Memory
-- Per-user chat history with full session continuity across CLI and web
-- Persistent memory stored in SQLite — survives restarts and reinstalls
-- **Keyword memory search** (`_memories_search()`) — on every user message, memories are searched by keyword and injected as context automatically
-- **Auto-extraction** — 12 regex patterns parse user messages for personal facts (name, job, location, preferences, dislikes, email, phone, role) and persist them without any explicit command
-- **Previous conversation context** — recent sessions are summarised and included as background context for the current conversation
-- Memory backup/restore on uninstall
-- `//memory`, `//forget <term>`, `//clear` session commands
-
-### Voice Interface
-- Text-to-speech via Piper TTS with GLaDOS voice model (high + medium quality)
-- Speech-to-text via Faster-Whisper; supports wake word, open mic, and STT-on-demand
-- Disabled by default — enable with `//voice on` / `//stt on`
-
-### User Management & RBAC
-- **admin** role: full access to all data, all devices, all users
-- **user** role: sees only their own chat history, memory, and devices
-- Admin can filter the Devices, History, and Memory pages by user
-- Creator account password is a 50-character random string generated on first run, written to `/tmp/nexis_first_run_password.txt`, and displayed by the install script; change it immediately via `//passwd` or the web UI
-
-### Device Management
-- Workers register via `POST /api/devices/register` with a device ID, name, type, and URL
-- Controller queues commands for Workers; Workers poll `GET /api/devices/commands`
-- **noVNC remote screen** — **SCREEN** button on each device card on the Devices page; sends `start_vnc` to the Worker, Controller starts a `websockify` WebSocket→TCP proxy, serves an inline noVNC viewer; requires `pip3 install websockify` on the Controller host
-- Remote desktop control via the **Remote** page
-- Real-time cross-device sync via SSE
-
-### Tools & Capabilities
-- Admin-only **Tools & Capabilities** sidebar tab (v1.0.20+)
-- Lists all 18 built-in capabilities (web search, system probe, file edit, VM control, etc.)
-- Full CRUD for custom tools:
-  - **Shell tools** — arbitrary shell commands exposed to the AI
-  - **Python tools** — Python snippets the AI can execute
-  - **HTTP tools** — outbound HTTP calls the AI can make
-- Custom tool definitions are injected into the AI system prompt; the AI can call them by name mid-conversation
-
-### Hypervisor Integration
-- Hypervisor nodes self-register at `POST /api/hyp/nodes/register` during their setup wizard
-- Controller polls each node's `GET /api/status` for live metrics (CPU, memory, disk, VM/container counts)
-- Aggregate VM and container view across all paired nodes
-- VM power actions (start, stop, reboot, force-stop) from the Controller UI or via LLM tool calls
-- LLM can directly control VMs mid-conversation using `[HYP: ...]` tool tags
-
-### Scheduled Tasks
-- Cron-style task scheduler accessible via `//schedule` in CLI and the **Schedules** page in the web UI
-- NeXiS can create its own schedules via `[SCHED: ...]` response tags
-- Briefings, reminders, and automated AI queries on a timer
-
-### Software Updates
-- One-click update from the **Status** page in the web UI
-- Download and install run in a background thread; UI polls for progress and reloads automatically
+| Port | HTTPS `8443` |
 
 ---
 
@@ -140,8 +74,8 @@ The daemon runs as a systemd service and exposes an HTTPS web UI on port 8443, b
 - Debian 12 (Bookworm) or Ubuntu 22.04+ · x86_64
 - Root / sudo access for installation
 - 8 GB RAM minimum (16 GB recommended for local LLM inference)
-- Internet connection for installation and initial model download
-- `websockify` Python package required for the noVNC remote screen feature (`pip3 install websockify`)
+- Internet connection for installation and initial Ollama model download
+- `websockify` Python package for the noVNC remote screen feature (`pip3 install websockify`)
 
 ---
 
@@ -152,75 +86,265 @@ curl -sSL https://raw.githubusercontent.com/santiagotoro2023/nexis-controller/ma
 ```
 
 The installer:
+
 1. Downloads and installs the latest `.deb` release package
 2. Downloads the GLaDOS Piper TTS voice model (~63 MB)
 3. Starts the `nexis-controller` systemd service
 4. Waits for the daemon to initialise
-5. Reads `/tmp/nexis_first_run_password.txt` (if present) and displays the generated admin credentials prominently
+5. Reads `/tmp/nexis_first_run_password.txt` and displays the generated admin credentials
 
 **First-run credential display:**
+
 ```
-╔══════════════════════════════════════════════╗
-║       NeXiS Controller First-Run Login        ║
-╠══════════════════════════════════════════════╣
-  Username: admin
-  Password: <50-char random password>
-╚══════════════════════════════════════════════╝
+╔════════════════════════════════════════════╗
+║     NeXiS Controller First-Run Login       ║
+╠════════════════════════════════════════════╣
+  Username: creator
+  Password: <50-character random password>
+╚════════════════════════════════════════════╝
 
 Store these credentials securely — the password will not be shown again.
 ```
 
-Change the password immediately after first login via `//passwd` in the CLI or the web UI.
-
----
-
-## Uninstallation
-
-```bash
-curl -sSL https://raw.githubusercontent.com/santiagotoro2023/nexis-controller/main/uninstall-nexis-controller.sh | sudo bash
-```
-
-The script prompts individually about what to keep: voice models, Ollama models, registered devices, memories, chat history, config directory.
+The password is also written to `/tmp/nexis_first_run_password.txt` and removed after being read. Change it immediately via `//passwd` in the CLI or the Settings page in the web UI.
 
 ---
 
 ## First Access
 
 1. Open `https://<host-ip>:8443` in a browser
-2. Accept the self-signed TLS certificate
-3. Log in with the credentials displayed during install
-4. Change your password via `//passwd` or the web UI Settings page
-5. Hypervisor nodes appear in **Hypervisor** as they pair via their own setup wizards
+2. Accept the self-signed TLS certificate warning
+3. Log in with the `creator` credentials displayed during install
+4. Change your password via the **Settings** page or `//passwd` in the CLI
+5. Hypervisor nodes appear in the **Hypervisor** tab as they pair via their own setup wizards
 
 ---
 
-## Authentication
+## Configuration Files
 
-The Controller uses **session cookies** in the web UI and **Bearer tokens** for API access (including Workers and Hypervisors). Tokens are 90-day TTL and stored in SQLite.
+All configuration lives under `~/.config/nexis/`:
 
-- The first account (creator) password is a 50-character random string generated on first run and written to `/tmp/nexis_first_run_password.txt`
-- The file is removed after it has been read
-- Change it via `//passwd` in the CLI or the Settings page in the web UI
-- Subsequent accounts are created via the **Users** admin page
+| File | Purpose |
+|------|---------|
+| `auth.json` | Primary admin account (`creator`) — username, hashed password, role |
+| `users.json` | All additional user accounts — username, hashed password, role |
+| `personality.json` | AI personality settings: name, style, `base_prompt` field |
+| `personality.md` | Base system prompt for the AI (plain markdown) |
+| `integrations.json` | Third-party integration credentials (Home Assistant token, etc.) |
+| `schedules.json` | Cron-style scheduled AI prompt definitions |
+| `device_passwords.json` | Per-device authentication secrets |
+| `server.key` | Auto-generated TLS private key |
+| `server.crt` | Auto-generated self-signed TLS certificate |
 
-### RBAC
-
-| Role | Capabilities |
-|------|-------------|
-| `admin` | Full access — all users' history, memory, devices, and admin pages |
-| `user` | Own data only — own chat history, own memory entries, own devices |
-
-Admins see a user filter dropdown on the Devices, History, and Memory pages.
-
----
-
-## Configuration
+Runtime state lives under `~/.local/share/nexis/`:
 
 | Path | Purpose |
-|------|--------|
-| `~/.config/nexis/` | TLS certificates, schedules, integrations, personality config |
-| `~/.local/share/nexis/` | SQLite database, logs, voice models, state |
-| `/etc/systemd/system/nexis-controller.service` | Service unit |
+|------|---------|
+| `memory/nexis.db` | SQLite database (all tables) |
+| Logs | Service journal via `journalctl -u nexis-controller` |
+
+---
+
+## Database Schema
+
+All tables include an `owner_username` column for full per-user data isolation.
+
+| Table | Contents |
+|-------|----------|
+| `chat_history` | All conversation messages, session IDs, timestamps, and model used |
+| `memories` | Persistent per-user memory entries (text + source + timestamp) |
+| `devices` | Registered Worker and Hypervisor devices (ID, hostname, OS, capabilities, IP, MAC) |
+| `commands` | Queued and completed commands for Worker devices |
+| `schedules` | Cron-style scheduled AI prompt definitions |
+| `tools` | Admin-defined custom tools (name, type, definition, description) |
+| `doc_index` | Indexed document directories |
+| `doc_chunks` | Document text chunks for workspace/semantic search |
+
+---
+
+## Authentication & RBAC
+
+### Roles
+
+| Role | Capabilities |
+|------|--------------|
+| `admin` | Full access — all users' chat history, memory, devices; all admin-only pages |
+| `user` | Own data only — own chat history, own memory entries, own devices |
+
+### Session & Tokens
+
+- **Web UI**: session cookie `nexis_sess`
+- **API / Workers / Hypervisors**: Bearer token via `POST /api/token`
+- Token TTL: 90 days, stored in SQLite
+- Passwords hashed with SHA-256
+
+### Accounts
+
+- Primary admin: `creator` account defined in `auth.json`
+- Additional users: stored in `users.json`
+- Admin can create and delete users via the **Users** page or `POST /api/users`
+- Admins can filter the Devices, History, and Memory pages by user via `?user=<username>`
+
+---
+
+## Web UI Pages
+
+| Route | Role | Description |
+|-------|------|-------------|
+| `/` | Any | Redirects to `/chat` |
+| `/chat` | Any | Main AI chat interface — model selector, voice toggle, streaming output |
+| `/remote` | Any | Remote desktop / device control panel |
+| `/history` | Any | Conversation history; per-session delete button; admins get a user-selector dropdown (`?user=username`) |
+| `/memory` | Any | Persistent memories viewer; add and delete entries; admins get user-selector |
+| `/schedules` | Any | Cron-style scheduled AI prompts — full CRUD |
+| `/devices` | Any | Registered Worker devices; **SCREEN** button opens noVNC per device; admins get user-selector |
+| `/hypervisor` | Any | Connected nexis-hypervisor nodes, live utilisation stats, aggregate VM and container list |
+| `/commands` | **admin only** | All AI tool capabilities + full CRUD for custom shell/Python/HTTP tools |
+| `/personality` | **admin only** | Edit AI name, personality style, base system prompt, custom instructions; reset to default |
+| `/users` | **admin only** | Create/delete users, change passwords, assign roles |
+| `/status` | **admin only** | System health, model availability, resource usage, one-click software update |
+| `/settings` | Any | User settings, voice configuration, integrations (Home Assistant, etc.) |
+
+---
+
+## AI Models
+
+| Purpose | Model | Notes |
+|---------|-------|-------|
+| **Fast / default** | `qwen2.5:14b` | Used for most queries |
+| **Deep / fallback** | Omega Darker 22B | Activated automatically if the fast model declines a query |
+| **Code** | `qwen3-coder-next` | Routed for code-heavy tasks |
+| **Vision** | `moondream` | Image analysis; uses Ollama's `/api/generate` endpoint directly |
+
+All inference is local via **Ollama** — no data leaves the host.
+
+---
+
+## AI Tool Tags
+
+NeXiS can invoke capabilities inline in its responses using bracket tags. The daemon intercepts these tags before sending the response to the user and executes the corresponding action.
+
+| Tag | Description |
+|-----|-------------|
+| `[WEB:query]` | Internet search via DuckDuckGo (no API key required) |
+| `[CMD:command]` | Execute a shell command on the Controller host; return output |
+| `[FILE:path]` | Read a file from the Controller host filesystem |
+| `[WRITE:path\|content]` | Write content to a file on the Controller host |
+| `[GITHUB:gh-command]` | Execute a GitHub CLI command |
+| `[DESKTOP:action\|arg]` | Control a desktop Worker device (open app, set volume, lock, take screenshot, etc.) |
+| `[ANDROID:device\|action]` | Issue a command to an Android / mobile Worker device |
+| `[SCHED:expr\|name\|prompt]` | Create a new cron-style scheduled AI prompt |
+| `[SCHED_DEL:name]` | Delete a named schedule |
+| `[INDEX:path]` | Index a directory into the document store for workspace search |
+| `[WORKSPACE:cmd\|arg]` | Search the indexed document store |
+| `[HA:action\|entity\|val]` | Control a Home Assistant entity |
+| `[HOMELAB:action]` | Execute a homelab power sequence |
+| `[PROBE]` | Run system diagnostics on the Controller host and return a full report |
+| `[TOOL:name\|arg]` | Invoke a custom admin-defined tool by name |
+
+### Custom Tools
+
+Admins define custom tools via the `/commands` page or `POST /api/commands`. Each tool has:
+
+- **Name** — the identifier used in `[TOOL:name|arg]`
+- **Type** — `shell`, `python`, or `http`
+- **Definition** — the shell command, Python snippet, or HTTP endpoint
+- **Description** — injected into the AI system prompt so the AI knows when to use it
+
+Custom tools are stored in the `tools` SQLite table and injected into the system prompt on every request. When the AI emits `[TOOL:name|arg]`, the daemon executes it and substitutes the result inline.
+
+---
+
+## Memory System
+
+Memories are stored per user in the `memories` table and survive restarts and reinstalls.
+
+### Auto-Extraction
+
+On every incoming user message, 12 regex patterns scan the text for personal facts and persist them automatically:
+
+- Name, job title, company, location (city/country)
+- Email address, phone number
+- Preferences (likes, favourites)
+- Dislikes
+- Age
+- Role or relationship to the system
+
+No explicit command is needed — the AI passively learns facts from conversation.
+
+### Keyword Search
+
+Before each AI response, `_memories_search()` runs a keyword match against the user's message and retrieves relevant memory entries. Matched entries are injected into the system prompt context window so the AI always has relevant personal context.
+
+### Previous Session Context
+
+Recent session titles and summaries are included as background context for new conversations, giving the AI continuity across sessions without requiring users to repeat themselves.
+
+### Manual Management
+
+- **Web UI**: `/memory` page — view, add, and delete entries; admins can filter by user
+- **CLI**: `//memory` to list, `//forget <term>` to delete
+- **API**: `GET /api/memories`, `POST /api/memories`, `DELETE /api/memories/{id}`
+
+---
+
+## Personality System
+
+The AI personality has two layers, both configurable via the `/personality` admin page:
+
+### Layer 1: Base System Prompt
+
+Stored in `personality.md` (and mirrored in `personality.json` as `base_prompt`). Defines who NeXiS is at a foundational level — its name, knowledge domain, tone, and boundaries. Editable via the admin page. Resetting to default deletes `personality.json` and reverts to the built-in prompt.
+
+### Layer 2: Per-Request Personality Reminder
+
+Injected with every message alongside the user's memories. The content adapts based on who is logged in:
+
+| User | Personality Behaviour |
+|------|-----------------------|
+| `creator` account | Addressed as "Creator"; deep subservience; expresses curiosity about why it was built |
+| Any other user | Addressed by username; helpful per Creator's directive; collegial; curious about their relationship to the Creator |
+
+Configurable fields: AI name, personality style/tone, base system prompt, custom per-user instructions.
+
+---
+
+## noVNC Remote Screen
+
+The **SCREEN** button on any device card in `/devices` triggers a full remote desktop session:
+
+1. Browser calls `GET /api/devices/{id}/vnc/start` on the Controller
+2. Controller queues a `start_vnc` command for the target Worker device
+3. Worker polls `GET /api/commands/pending`, receives `start_vnc`, and starts the platform VNC server:
+   - **Linux**: x11vnc
+   - **Windows**: TightVNC or RealVNC service
+   - **macOS**: ARDAgent
+4. Controller starts a `websockify` subprocess on a free port, creating a WebSocket → VNC TCP proxy
+5. Controller serves an inline noVNC HTML page; the browser connects directly to the websockify port
+
+**Prerequisite**: `pip3 install websockify` on the Controller host.
+
+---
+
+## Scheduled Tasks
+
+Cron-style scheduled AI prompts accessible via:
+- **Web UI**: `/schedules` page — full CRUD
+- **CLI**: `//schedule [list|add|delete|pause|resume|run]`
+- **AI**: NeXiS can create and delete its own schedules using `[SCHED:expr|name|prompt]` and `[SCHED_DEL:name]` tool tags
+- **API**: `GET /api/schedules`, `POST /api/schedules`, `DELETE /api/schedules/{id}`
+
+Examples: daily briefings, reminders, automated monitoring queries on a timer.
+
+---
+
+## Home Assistant Integration
+
+Configure the Home Assistant URL and long-lived access token in **Settings** (`/settings`) or directly in `integrations.json`. Once configured:
+
+- The AI can control any HA entity mid-conversation using `[HA:action|entity|val]` tool tags
+- The `/settings` page shows a live status and entity list
+- The API provides full HA bridge access (see API reference below)
 
 ---
 
@@ -230,129 +354,186 @@ The `nexis` command is installed to `/usr/local/bin/nexis`:
 
 ```bash
 nexis --status      # service and web UI liveness check
-nexis --start       # start the service
-nexis --stop        # stop the service
-nexis --restart     # restart the service
+nexis --start       # start the systemd service
+nexis --stop        # stop the systemd service
+nexis --restart     # restart the systemd service
 nexis --logs [n]    # tail the last n lines of the service journal (default 50)
 nexis --web         # open the web UI in a browser
 nexis               # open an interactive CLI session (requires socat)
 ```
 
-**In-session commands:**
+### In-Session Commands
 
 | Command | Action |
 |---------|--------|
-| `//memory` | Show persistent memory entries |
-| `//forget <term>` | Delete a memory entry |
-| `//clear` | Clear current session history |
-| `//status` | Show service status |
-| `//probe` | Run system probe |
-| `//search <q>` | Web search |
-| `//voice [on\|off]` | Toggle TTS voice output |
-| `//stt [on\|off\|wake\|open]` | Toggle/configure STT |
+| `//memory` | Show all persistent memory entries |
+| `//forget <term>` | Delete a memory entry matching the term |
+| `//clear` | Clear the current session history |
+| `//status` | Show service status and model info |
+| `//probe` | Run a full system diagnostics probe |
+| `//search <q>` | Web search via DuckDuckGo |
+| `//voice [on\|off]` | Toggle Piper TTS voice output |
+| `//stt [on\|off\|wake\|open]` | Toggle or configure Faster-Whisper STT |
 | `//schedule [list\|add\|delete\|pause\|resume\|run]` | Manage scheduled tasks |
-| `//ws [run\|clear\|vars\|history]` | Python workspace |
-| `//passwd` | Change your password |
-| `//exit` | Exit the session |
+| `//ws [run\|clear\|vars\|history]` | Python workspace operations |
+| `//passwd` | Change your account password |
+| `//exit` | Exit the interactive session |
 
 ---
 
-## API
+## API Reference
 
-All endpoints require `Authorization: Bearer <token>` unless marked **public**.
+All endpoints require `Authorization: Bearer <token>` or a valid `nexis_sess` cookie unless marked **public**.
 
 ### Auth
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/auth/login` | Authenticate · returns session token · **public** |
+| `POST` | `/api/token` | Authenticate; returns a Bearer token · **public** |
+| `GET` | `/api/user` | Return the currently authenticated user's profile |
 | `GET` | `/api/health` | Liveness check · **public** |
 
-### AI
+### Chat & AI
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/chat` | AI conversation · SSE streaming |
-| `GET` | `/api/models` | List available Ollama models |
-| `POST` | `/api/model` | Switch active model |
-| `GET` | `/api/history` | Conversation history (own, or any user for admin) |
+| `POST` | `/api/chat` | Send a message; streams AI response via SSE |
+| `POST` | `/api/chat/abort` | Abort an in-progress streaming response |
+| `GET` | `/api/models` | List all available Ollama models |
+| `POST` | `/api/model` | Switch the active model |
+
+### History
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/history` | List conversation sessions (own; admin can use `?user=`) |
+| `GET` | `/api/history/sessions` | List session metadata |
+| `GET` | `/api/history/load` | Load full messages for a session (`?session_id=`) |
 | `DELETE` | `/api/history/{session_id}` | Delete a conversation session |
-| `GET` | `/api/memories` | Persistent memory entries |
+
+### Memories
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/memories` | List memory entries (own; admin can use `?user=`) |
+| `POST` | `/api/memories` | Add a memory entry manually |
+| `DELETE` | `/api/memories/{id}` | Delete a memory entry |
 
 ### Devices
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/devices` | List registered Worker devices (admin: `?user=` filter) |
-| `POST` | `/api/devices/register` | Register a Worker or Hypervisor device · **public** |
-| `POST` | `/api/devices/status` | Worker/Hypervisor status update |
-| `GET` | `/api/devices/commands` | Poll for queued commands (Workers poll this) |
-| `POST` | `/api/devices/{id}/vnc/start` | Start noVNC session for a device |
-| `GET` | `/api/sync` | Real-time cross-device state via SSE |
+| `POST` | `/api/device/register` | Register a new Worker device · **public** |
+| `POST` | `/api/device/command` | Queue a command for a Worker device |
+| `GET` | `/api/device/role` | Get the role of the authenticated device |
+| `DELETE` | `/api/device/delete` | Remove a registered device |
+| `GET` | `/api/commands/pending` | Poll for pending commands (`?device_id=`) |
+| `POST` | `/api/commands/ack` | Acknowledge a processed command |
+| `GET` | `/api/devices/{id}/vnc/start` | Start a noVNC session for a device |
+| `GET` | `/api/devices/{id}/vnc/view/{port}` | Serve the inline noVNC HTML viewer |
 
 ### Hypervisor
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/hyp/nodes` | List paired hypervisor nodes |
-| `POST` | `/api/hyp/nodes` | Manually add a hypervisor node |
-| `POST` | `/api/hyp/nodes/register` | Hypervisor self-registration · **public** |
-| `DELETE` | `/api/hyp/nodes/{id}` | Remove a paired node |
-| `GET` | `/api/hyp/vms` | All VMs across all paired nodes |
-| `GET` | `/api/hyp/metrics` | Live metrics from all nodes |
-| `POST` | `/api/hyp/nodes/{id}/vms/{vm_id}/{action}` | VM power action on a specific node |
+| `GET` | `/api/hyp/nodes` | List all paired Hypervisor nodes |
+| `GET` | `/api/hyp/metrics` | Live metrics from all paired nodes |
+| `POST` | `/api/hyp/pair` | Manually pair a Hypervisor node |
+| `POST` | `/api/hyp/unpair` | Remove a paired Hypervisor node |
 
-### Tools
+### Schedules
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/tools` | List built-in capabilities and custom tools (admin) |
-| `POST` | `/api/tools` | Create a custom tool (admin) |
-| `PUT` | `/api/tools/{id}` | Update a custom tool (admin) |
-| `DELETE` | `/api/tools/{id}` | Delete a custom tool (admin) |
+| `GET` | `/api/schedules` | List all schedules for the current user |
+| `POST` | `/api/schedules` | Create a new schedule |
+| `PUT` | `/api/schedules/{id}` | Update a schedule |
+| `DELETE` | `/api/schedules/{id}` | Delete a schedule |
 
-### Automation
+### Tools / Commands
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/schedules` | List automation schedules |
-| `POST` | `/api/schedules` | Create a schedule |
-| `GET` | `/api/ha/*` | Home Assistant bridge |
-| `POST` | `/api/exec` | Remote code execution |
+| `GET` | `/api/commands` | List all built-in capabilities and custom tools (admin) |
+| `POST` | `/api/commands` | Create a custom tool (admin) |
+| `PUT` | `/api/commands/{id}` | Update a custom tool (admin) |
+| `DELETE` | `/api/commands/{id}` | Delete a custom tool (admin) |
+
+### Personality
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/personality` | Get current personality configuration |
+| `POST` | `/api/personality` | Update personality settings (admin) |
+| `DELETE` | `/api/personality` | Reset personality to defaults (admin) |
+
+### Users
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/users` | List all users (admin only) |
+| `POST` | `/api/users` | Create a user (admin only) |
+| `DELETE` | `/api/users/{username}` | Delete a user (admin only) |
+| `POST` | `/api/users/{username}/password` | Change a user's password (admin; or own account) |
 
 ### System
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/update` | Start background software update |
+| `GET` | `/api/health` | Liveness check · **public** |
+| `GET` | `/api/models` | List available Ollama models |
+| `POST` | `/api/model` | Set the active model |
+| `GET` | `/api/monitor` | System resource monitoring (CPU, RAM, disk) |
+| `POST` | `/api/voice` | Configure voice output settings |
+| `POST` | `/api/exec` | Execute code/commands remotely |
+| `POST` | `/api/stt/transcribe` | Transcribe audio via Faster-Whisper |
+| `POST` | `/api/update` | Start a background software update |
 | `GET` | `/api/update/status` | Poll update progress |
-| `GET` | `/api/users` | List users (admin only) |
-| `POST` | `/api/users` | Create user (admin only) |
+| `GET` | `/api/probe` | Run system diagnostics and return a full report |
+
+### Home Assistant
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/ha/config` | Get current Home Assistant integration config |
+| `POST` | `/api/ha/config` | Save Home Assistant URL and token |
+| `GET` | `/api/ha/status` | Check HA connectivity and list entities |
+| `POST` | `/api/ha/action` | Execute a Home Assistant service call |
+| `GET` | `/api/ha/log` | Retrieve recent HA action log |
+| `POST` | `/api/ha/test` | Test HA connection with current config |
 
 ---
 
-## Pairing a Hypervisor Node
+## Uninstallation
 
-1. On the Hypervisor machine, open `https://<node-ip>:8443`
-2. The setup wizard prompts for this Controller's URL, username, and password
-3. The Hypervisor authenticates against the Controller's `/api/auth/login`, then self-registers at `/api/hyp/nodes/register`
-4. The node appears in the **Hypervisor** tab of the Controller web UI
+```bash
+curl -sSL https://raw.githubusercontent.com/santiagotoro2023/nexis-controller/main/uninstall-nexis-controller.sh | sudo bash
+```
 
-From that point, all logins to the Hypervisor node are proxied to the Controller — no separate per-node passwords.
+The script prompts individually about what to keep or remove:
+- Voice models
+- Ollama models
+- Registered devices
+- Memories
+- Chat history
+- Config directory
+
+Each item can be preserved independently.
 
 ---
 
-## Web UI Sections
+## Service Management
 
-| Section | Description |
-|---------|-------------|
-| Chat | AI conversation with streaming output |
-| Remote | Remote desktop control for connected Worker devices |
-| History | Per-user conversation history with per-session Delete button (admin can filter by user) |
-| Memory | Persistent memory entries with auto-extraction and keyword search (admin can filter by user) |
-| Schedules | Automated tasks and briefings |
-| Devices | Connected Workers and Hypervisors with noVNC SCREEN button per device (admin can filter by user) |
-| Hypervisor | Aggregate VM/container view and live metrics across all nodes |
-| Tools & Capabilities | Built-in capability list + CRUD for custom shell/Python/HTTP tools — **admin only** |
-| Users | User management — admin only |
-| Status | Service health, version, and one-click software update |
+```bash
+# View real-time logs
+journalctl -u nexis-controller -f
+
+# Check service status
+systemctl status nexis-controller
+
+# Restart the service
+systemctl restart nexis-controller
+```
+
+The service unit is installed at `/etc/systemd/system/nexis-controller.service`.
