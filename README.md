@@ -7,13 +7,11 @@ The intelligence layer of the NeXiS ecosystem. A self-hosted AI assistant and ce
 ## Ecosystem
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  NeXiS Controller   — you are here · intelligence layer      │
-│    ↕ SSO / authenticated API + LLM tool calls                │
-│  NeXiS Hypervisor   — one per compute node                   │
-└──────────────────────────────────────────────────────────────┘
+NeXiS Controller  — central intelligence · SSO · management plane  ← you are here
+        ↕ authenticated API + LLM tool calls
+NeXiS Hypervisor  — one per compute node
         ↑
-  NeXiS Worker  — Android / desktop client
+NeXiS Worker      — Android / Linux desktop client
 ```
 
 | Repo | Role |
@@ -36,10 +34,9 @@ Workers and Hypervisors authenticate against the Controller. One set of credenti
 - Hypervisor tool calls: the LLM can start, stop, create, snapshot, and inspect VMs on any paired hypervisor node, directly from conversation
 
 **Web UI**
-- Dark-themed, professional interface with inline SVG icons throughout
+- Dark-themed, monospace interface with inline SVG icons throughout
 - Sections: Chat, Remote, History, Memory, Schedules, Devices, Hypervisor, Users, Status
 - Software update via the Status page — async background download, live progress polling
-- Custom-styled role dropdown; no native browser chrome
 
 **SSO — Single Sign-On**
 - Authenticate once; credentials are valid across hypervisor nodes and Workers
@@ -47,7 +44,7 @@ Workers and Hypervisors authenticate against the Controller. One set of credenti
 - Workers connect with the same Controller URL, username, and password
 
 **Hypervisor Integration**
-- Pair one or more NeXiS Hypervisor nodes (they self-register on setup)
+- Pair one or more NeXiS Hypervisor nodes (they self-register during their setup wizard)
 - Aggregate VM and container view across all nodes
 - Live resource metrics from all nodes
 - Issue VM power actions from the Controller or via LLM tool calls
@@ -122,31 +119,75 @@ Updates can be applied from the **Status** page in the web UI (Check & Update bu
 
 ---
 
+## CLI
+
+The `nexis` command is installed to `/usr/local/bin/nexis` and provides quick service management from the terminal:
+
+```bash
+nexis --status      # service and web UI status
+nexis --start       # start the service
+nexis --stop        # stop the service
+nexis --restart     # restart the service
+nexis --logs [n]    # tail the last n lines of the journal (default 50)
+nexis --web         # open the web UI in a browser
+nexis               # interactive session (requires socat)
+```
+
+---
+
 ## API
 
-All endpoints require `Authorization: Bearer <token>` unless marked public.
+All endpoints require `Authorization: Bearer <token>` unless marked **public**.
+
+### Auth
 
 | Endpoint | Description |
 |----------|-------------|
 | `POST /api/auth/login` | Authenticate; returns session token (public) |
-| `GET /api/health` | Service status (public) |
+| `GET /api/health` | Service liveness check (public) |
+
+### AI
+
+| Endpoint | Description |
+|----------|-------------|
 | `POST /api/chat` | AI conversation (SSE streaming) |
 | `GET /api/models` | List available Ollama models |
 | `POST /api/model` | Switch active model |
-| `GET /api/devices` | List registered Worker clients |
-| `POST /api/device/register` | Register a Worker client |
-| `GET /api/sync` | Real-time cross-device state (SSE) |
 | `GET /api/history` | Conversation history |
 | `GET /api/memories` | Persistent memory entries |
+
+### Devices & Sync
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/devices` | List registered Worker clients |
+| `POST /api/device/register` | Register a Worker client (public) |
+| `GET /api/sync` | Real-time cross-device state (SSE) |
+
+### Hypervisor Integration
+
+| Endpoint | Description |
+|----------|-------------|
 | `GET /api/hyp/nodes` | List paired hypervisor nodes |
 | `POST /api/hyp/nodes` | Manually add a hypervisor node |
-| `POST /api/hyp/nodes/register` | Hypervisor self-registration |
-| `GET /api/hyp/vms` | All VMs across all nodes |
+| `POST /api/hyp/nodes/register` | Hypervisor self-registration (public) |
+| `DELETE /api/hyp/nodes/{id}` | Remove a paired node |
+| `GET /api/hyp/vms` | All VMs across all paired nodes |
 | `GET /api/hyp/metrics` | Live metrics from all nodes |
-| `POST /api/hyp/nodes/{id}/vms/{vm_id}/{action}` | VM power action |
-| `GET /api/ha/*` | Home Assistant bridge |
+| `POST /api/hyp/nodes/{id}/vms/{vm_id}/{action}` | VM power action on a specific node |
+
+### Automation & Integrations
+
+| Endpoint | Description |
+|----------|-------------|
 | `GET /api/schedules` | Automation schedules |
+| `GET /api/ha/*` | Home Assistant bridge |
 | `POST /api/exec` | Remote code execution |
+
+### System
+
+| Endpoint | Description |
+|----------|-------------|
 | `POST /api/update` | Start background software update |
 | `GET /api/update/status` | Poll update progress |
 
@@ -155,7 +196,7 @@ All endpoints require `Authorization: Bearer <token>` unless marked public.
 ## Stack
 
 | Layer | Technology |
-|-------|-----------|
+|-------|------------|
 | Daemon | Python 3.11 · stdlib `http.server` · `ThreadingMixIn` |
 | LLM | Ollama (local inference) |
 | Voice | Piper TTS (GLaDOS model) · Faster-Whisper STT |
