@@ -1,12 +1,12 @@
 # Nexis Controller — Release Pipeline
-# Builds: .deb package
-# Triggered on: version tags (v1.0.0, v1.2.3, …)
-# Uniform versioning with nexis-hypervisor and nexis-worker.
+# Triggered on: VERSION file bump on main, version tags, or workflow_dispatch.
 
 name: Release
 
 on:
   push:
+    branches: [main]
+    paths: ['VERSION']
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
@@ -15,9 +15,6 @@ on:
         description: 'Version (e.g. 1.0.0)'
         required: true
         default: '1.0.0'
-
-env:
-  NEXIS_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', inputs.version) }}
 
 jobs:
   build-deb:
@@ -32,8 +29,15 @@ jobs:
       - name: Extract version
         id: ver
         run: |
-          V="${{ env.NEXIS_VERSION }}"
-          echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            V="${{ inputs.version }}"
+          else
+            V=$(cat VERSION | tr -d 'v \n')
+          fi
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${V}" >> "$GITHUB_OUTPUT"
 
       - name: Build .deb
         env:
@@ -89,22 +93,22 @@ jobs:
       - name: Generate release notes
         id: notes
         run: |
-          VERSION="${{ env.NEXIS_VERSION }}"
+          VERSION="v${{ steps.ver.outputs.version }}"
           cat > notes.md << EOF
           ## Nexis Controller ${VERSION}
 
           ### Artefacts
           | File | Description |
           |------|-------------|
-          | \`nexis-controller_${VERSION#v}_amd64.deb\` | Debian package for Debian 12 systems |
+          | \`nexis-controller_${{ steps.ver.outputs.version }}_amd64.deb\` | Debian package for Debian 12 systems |
 
           ### Install
           \`\`\`bash
-          curl -sSL https://raw.githubusercontent.com/santiagotoro2023/nexis-controller/main/install.sh | sudo bash
+          curl -sSL https://raw.githubusercontent.com/santiagotoro2023/nexis-controller/main/install-nexis-controller.sh | sudo bash
           \`\`\`
           Or install the .deb directly:
           \`\`\`bash
-          sudo dpkg -i nexis-controller_${VERSION#v}_amd64.deb
+          sudo dpkg -i nexis-controller_${{ steps.ver.outputs.version }}_amd64.deb
           \`\`\`
 
           Access the web UI at \`https://<host-ip>:8443\` and complete the setup wizard.
@@ -116,10 +120,10 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.NEXIS_VERSION }}
-          name: "NeXiS Controller ${{ env.NEXIS_VERSION }}"
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: "NeXiS Controller v${{ steps.ver.outputs.version }}"
           body_path: notes.md
           files: |
             nexis-controller_${{ steps.ver.outputs.version }}_amd64.deb
           draft: false
-          prerelease: ${{ contains(env.NEXIS_VERSION, '-') }}
+          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
