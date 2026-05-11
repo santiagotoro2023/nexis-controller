@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NeXiS Controller — Build 1.0.28"""
+"""NeXiS Controller — Build 1.0.29"""
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
@@ -233,8 +233,11 @@ def _auth_check(password: str) -> bool:
 
 def _auth_set_password(new_password: str):
     creds = _auth_load()
-    creds['hash'] = hashlib.sha256(new_password.encode()).hexdigest()
+    new_hash = hashlib.sha256(new_password.encode()).hexdigest()
+    creds['hash'] = new_hash
     AUTH_FILE.write_text(json.dumps(creds, indent=2))
+    # Keep users.json in sync so the login form (_user_check) sees the new password
+    _user_set_password(creds.get('username', 'creator'), new_password)
 
 def _setup_done() -> bool:
     try:
@@ -6071,7 +6074,7 @@ def _shell(content, active='chat', role='admin'):
         "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='opacity:0.7;flex-shrink:0'><path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/><polyline points='16 17 21 12 16 7'/><line x1='21' y1='12' x2='9' y2='12'/></svg>"
         '<span>Logout</span>'
         '</a>'
-        '<div class=sb-version>Build 1.0.28</div>'
+        '<div class=sb-version>Build 1.0.29</div>'
         '</div>'
         '</div>'
         f'<div class=main>{content}</div>'
