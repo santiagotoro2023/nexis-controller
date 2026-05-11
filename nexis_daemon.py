@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NeXiS Controller — Build 1.0.25"""
+"""NeXiS Controller — Build 1.0.26"""
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
@@ -5603,6 +5603,8 @@ _IC_DEVICES  = _svg(16,16,"<rect x='2' y='3' width='20' height='14' rx='2'/><lin
 _IC_HYPERV   = _svg(16,16,"<rect x='2' y='2' width='20' height='14' rx='2'/><path d='M8 21h8M12 17v4'/><path d='M7 7h.01M12 7h5M7 11h10'/>")
 _IC_USERS    = _svg(16,16,"<path d='M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'/><circle cx='9' cy='7' r='4'/><path d='M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75'/>")
 _IC_STATUS   = _svg(16,16,"<line x1='18' y1='20' x2='18' y2='10'/><line x1='12' y1='20' x2='12' y2='4'/><line x1='6' y1='20' x2='6' y2='14'/>")
+_IC_COMMANDS = _svg(16,16,"<polyline points='4 17 10 11 4 5'/><line x1='12' y1='19' x2='20' y2='19'/>")
+_IC_PERSONA  = _svg(16,16,"<circle cx='12' cy='12' r='3'/><path d='M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41'/>")
 
 _IC_BRAIN    = _svg(18,18,"<path d='M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-1.07-3 2.5 2.5 0 0 1-.62-3.97A3 3 0 0 1 5 8.5a3 3 0 0 1 4.5-2.6'/><path d='M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 1.07-3 2.5 2.5 0 0 0 .62-3.97A3 3 0 0 0 19 8.5a3 3 0 0 0-4.5-2.6'/>")
 _IC_DATABASE = _svg(18,18,"<ellipse cx='12' cy='5' rx='9' ry='3'/><path d='M21 12c0 1.66-4 3-9 3s-9-1.34-9-3'/><path d='M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5'/>")
@@ -6058,8 +6060,8 @@ def _shell(content, active='chat', role='admin'):
         ('schedules',  _IC_SCHEDULE, 'Schedules'),
         ('devices',    _IC_DEVICES,  'Devices'),
         ('hypervisor', _IC_HYPERV,   'Hypervisor'),
-        ('commands',   '&#9881;',    'Commands'),
-        ('personality', '&#10022;', 'Personality'),
+        ('commands',   _IC_COMMANDS, 'Commands'),
+        ('personality', _IC_PERSONA,  'Personality'),
         ('users',      _IC_USERS,    'Users'),
         ('status',     _IC_STATUS,   'Status'),
     ]
@@ -6096,7 +6098,7 @@ def _shell(content, active='chat', role='admin'):
         "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='opacity:0.7;flex-shrink:0'><path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/><polyline points='16 17 21 12 16 7'/><line x1='21' y1='12' x2='9' y2='12'/></svg>"
         '<span>Logout</span>'
         '</a>'
-        '<div class=sb-version>Build 1.0.25</div>'
+        '<div class=sb-version>Build 1.0.26</div>'
         '</div>'
         '</div>'
         f'<div class=main>{content}</div>'
@@ -8216,85 +8218,117 @@ def _page_commands(db, role='user', username=None):
     ).fetchall()
     conn.close()
 
-    builtin_html = ''.join(
-        f'<tr><td style="color:#A5D6A7;font-family:monospace">{name}</td>'
-        f'<td style="color:#B0BEC5">{desc}</td>'
-        f'<td><span style="color:#42A5F5;font-size:10px">BUILT-IN</span></td></tr>'
-        for name, desc in _BUILTIN_CAPABILITIES
-    )
-
-    def _ct_row(r):
-        ellipsis = '...' if len(r[4]) > 60 else ''
-        lbl = 'DISABLE' if r[5] else 'ENABLE'
+    def _cap_row(name, desc):
+        is_tag = name.startswith('[')
+        name_col = (
+            f"<code style='color:var(--or3);font-size:11px'>{name}</code>"
+            if is_tag else
+            f"<code style='color:var(--fg);font-size:11px'>{name}</code>"
+        )
+        type_badge = "<span class='badge ok'>TAG</span>" if is_tag else "<span class='badge off'>AUTO</span>"
         return (
-            f'<tr>'
-            f'<td style="color:#FFD54F;font-family:monospace">{r[1]}</td>'
-            f'<td style="color:#B0BEC5">{r[2]}</td>'
-            f'<td><span style="color:#FF8A65;font-size:10px">{r[3].upper()}</span></td>'
-            f'<td style="font-family:monospace;font-size:11px;color:#78909C">{r[4][:60]}{ellipsis}</td>'
-            f'<td>'
-            f'<button onclick="toggleTool(\'{r[0]}\',{1 - r[5]})" style="background:none;border:1px solid #546E7A;color:#90A4AE;padding:2px 8px;cursor:pointer;font-size:10px">{lbl}</button> '
-            f'<button onclick="deleteTool(\'{r[0]}\')" style="background:none;border:1px solid #EF5350;color:#EF5350;padding:2px 8px;cursor:pointer;font-size:10px">DEL</button>'
-            f'</td></tr>'
+            "<div style='display:grid;grid-template-columns:220px 1fr 56px;align-items:center;"
+            "padding:8px 14px;border-bottom:1px solid var(--border);gap:12px'>"
+            + name_col
+            + f"<span style='color:var(--fg2);font-size:11px'>{desc}</span>"
+            + type_badge
+            + "</div>"
         )
 
-    custom_html = ''.join(_ct_row(r) for r in custom_rows) or '<tr><td colspan="5" style="color:#546E7A;padding:12px">No custom tools yet.</td></tr>'
+    builtin_html = ''.join(_cap_row(n, d) for n, d in _BUILTIN_CAPABILITIES)
+
+    def _ct_row(r):
+        ellipsis = '...' if len(r[4]) > 55 else ''
+        enabled_badge = "<span class='badge ok'>ON</span>" if r[5] else "<span class='badge off'>OFF</span>"
+        type_color = {'shell': 'var(--or)', 'python': 'var(--blue)', 'http': 'var(--green)'}.get(r[3], 'var(--fg2)')
+        lbl = 'DISABLE' if r[5] else 'ENABLE'
+        return (
+            "<div style='display:grid;grid-template-columns:160px 1fr 60px 1fr 110px;align-items:center;"
+            "padding:8px 14px;border-bottom:1px solid var(--border);gap:12px'>"
+            f"<code style='color:var(--or3);font-size:11px'>{r[1]}</code>"
+            f"<span style='color:var(--fg2);font-size:11px'>{r[2]}</span>"
+            f"<span style='color:{type_color};font-size:10px;text-transform:uppercase;letter-spacing:.06em'>{r[3]}</span>"
+            f"<code style='color:var(--fg2);font-size:10px;opacity:.7'>{r[4][:55]}{ellipsis}</code>"
+            "<span style='display:flex;gap:6px'>"
+            f"<button onclick=\"toggleTool('{r[0]}',{1 - r[5]})\" class='btn-ghost' style='padding:3px 8px;font-size:10px;border-radius:8px'>{lbl}</button>"
+            f"<button onclick=\"deleteTool('{r[0]}')\" style='background:transparent;border:1px solid var(--red);color:var(--red);"
+            "padding:3px 8px;font-size:10px;border-radius:8px;cursor:pointer;font-family:var(--font);letter-spacing:.06em;text-transform:uppercase'>DEL</button>"
+            "</span></div>"
+        )
+
+    custom_html = (
+        ''.join(_ct_row(r) for r in custom_rows) or
+        "<div style='padding:14px;color:var(--fg2);font-size:11px'>No custom tools yet.</div>"
+    )
 
     page_js = (
         '<script>'
         'function addTool(){'
-        'var n=document.getElementById(\'tn\').value.trim(),'
-        'd=document.getElementById(\'td\').value.trim(),'
-        't=document.getElementById(\'tt\').value,'
-        'c=document.getElementById(\'tc\').value.trim();'
-        'if(!n||!c){alert(\'Name and command are required\');return;}'
-        'fetch(\'/api/commands\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},'
-        'body:JSON.stringify({action:\'create\',name:n,description:d,command_type:t,command:c})})'
+        "var n=document.getElementById('tn').value.trim(),"
+        "d=document.getElementById('td').value.trim(),"
+        "t=document.getElementById('tt').value,"
+        "c=document.getElementById('tc').value.trim();"
+        "if(!n||!c){alert('Name and command are required');return;}"
+        "fetch('/api/commands',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({action:'create',name:n,description:d,command_type:t,command:c})})"
         '.then(r=>r.json()).then(()=>location.reload());}'
         'function deleteTool(id){'
-        'if(!confirm(\'Delete tool?\'))return;'
-        'fetch(\'/api/commands\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},'
-        'body:JSON.stringify({action:\'delete\',id:id})}).then(()=>location.reload());}'
+        "if(!confirm('Delete tool?'))return;"
+        "fetch('/api/commands',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({action:'delete',id:id})}).then(()=>location.reload());}"
         'function toggleTool(id,en){'
-        'fetch(\'/api/commands\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},'
-        'body:JSON.stringify({action:\'toggle\',id:id,enabled:en})}).then(()=>location.reload());}'
+        "fetch('/api/commands',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({action:'toggle',id:id,enabled:en})}).then(()=>location.reload());}"
         '</script>'
     )
 
+    hdr_style = "style='color:var(--fg2);font-size:9px;text-transform:uppercase;letter-spacing:.12em'"
     body = (
-        '<div style="padding:24px;max-width:1100px">'
-        '<h2 style="color:#E0E0E0;font-family:monospace;margin-bottom:4px">TOOLS &amp; CAPABILITIES</h2>'
-        '<p style="color:#546E7A;font-size:12px">Manage what Nexis can do. Built-in capabilities are always available.</p>'
-        '<h3 style="color:#90A4AE;font-family:monospace;margin-top:24px">Built-in Capabilities</h3>'
-        '<table style="width:100%;border-collapse:collapse;background:#1A1A2E">'
-        '<thead><tr style="color:#546E7A;font-size:11px;text-align:left;border-bottom:1px solid #263238">'
-        '<th style="padding:8px">NAME</th><th style="padding:8px">DESCRIPTION</th><th style="padding:8px">TYPE</th>'
-        '</tr></thead>'
-        f'<tbody>{builtin_html}</tbody>'
-        '</table>'
-        '<h3 style="color:#90A4AE;font-family:monospace;margin-top:24px">Custom Tools</h3>'
-        '<table style="width:100%;border-collapse:collapse;background:#1A1A2E;margin-bottom:16px">'
-        '<thead><tr style="color:#546E7A;font-size:11px;text-align:left;border-bottom:1px solid #263238">'
-        '<th style="padding:8px">NAME</th><th style="padding:8px">DESCRIPTION</th>'
-        '<th style="padding:8px">TYPE</th><th style="padding:8px">COMMAND</th><th style="padding:8px">ACTIONS</th>'
-        '</tr></thead>'
-        f'<tbody>{custom_html}</tbody>'
-        '</table>'
-        '<div style="background:#1A1A2E;padding:16px;border:1px solid #263238">'
-        '<h4 style="color:#90A4AE;font-family:monospace;margin:0 0 12px">Add Custom Tool</h4>'
-        '<div style="display:grid;grid-template-columns:1fr 2fr;gap:8px;margin-bottom:8px">'
-        '<input id="tn" placeholder="Tool name (e.g. ping_host)" style="background:#0D0D1A;color:#E0E0E0;border:1px solid #37474F;padding:6px 10px">'
-        '<input id="td" placeholder="Description" style="background:#0D0D1A;color:#E0E0E0;border:1px solid #37474F;padding:6px 10px">'
+        '<div class=page-head>Tools &amp; Capabilities</div>'
+        '<div class=page>'
+
+        '<div class=card style="margin-bottom:16px">'
+        '<div class=card-head>Built-in Capabilities</div>'
+        "<div style='color:var(--fg2);font-size:10px;padding:8px 14px;border-bottom:1px solid var(--border);letter-spacing:.06em'>"
+        'Always available. The AI uses these automatically or when invoked by tag.</div>'
+        f"<div style='display:grid;grid-template-columns:220px 1fr 56px;padding:6px 14px;border-bottom:1px solid var(--border)'>"
+        f"<span {hdr_style}>Name / Tag</span><span {hdr_style}>Description</span><span {hdr_style}>Type</span>"
+        "</div>"
+        + builtin_html +
         '</div>'
-        '<div style="display:grid;grid-template-columns:120px 1fr 100px;gap:8px">'
-        '<select id="tt" style="background:#0D0D1A;color:#E0E0E0;border:1px solid #37474F;padding:6px">'
-        '<option value="shell">Shell</option><option value="python">Python</option><option value="http">HTTP</option>'
-        '</select>'
-        '<input id="tc" placeholder="Command template" style="background:#0D0D1A;color:#E0E0E0;border:1px solid #37474F;padding:6px 10px">'
-        '<button onclick="addTool()" style="background:#1E3A5F;color:#90CAF9;border:1px solid #1565C0;cursor:pointer">ADD TOOL</button>'
+
+        '<div class=card style="margin-bottom:16px">'
+        '<div class=card-head>Custom Tools</div>'
+        "<div style='color:var(--fg2);font-size:10px;padding:8px 14px;border-bottom:1px solid var(--border);letter-spacing:.06em'>"
+        "Admin-configured tools. The AI calls them as <code style='color:var(--or3)'>[TOOL:name|arg]</code></div>"
+        + custom_html +
         '</div>'
-        '<p style="color:#546E7A;font-size:11px;margin-top:8px">Tip: The AI will see all enabled custom tools and can call them by name.</p>'
+
+        '<div class=card>'
+        '<div class=card-head>Add Custom Tool</div>'
+        '<div class=card-body>'
+        '<div style="display:grid;grid-template-columns:1fr 2fr;gap:10px;margin-bottom:10px">'
+        '<div><label class=lbl>Tool Name</label>'
+        '<input id="tn" class=inp placeholder="e.g. ping_host"></div>'
+        '<div><label class=lbl>Description</label>'
+        '<input id="td" class=inp placeholder="What this tool does"></div>'
+        '</div>'
+        '<div style="display:grid;grid-template-columns:140px 1fr 120px;gap:10px;align-items:end">'
+        '<div><label class=lbl>Type</label>'
+        '<select id="tt" class=inp style="cursor:pointer">'
+        '<option value="shell">Shell</option>'
+        '<option value="python">Python</option>'
+        '<option value="http">HTTP</option>'
+        '</select></div>'
+        '<div><label class=lbl>Command <span style="color:var(--fg2);font-weight:400;letter-spacing:0;text-transform:none">(use {arg} for argument)</span></label>'
+        '<input id="tc" class=inp placeholder="e.g. ping -c 1 {arg}"></div>'
+        '<button onclick="addTool()" class=btn-primary style="width:auto;padding:10px 20px">Add Tool</button>'
+        '</div>'
+        "<p style='color:var(--fg2);font-size:10px;margin-top:10px;letter-spacing:.04em'>"
+        "Enabled tools are listed in the AI's system prompt and callable as <code style='color:var(--or3)'>[TOOL:name|arg]</code>.</p>"
         '</div></div>'
+
+        '</div>'
     )
     return _shell(body + page_js, active='commands', role=role)
 
@@ -8342,76 +8376,100 @@ def _page_personality(role='user'):
     if role != 'admin':
         return '<h2>Access denied</h2>'
     cfg = _load_personality_config()
+    import html as _html
     creator_username = _auth_load().get('username', 'creator')
+    name_val   = _html.escape(cfg['name'])
+    style_val  = _html.escape(cfg['style'])
+    base_val   = _html.escape(cfg['base_prompt'])
+    custom_val = _html.escape(cfg['custom_instructions'])
 
-    page_js = """
-<script>
-function savePers(){
-  var d={
-    name: document.getElementById('pname').value.trim() || 'NeXiS',
-    style: document.getElementById('pstyle').value.trim(),
-    base_prompt: document.getElementById('pbase').value.trim(),
-    custom_instructions: document.getElementById('pcustom').value.trim()
-  };
-  fetch('/api/personality',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'save',...d})})
-    .then(r=>r.json()).then(d=>{ if(d.ok) location.reload(); else alert('Error: '+d.error); });
-}
-function resetPers(){
-  if(!confirm('Reset personality to factory defaults?')) return;
-  fetch('/api/personality',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'reset'})})
-    .then(r=>r.json()).then(()=>location.reload());
-}
-</script>
-"""
-    body = f"""
-<div style="padding:24px;max-width:900px">
-  <h2 style="color:#E0E0E0;font-family:monospace;margin-bottom:4px">PERSONALITY CONFIGURATION</h2>
-  <p style="color:#546E7A;font-size:12px">Configure how NeXiS presents itself. Changes take effect immediately on next message. Creator account: <span style="color:#FFD54F">{creator_username}</span></p>
+    page_js = (
+        '<script>'
+        'function autoResize(el){el.style.height="auto";el.style.height=(el.scrollHeight+2)+"px";}'
+        'document.addEventListener("DOMContentLoaded",function(){'
+        'document.querySelectorAll("textarea.auto").forEach(function(t){'
+        'autoResize(t);t.addEventListener("input",function(){autoResize(t);});});});'
+        'function savePers(){'
+        'var d={'
+        'name:document.getElementById("pname").value.trim()||"NeXiS",'
+        'style:document.getElementById("pstyle").value.trim(),'
+        'base_prompt:document.getElementById("pbase").value.trim(),'
+        'custom_instructions:document.getElementById("pcustom").value.trim()'
+        '};'
+        "fetch('/api/personality',{method:'POST',headers:{'Content-Type':'application/json'},"
+        'body:JSON.stringify({action:"save",...d})})'
+        '.then(r=>r.json()).then(function(d){'
+        'if(d.ok){'
+        'var b=document.getElementById("save-btn");'
+        'b.textContent="Saved";b.style.background="var(--green)";'
+        'setTimeout(function(){b.textContent="Save Changes";b.style.background="";},2000);'
+        '}else alert("Error: "+d.error);});}'
+        'function resetPers(){'
+        "if(!confirm('Reset personality to factory defaults?'))return;"
+        "fetch('/api/personality',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({action:'reset'})})"
+        '.then(r=>r.json()).then(function(){location.reload();});}'
+        '</script>'
+    )
 
-  <div style="display:grid;gap:16px;margin-top:20px">
+    body = (
+        '<div class=page-head>Personality Configuration</div>'
+        '<div class=page>'
 
-    <div>
-      <label style="color:#90A4AE;font-size:11px;font-family:monospace">AI NAME</label>
-      <input id="pname" value="{cfg['name']}" style="display:block;width:100%;margin-top:4px;background:#0D0D1A;color:#E0E0E0;border:1px solid #37474F;padding:8px 10px;font-family:monospace;box-sizing:border-box">
-      <span style="color:#546E7A;font-size:10px">How NeXiS refers to itself. Default: NeXiS</span>
-    </div>
+        '<div class=card style="margin-bottom:16px">'
+        '<div class=card-head>AI Identity &amp; Voice</div>'
+        f'<div class=card-body style="display:grid;gap:18px">'
 
-    <div>
-      <label style="color:#90A4AE;font-size:11px;font-family:monospace">PERSONALITY STYLE</label>
-      <textarea id="pstyle" rows="4" style="display:block;width:100%;margin-top:4px;background:#0D0D1A;color:#E0E0E0;border:1px solid #37474F;padding:8px 10px;font-family:monospace;box-sizing:border-box;resize:vertical">{cfg['style']}</textarea>
-      <span style="color:#546E7A;font-size:10px">Core personality voice injected per message. This shapes tone and character.</span>
-    </div>
+        '<div>'
+        '<label class=lbl>AI Name</label>'
+        f'<input id="pname" class=inp value="{name_val}" style="max-width:300px">'
+        '<p style="color:var(--fg2);font-size:10px;margin-top:5px;letter-spacing:.04em">How NeXiS refers to itself in responses. Default: NeXiS</p>'
+        '</div>'
 
-    <div>
-      <label style="color:#90A4AE;font-size:11px;font-family:monospace">BASE SYSTEM PROMPT</label>
-      <textarea id="pbase" rows="5" style="display:block;width:100%;margin-top:4px;background:#0D0D1A;color:#E0E0E0;border:1px solid #37474F;padding:8px 10px;font-family:monospace;box-sizing:border-box;resize:vertical">{cfg['base_prompt']}</textarea>
-      <span style="color:#546E7A;font-size:10px">Foundation description of NeXiS. Used as the base of the system prompt (personality.md equivalent).</span>
-    </div>
+        '<div>'
+        '<label class=lbl>Personality Style</label>'
+        f'<textarea id="pstyle" class="inp auto" style="resize:none;overflow:hidden;min-height:60px;line-height:1.6">{style_val}</textarea>'
+        '<p style="color:var(--fg2);font-size:10px;margin-top:5px;letter-spacing:.04em">Core voice and tone injected per message. Shapes how NeXiS communicates.</p>'
+        '</div>'
 
-    <div>
-      <label style="color:#90A4AE;font-size:11px;font-family:monospace">CUSTOM INSTRUCTIONS</label>
-      <textarea id="pcustom" rows="3" style="display:block;width:100%;margin-top:4px;background:#0D0D1A;color:#E0E0E0;border:1px solid #37474F;padding:8px 10px;font-family:monospace;box-sizing:border-box;resize:vertical">{cfg['custom_instructions']}</textarea>
-      <span style="color:#546E7A;font-size:10px">Extra instructions always appended to the system prompt (rules, knowledge, constraints).</span>
-    </div>
+        '<div>'
+        '<label class=lbl>Base System Prompt</label>'
+        f'<textarea id="pbase" class="inp auto" style="resize:none;overflow:hidden;min-height:80px;line-height:1.6">{base_val}</textarea>'
+        '<p style="color:var(--fg2);font-size:10px;margin-top:5px;letter-spacing:.04em">Foundation context. Defines what NeXiS fundamentally is (personality.md equivalent).</p>'
+        '</div>'
 
-    <div style="display:flex;gap:12px;margin-top:8px">
-      <button onclick="savePers()" style="background:#1E3A5F;color:#90CAF9;border:1px solid #1565C0;padding:8px 20px;cursor:pointer;font-family:monospace">SAVE CHANGES</button>
-      <button onclick="resetPers()" style="background:none;color:#EF9A9A;border:1px solid #C62828;padding:8px 20px;cursor:pointer;font-family:monospace">RESET TO DEFAULT</button>
-    </div>
+        '<div>'
+        '<label class=lbl>Custom Instructions <span style="color:var(--fg2);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>'
+        f'<textarea id="pcustom" class="inp auto" style="resize:none;overflow:hidden;min-height:40px;line-height:1.6">{custom_val}</textarea>'
+        '<p style="color:var(--fg2);font-size:10px;margin-top:5px;letter-spacing:.04em">Extra rules, facts, or constraints appended to every system prompt.</p>'
+        '</div>'
 
-    <div style="background:#0D0D1A;border:1px solid #263238;padding:12px;margin-top:8px">
-      <p style="color:#546E7A;font-size:11px;margin:0 0 8px">USER ADDRESSING (automatic — based on logged-in user):</p>
-      <p style="color:#B0BEC5;font-size:11px;margin:0">
-        <span style="color:#FFD54F">Creator ({creator_username})</span>: addressed as "Creator", subservient, deep curiosity about what the Creator wants/built/needs<br>
-        <span style="color:#90CAF9">Other users</span>: addressed by username, helpful per Creator directive, collegial curiosity about their goals and connection to Creator
-      </p>
-    </div>
-  </div>
-</div>
-{page_js}"""
-    return _shell(body, active='personality', role=role)
+        '<div style="display:flex;gap:10px;padding-top:4px">'
+        '<button id="save-btn" onclick="savePers()" class=btn-primary style="width:auto;padding:10px 24px;transition:background .3s">Save Changes</button>'
+        '<button onclick="resetPers()" class=btn-ghost>Reset to Default</button>'
+        '</div>'
+
+        '</div></div>'
+
+        '<div class=card>'
+        '<div class=card-head>User Addressing</div>'
+        '<div class=card-body>'
+        '<p style="color:var(--fg2);font-size:10px;letter-spacing:.06em;margin-bottom:12px">Automatic based on logged-in user. Not configurable here.</p>'
+        '<div style="display:grid;gap:10px">'
+        '<div style="display:flex;gap:14px;align-items:baseline">'
+        f'<code style="color:var(--or3);font-size:11px;flex-shrink:0;white-space:nowrap">Creator ({creator_username})</code>'
+        '<span style="color:var(--fg2);font-size:11px">Addressed as &ldquo;Creator&rdquo;. Subservient tone, deep curiosity about what the Creator wants, built, or needs.</span>'
+        '</div>'
+        '<div style="display:flex;gap:14px;align-items:baseline">'
+        '<code style="color:var(--fg);font-size:11px;flex-shrink:0;white-space:nowrap">Other users</code>'
+        '<span style="color:var(--fg2);font-size:11px">Addressed by username. Collegial helpfulness per Creator directive, curiosity about their goals and connection to Creator.</span>'
+        '</div>'
+        '</div>'
+        '</div></div>'
+
+        '</div>'
+    )
+    return _shell(body + page_js, active='personality', role=role)
 
 
 def _start_vnc_proxy(device_id, device_ip, vnc_port=5900):

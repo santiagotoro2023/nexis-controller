@@ -1,3 +1,7 @@
-faster-whisper>=1.1.0
+# NeXiS Controller Python dependencies
+# Core
+requests>=2.31.0
+# TTS
 piper-tts>=1.2.0
-requests>=2.32.0
+# VNC proxy (websockify proxies WebSocket -> raw TCP for noVNC)
+websockify>=0.11.0
