@@ -1,6 +1,6 @@
 # NeXiS Controller
 
-![Version](https://img.shields.io/badge/version-1.0.22-blue) ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey) ![LLM](https://img.shields.io/badge/LLM-Ollama%20local-green) ![TLS](https://img.shields.io/badge/TLS-self--signed%20TOFU-yellow)
+![Version](https://img.shields.io/badge/version-1.0.31-blue) ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey) ![LLM](https://img.shields.io/badge/LLM-Ollama%20local-green) ![TLS](https://img.shields.io/badge/TLS-self--signed%20TOFU-yellow)
 
 The intelligence layer of the NeXiS ecosystem. A self-hosted AI assistant and central management plane that runs on a dedicated Linux host. It manages NeXiS Hypervisor nodes and NeXiS Worker clients, provides SSO for the entire ecosystem, and exposes a single authenticated HTTPS endpoint for everything.
 
@@ -459,6 +459,13 @@ All endpoints require `Authorization: Bearer <token>` or a valid `nexis_sess` co
 | `POST` | `/api/commands` | Create a custom tool (admin) |
 | `PUT` | `/api/commands/{id}` | Update a custom tool (admin) |
 | `DELETE` | `/api/commands/{id}` | Delete a custom tool (admin) |
+
+### Worker Tools Feed
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/tools` | Fetch built-in and custom tools for Worker clients; includes enable/disable state per tool |
+| `POST` | `/api/tools` | Enable or disable a custom tool (`{ "action": "enable"\|"disable", "tool_id": id }`) |
 
 ### Personality
 
