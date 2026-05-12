@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NeXiS Controller — Build 1.0.31"""
+"""NeXiS Controller — Build 1.0.32"""
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
@@ -718,6 +718,18 @@ def _smart_chat(messages, temperature=0.75, num_ctx=None,
             result = retry
 
     return result, model
+
+def _ensure_default_models():
+    """Pull required default models (e.g. moondream) if not already installed."""
+    for model in [MODEL_VISION]:
+        if not _model_ok(model):
+            _log(f'Pulling default model: {model}')
+            try:
+                subprocess.run(['ollama', 'pull', model], check=True, timeout=600)
+                _log(f'Model ready: {model}')
+                _refresh_models()
+            except Exception as e:
+                _log(f'Failed to pull {model}: {e}', 'WARN')
 
 def _warmup():
     def _warm(label, model):
@@ -6074,7 +6086,7 @@ def _shell(content, active='chat', role='admin'):
         "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='opacity:0.7;flex-shrink:0'><path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/><polyline points='16 17 21 12 16 7'/><line x1='21' y1='12' x2='9' y2='12'/></svg>"
         '<span>Logout</span>'
         '</a>'
-        '<div class=sb-version>Build 1.0.31</div>'
+        '<div class=sb-version>Build 1.0.32</div>'
         '</div>'
         '</div>'
         f'<div class=main>{content}</div>'
@@ -10122,6 +10134,7 @@ def main():
     _seed_shared_history()
     _device_self_register()  # register controller PC in device inventory
     _refresh_models()
+    threading.Thread(target=_ensure_default_models, daemon=True, name='model-install').start()
     threading.Thread(target=_warmup,          daemon=True).start()
     threading.Thread(target=_warmup_whisper,  daemon=True, name='whisper-warmup').start()
     threading.Thread(target=_cli_tts_worker,  daemon=True, name='tts-cli').start()
