@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NeXiS Controller — Build 1.0.30"""
+"""NeXiS Controller — Build 1.0.31"""
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
@@ -6074,7 +6074,7 @@ def _shell(content, active='chat', role='admin'):
         "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='opacity:0.7;flex-shrink:0'><path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/><polyline points='16 17 21 12 16 7'/><line x1='21' y1='12' x2='9' y2='12'/></svg>"
         '<span>Logout</span>'
         '</a>'
-        '<div class=sb-version>Build 1.0.30</div>'
+        '<div class=sb-version>Build 1.0.31</div>'
         '</div>'
         '</div>'
         f'<div class=main>{content}</div>'
@@ -8499,6 +8499,19 @@ def _page_personality(role='user'):
     return _shell(body + page_js, active='personality', role=role)
 
 
+def _websockify_bin():
+    """Return path to websockify, preferring the venv alongside this Python."""
+    import shutil
+    # Try venv-relative first (same bin/ dir as the running Python)
+    venv_ws = Path(sys.executable).parent / 'websockify'
+    if venv_ws.exists():
+        return str(venv_ws)
+    found = shutil.which('websockify')
+    if found:
+        return found
+    # Last resort: run as a Python module
+    return None
+
 def _start_vnc_proxy(device_id, device_ip, vnc_port=5900):
     """Start a websockify subprocess to proxy WebSockets to VNC for a device."""
     with _vnc_lock:
@@ -8514,11 +8527,14 @@ def _start_vnc_proxy(device_id, device_ip, vnc_port=5900):
         s.bind(('', 0))
         ws_port = s.getsockname()[1]
         s.close()
+        ws_bin = _websockify_bin()
         try:
-            proc = subprocess.Popen(
-                ['websockify', str(ws_port), f'{device_ip}:{vnc_port}'],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
+            if ws_bin:
+                cmd = [ws_bin, str(ws_port), f'{device_ip}:{vnc_port}']
+            else:
+                # Fall back to python -m websockify
+                cmd = [sys.executable, '-m', 'websockify', str(ws_port), f'{device_ip}:{vnc_port}']
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
             return None
         _vnc_sessions[device_id] = {'ws_port': ws_port, 'proc': proc}
@@ -9002,6 +9018,25 @@ def _start_web():
                     cmds = [{'id': r['id'], 'action': r['action'], 'arg': r['arg']} for r in rows]
                     cdb.close()
                     self._send(200, json.dumps({'commands': cmds}), 'application/json')
+                elif path == '/api/personality':
+                    if not self._is_admin():
+                        self._send(403, json.dumps({'error': 'forbidden'}), 'application/json'); return
+                    cfg = _load_personality_config()
+                    self._send(200, json.dumps(cfg), 'application/json')
+                elif path == '/api/tools':
+                    if not self._is_admin():
+                        self._send(403, json.dumps({'error': 'forbidden'}), 'application/json'); return
+                    _tdb = _db()
+                    _custom = _tdb.execute(
+                        "SELECT id, name, description, command_type, command, enabled FROM tools ORDER BY created_at DESC"
+                    ).fetchall()
+                    _tdb.close()
+                    self._send(200, json.dumps({
+                        'builtin': [{'name': n, 'description': d} for n, d in _BUILTIN_CAPABILITIES],
+                        'custom': [{'id': r['id'], 'name': r['name'], 'description': r['description'],
+                                    'command_type': r['command_type'], 'command': r['command'],
+                                    'enabled': bool(r['enabled'])} for r in _custom],
+                    }), 'application/json')
                 elif path == '/api/schedules':
                     self._send(200, json.dumps({'schedules': _sched_load()}), 'application/json')
                 elif path == '/api/memories':
