@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NeXiS Controller — Build 1.0.32"""
+"""NeXiS Controller — Build 1.0.33"""
 
 import os, sys, json, sqlite3, threading, signal, re, base64, queue as _queue
 import socket as _socket, subprocess, urllib.request, urllib.parse
@@ -96,8 +96,14 @@ _embed_ok = None   # None=unchecked, True=available, False=unavailable
 _embed_lk = threading.Lock()
 
 # ── Shared conversation history (CLI + WebUI unified) ────────────────────────
-_shared_hist    = []
+_user_hists     = {}   # username -> list of message dicts (per-user in-memory history)
 _shared_lock    = threading.Lock()
+
+def _uhist(username='creator'):
+    """Return (and lazily create) per-user history list. Must be called under _shared_lock."""
+    if username not in _user_hists:
+        _user_hists[username] = []
+    return _user_hists[username]
 _daemon_start   = time.time()   # used by /api/health for uptime
 _update_state   = {'running': False, 'result': None, 'status': ''}
 
@@ -1403,11 +1409,11 @@ def _sched_execute(sched: dict):
         if not result:
             return
         header = f'[Scheduled: {name}]'
-        # Push to shared history so WebUI shows it
+        # Push to creator history so WebUI shows it
         with _shared_lock:
-            _shared_hist.append({'role': 'user',      'content': header})
-            _shared_hist.append({'role': 'assistant',  'content': result})
-        _maybe_summarize_history()
+            _uhist('creator').append({'role': 'user',      'content': header})
+            _uhist('creator').append({'role': 'assistant',  'content': result})
+        _maybe_summarize_history('creator')
         # Push to active CLI sessions
         OR  = '\x1b[38;5;208m'
         DIM = '\x1b[2m\x1b[38;5;240m'
@@ -2904,17 +2910,18 @@ def _search_doc_index(conn, query: str, limit: int = 5) -> list:
     scored.sort(key=lambda x: -x[0])
     return scored[:limit]
 
-def _maybe_summarize_history():
+def _maybe_summarize_history(username='creator'):
     """Non-blocking wrapper — runs the actual summarization on a daemon thread."""
-    threading.Thread(target=_do_summarize_history, daemon=True, name='hist-summarize').start()
+    threading.Thread(target=_do_summarize_history, args=(username,), daemon=True, name='hist-summarize').start()
 
-def _do_summarize_history():
-    """If shared history is too long, compress oldest messages into a summary."""
+def _do_summarize_history(username='creator'):
+    """If user history is too long, compress oldest messages into a summary."""
     with _shared_lock:
-        if len(_shared_hist) < 32:
+        h = _uhist(username)
+        if len(h) < 32:
             return
-        to_summarize = _shared_hist[:16]
-        del _shared_hist[:16]
+        to_summarize = h[:16]
+        del h[:16]
 
     # Build a summary prompt
     convo = '\n'.join(
@@ -2934,8 +2941,8 @@ def _do_summarize_history():
 
     if summary.strip():
         with _shared_lock:
-            _shared_hist.insert(0, {'role': 'system', 'content': f'[Earlier conversation summary]: {summary.strip()}'})
-        _log(f'History summarized: {len(to_summarize)} messages -> 1 summary')
+            _uhist(username).insert(0, {'role': 'system', 'content': f'[Earlier conversation summary]: {summary.strip()}'})
+        _log(f'History summarized ({username}): {len(to_summarize)} messages -> 1 summary')
 
 def _memories_search(conn, owner, query):
     """Keyword search across user's memories - used to inject relevant context."""
@@ -4494,14 +4501,14 @@ class Session:
             # Pre-research
             spinner.start('researching...')
             def on_status(msg): spinner.update(msg)
-            pre_ctx = _pre_research(user_msg, on_status, hist=_shared_hist)
+            pre_ctx = _pre_research(user_msg, on_status, hist=_uhist('creator'))
             spinner.stop()
 
             with _last_sources_lock: self._sources = list(_last_sources)
 
             with _shared_lock:
-                _shared_hist.append({'role': 'user', 'content': user_msg})
-                msgs = [{'role': 'system', 'content': _inject_memories(sys_p, self.db, user_msg)}] + list(_shared_hist[-30:])
+                _uhist('creator').append({'role': 'user', 'content': user_msg})
+                msgs = [{'role': 'system', 'content': _inject_memories(sys_p, self.db, user_msg)}] + list(_uhist('creator')[-30:])
             if pre_ctx:
                 msgs[-1] = {'role': 'user', 'content': user_msg + pre_ctx}
 
@@ -4578,8 +4585,8 @@ class Session:
             except Exception:
                 self._tx(f'\n{_OR2}  [Ollama not responding — run: sudo systemctl restart ollama]{RST}\n')
                 with _shared_lock:
-                    if _shared_hist and _shared_hist[-1]['role'] == 'user':
-                        _shared_hist.pop()
+                    if _uhist('creator') and _uhist('creator')[-1]['role'] == 'user':
+                        _uhist('creator').pop()
                 continue
 
             self._stream_abort.clear()
@@ -4623,15 +4630,15 @@ class Session:
             self._stream_abort.clear()
             if _aborted and not resp.strip():
                 with _shared_lock:
-                    if _shared_hist and _shared_hist[-1]['role'] == 'user':
-                        _shared_hist.pop()
+                    if _uhist('creator') and _uhist('creator')[-1]['role'] == 'user':
+                        _uhist('creator').pop()
                 continue
 
             if not resp.strip():
                 self._tx(f'{DIM}  [no response]{RST}\n')
                 with _shared_lock:
-                    if _shared_hist and _shared_hist[-1]['role'] == 'user':
-                        _shared_hist.pop()
+                    if _uhist('creator') and _uhist('creator')[-1]['role'] == 'user':
+                        _uhist('creator').pop()
                 continue
 
             def tool_status(msg): spinner.update(msg)
@@ -4707,7 +4714,7 @@ class Session:
                     _cli_tts_speak(brief)
                     clean = brief
                     with _shared_lock:
-                        _shared_hist.append({'role': 'assistant', 'content': clean})
+                        _uhist('creator').append({'role': 'assistant', 'content': clean})
                     _maybe_summarize_history()
                     try:
                         self.db.execute('INSERT INTO chat_history(session_id,role,content) VALUES(?,?,?)',
@@ -4774,7 +4781,7 @@ class Session:
 
             final = clean or resp
             with _shared_lock:
-                _shared_hist.append({'role': 'assistant', 'content': final})
+                _uhist('creator').append({'role': 'assistant', 'content': final})
             _maybe_summarize_history()
 
             # Persist
@@ -4875,7 +4882,7 @@ class Session:
             self._tx(f'\x1b[38;5;70m  memory cleared{_RST}\n')
 
         elif c == 'reset':
-            with _shared_lock: _shared_hist.clear()
+            with _shared_lock: _uhist('creator').clear()
             self._tx(f'\x1b[38;5;70m  conversation reset{_RST}\n')
 
         elif c == 'status':
@@ -5308,8 +5315,8 @@ class Session:
         with _cli_sessions_lk:
             try: _cli_sessions.remove(self)
             except ValueError: pass
-        if len(_shared_hist) >= 2:
-            threading.Thread(target=_store_memory, args=(_db(), list(_shared_hist)), daemon=True).start()
+        if len(_uhist('creator')) >= 2:
+            threading.Thread(target=_store_memory, args=(_db(), list(_uhist('creator'))), daemon=True).start()
         try:
             while True: _cli_tts_q.get_nowait()
         except _queue.Empty: pass
@@ -6086,7 +6093,7 @@ def _shell(content, active='chat', role='admin'):
         "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='opacity:0.7;flex-shrink:0'><path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/><polyline points='16 17 21 12 16 7'/><line x1='21' y1='12' x2='9' y2='12'/></svg>"
         '<span>Logout</span>'
         '</a>'
-        '<div class=sb-version>Build 1.0.32</div>'
+        '<div class=sb-version>Build 1.0.33</div>'
         '</div>'
         '</div>'
         f'<div class=main>{content}</div>'
@@ -7073,7 +7080,7 @@ def _page_setup():
 
 
 def _page_chat(role='user'):
-    with _shared_lock: hist = list(_shared_hist)
+    with _shared_lock: hist = list(_uhist('creator'))
     mh = ''
     for m in hist:
         who = 'Creator' if m['role'] == 'user' else 'NeXiS'
@@ -7223,7 +7230,7 @@ def _page_status(db, role='user'):
     with _cli_sessions_lk:
         cli_count = len(_cli_sessions)
     with _shared_lock:
-        hist_count = len(_shared_hist)
+        hist_count = len(_uhist('creator'))
     voice_st = ('on' if _voice_enabled() else 'off') + ' [' + _voice_model() + ']'
     stt_st   = ('on' if _stt_enabled() else 'off') + ' [' + _stt_mode() + ']'
     uptime_str = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -7640,7 +7647,7 @@ setInterval(function(){ if(_hvNode){ hvLoadMetrics(); hvLoadVMs(); hvLoadCTs(); 
 """, 'hypervisor', role)
 
 
-def _web_cmd(cmd) -> str:
+def _web_cmd(cmd, username="creator") -> str:
     """Execute a // slash command from the web API and return the result as a string."""
     global _model_override
     parts = cmd.split(); c = parts[0].lower() if parts else ''
@@ -7696,13 +7703,13 @@ def _web_cmd(cmd) -> str:
         lines = [f'Deleted {d} memories matching "{term}"']
 
     elif c == 'reset':
-        with _shared_lock: _shared_hist.clear()
-        with _shared_lock: hl = len(_shared_hist)
+        with _shared_lock: _uhist(username).clear()
+        with _shared_lock: hl = len(_uhist(username))
         _sync_broadcast({'typing': False, 'hist_len': hl})
         lines = ['Conversation reset. NeXiS still has its memories.']
 
     elif c == 'compact':
-        with _shared_lock: hist_copy = list(_shared_hist)
+        with _shared_lock: hist_copy = list(_uhist(username))
         if len(hist_copy) < 4:
             lines = ['Nothing to compact yet.']
         else:
@@ -7713,8 +7720,8 @@ def _web_cmd(cmd) -> str:
             summary = _stream_chat(summary_msgs, MODEL_FAST, 0.4, 4096)
             if summary:
                 with _shared_lock:
-                    _shared_hist.clear()
-                    _shared_hist.append({'role': 'assistant', 'content': f'[Compacted conversation summary]\n{summary}'})
+                    _uhist(username).clear()
+                    _uhist(username).append({'role': 'assistant', 'content': f'[Compacted conversation summary]\n{summary}'})
                 hl = 1
                 _sync_broadcast({'typing': False, 'hist_len': hl})
                 lines = [f'Conversation compacted.\n\n{summary}']
@@ -7871,14 +7878,14 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None, userna
     # Handle slash commands (// prefix) — return result directly without AI
     if msg and msg.startswith('//'):
         cmd_str = msg[2:].strip()
-        result  = _web_cmd(cmd_str)
+        result  = _web_cmd(cmd_str, username)
         _is_typing = True
         _sync_broadcast({'typing': True})
         # Store in history so sync reflects the exchange
         with _shared_lock:
-            _shared_hist.append({'role': 'user',      'content': msg})
-            _shared_hist.append({'role': 'assistant',  'content': result})
-        with _shared_lock: hl = len(_shared_hist)
+            _uhist(username).append({'role': 'user',      'content': msg})
+            _uhist(username).append({'role': 'assistant',  'content': result})
+        with _shared_lock: hl = len(_uhist(username))
         _web_chat_stream._last = (msg, result)
         _is_typing = False
         _sync_broadcast({'typing': False, 'hist_len': hl})
@@ -7916,7 +7923,7 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None, userna
 
     _is_typing = True
     _sync_broadcast({'typing': True})
-    with _shared_lock: hist = list(_shared_hist)
+    with _shared_lock: hist = list(_uhist(username))
     db = _db(); sys_p = _build_system(db)
     user_content = msg; images = None
     if file_data:
@@ -8156,11 +8163,11 @@ def _web_chat_stream(msg, file_data=None, file_type=None, file_name=None, userna
     final_text = clean or resp
     _web_chat_stream._last = (user_content, final_text)
     with _shared_lock:
-        _shared_hist.append({'role': 'user',      'content': user_content})
-        _shared_hist.append({'role': 'assistant',  'content': final_text})
+        _uhist(username).append({'role': 'user',      'content': user_content})
+        _uhist(username).append({'role': 'assistant',  'content': final_text})
     _maybe_summarize_history()
     _is_typing = False
-    with _shared_lock: hl = len(_shared_hist)
+    with _shared_lock: hl = len(_uhist(username))
     _sync_broadcast({'typing': False, 'hist_len': hl})
 
 
@@ -8773,7 +8780,7 @@ def _start_web():
                     self.end_headers()
                     try:
                         # Send current state immediately
-                        with _shared_lock: hl = len(_shared_hist)
+                        with _shared_lock: hl = len(_uhist(_cur_user))
                         init = json.dumps({'typing': _is_typing, 'hist_len': hl})
                         self.wfile.write(f'data: {init}\n\n'.encode()); self.wfile.flush()
                         while True:
@@ -8793,7 +8800,7 @@ def _start_web():
                 elif path == '/api/history':
                     # Returns shared conversation history (user+assistant only)
                     with _shared_lock:
-                        hist = [m for m in _shared_hist if m['role'] in ('user', 'assistant')]
+                        hist = [m for m in _uhist(_cur_user) if m['role'] in ('user', 'assistant')]
                     self._send(200, json.dumps({'history': hist}), 'application/json')
                 elif path == '/api/models':
                     with _model_override_lock: current = _model_override
@@ -8827,7 +8834,7 @@ def _start_web():
                     mc = _hdb.execute('SELECT COUNT(*) FROM memories').fetchone()[0]
                     sc = _hdb.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]
                     _hdb.close()
-                    with _shared_lock: hl = len(_shared_hist)
+                    with _shared_lock: hl = len(_uhist(_cur_user))
                     uptime_s = int(time.time() - _daemon_start)
                     self._send(200, json.dumps({
                         'model':       model,
@@ -8887,6 +8894,8 @@ def _start_web():
                     self._send(200, json.dumps({'devices': _devices_list(ddb, _api_devices_owner)}), 'application/json')
                     ddb.close()
                 elif path == '/api/device/passwords':
+                    if not self._is_admin():
+                        self._send(403, json.dumps({'error': 'Admin access required'}), 'application/json'); return
                     self._send(200, json.dumps(_dev_passwords_load()), 'application/json')
                 elif path == '/api/alarms':
                     adb = _db()
@@ -9107,6 +9116,8 @@ def _start_web():
                         text = None
                     self._send(200, json.dumps({'text': text}), 'application/json')
                 elif path == '/api/ha/config':
+                    if not self._is_admin():
+                        self._send(403, json.dumps({'error': 'Admin access required'}), 'application/json'); return
                     cfg = _INTEG.get('home_assistant', {})
                     self._send(200, json.dumps({
                         'url':             cfg.get('url', ''),
@@ -9424,7 +9435,7 @@ def _start_web():
 
                 elif path == '/api/clear':
                     global _is_typing
-                    with _shared_lock: _shared_hist.clear()
+                    with _shared_lock: _uhist(_cur_user).clear()
                     _is_typing = False
                     # Notify all sync subscribers that history is now empty
                     _sync_broadcast({'typing': False, 'hist_len': 0})
@@ -9585,11 +9596,11 @@ def _start_web():
                         ).fetchall()
                         ldb.close()
                         with _shared_lock:
-                            _shared_hist.clear()
+                            _uhist(_cur_user).clear()
                             for m in msgs:
                                 if m['role'] in ('user', 'assistant'):
-                                    _shared_hist.append({'role': m['role'], 'content': m['content']})
-                            hl = len(_shared_hist)
+                                    _uhist(_cur_user).append({'role': m['role'], 'content': m['content']})
+                            hl = len(_uhist(_cur_user))
                         _web_session_id = sid
                         _is_typing = False
                         _sync_broadcast({'typing': False, 'hist_len': hl})
@@ -10001,8 +10012,8 @@ def _start_web():
                     self._send(200, json.dumps({'ok': True, 'thresholds': _MONITOR_THRESHOLDS}), 'application/json')
 
                 elif path == '/api/clear':
-                    with _shared_lock: _shared_hist.clear()
-                    with _shared_lock: hl = len(_shared_hist)
+                    with _shared_lock: _uhist(_cur_user).clear()
+                    with _shared_lock: hl = len(_uhist(_cur_user))
                     _sync_broadcast({'typing': False, 'hist_len': hl})
                     self._send(200, json.dumps({'ok': True}), 'application/json')
 
@@ -10119,9 +10130,9 @@ def _seed_shared_history():
         db.close()
         if rows:
             with _shared_lock:
-                _shared_hist.clear()
+                _uhist('creator').clear()
                 for r in reversed(rows):
-                    _shared_hist.append({'role': r['role'], 'content': r['content']})
+                    _uhist('creator').append({'role': r['role'], 'content': r['content']})
             _log(f'Seeded {len(rows)} messages from chat history')
     except Exception as e:
         _log(f'Seed history: {e}', 'WARN')
