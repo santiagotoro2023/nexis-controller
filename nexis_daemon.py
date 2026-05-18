@@ -10,22 +10,3 @@ import shutil, mimetypes, io, wave, tempfile, time, hashlib, secrets, difflib, s
 import math, struct, uuid, platform
 from datetime import datetime
 from pathlib import Path
-
-HOME      = Path.home()
-CONF      = HOME / '.config/nexis'
-DATA      = HOME / '.local/share/nexis'
-DB_PATH   = DATA / 'memory' / 'nexis.db'
-SOCK_PATH = Path('/run/nexis/nexis.sock')
-LOG_PATH  = DATA / 'logs' / 'daemon.log'
-AUTH_FILE          = CONF / 'auth.json'
-USERS_FILE         = CONF / 'users.json'
-SCHED_FILE         = CONF / 'schedules.json'
-DEV_PASSWORDS_FILE = CONF / 'device_passwords.json'
-TLS_KEY    = CONF / 'server.key'
-TLS_CERT   = CONF / 'server.crt'
-
-(DATA / 'memory').mkdir(parents=True, exist_ok=True)
-(DATA / 'logs').mkdir(exist_ok=True)
-(DATA / 'state').mkdir(exist_ok=True)
-(DATA / 'voice').mkdir(exist_ok=True)
-CONF.mkdir(parents=True, exist_ok=True)
